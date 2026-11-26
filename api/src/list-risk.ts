@@ -13,6 +13,8 @@ import { LIST_RISK_FACTORS, type ListRiskFactor, type ListRiskLines } from './li
 //  - NEVER_MAILED: contacts never mailed (no delivery history and no tracked open or click).
 //  - LAST_SEND_BOUNCES, LAST_SEND_COMPLAINTS: the rates of the last campaign to this list.
 //  - RECENT_BLOCKLIST: replies naming a blocklist to this workspace's mail in the last RECENT_DAYS days.
+// Also recorded: soft-failing contacts and proven ones (delivered to before, or opened or clicked), so that how much a
+// list's history should outweigh how it was gathered can be judged from real reviews before anything acts on it.
 // A band (low, elevated, high) only with NIGHTMAIL_LIST_RISK set (src/list-risk-lines.ts): any factor over its high
 // line, or two over their elevated lines, is high; one is elevated. NEVER_MAILED is never high: a new opt-in list is all
 // never-mailed.
@@ -26,7 +28,7 @@ export type ListRisk = {
   version: 1; at: string; listId: string;
   /** Contacts read: all of them up to SAMPLE, else a uniform sample of SAMPLE. */
   sampled: number; exact: boolean;
-  counts: { flagged: number; deadDomains: number; unengaged: number; unengagedBase: number; neverMailed: number; softFailing: number; byReason: Record<Risk, number> };
+  counts: { flagged: number; deadDomains: number; unengaged: number; unengagedBase: number; neverMailed: number; softFailing: number; proven: number; byReason: Record<Risk, number> };
   lastSend: { campaignId: string; accepted: number; bounced: number; complained: number } | null;
   recentBlocklist: number;
   values: Partial<Record<ListRiskFactor, number>>;
@@ -56,7 +58,7 @@ export async function measureListRisk(db: DbExecutor, workspaceId: string, listI
       ORDER BY hashtextextended(m.contact_id, 0) LIMIT ${SAMPLE + 1}
     ), c AS MATERIALIZED (
       SELECT c.* FROM picked p CROSS JOIN LATERAL (
-        SELECT c.workspace_id, c.deleted_at, c.email, c.risk, c.mailed_count, c.first_mailed_at, c.observed_since, c.last_open_at, c.last_click_at, c.soft_failures
+        SELECT c.workspace_id, c.deleted_at, c.email, c.risk, c.mailed_count, c.delivered_count, c.first_mailed_at, c.observed_since, c.last_open_at, c.last_click_at, c.soft_failures
         FROM audience_contacts c WHERE c.id = p.contact_id LIMIT 1) c
       WHERE c.workspace_id = ${workspaceId} AND c.deleted_at IS NULL
     )
@@ -67,7 +69,8 @@ export async function measureListRisk(db: DbExecutor, workspaceId: string, listI
       count(*) FILTER (WHERE c.mailed_count >= ${UNENGAGED.mailed} AND c.first_mailed_at <= now() - make_interval(days => ${UNENGAGED.days})
         AND coalesce(greatest(c.last_open_at, c.last_click_at), '-infinity') < now() - make_interval(days => ${UNENGAGED.days}))::int AS unengaged,
       count(*) FILTER (WHERE c.mailed_count = 0 AND c.observed_since IS NULL)::int AS never_mailed,
-      count(*) FILTER (WHERE c.soft_failures >= 3)::int AS soft_failing, ${sql.join(reasons, sql`, `)}
+      count(*) FILTER (WHERE c.soft_failures >= 3)::int AS soft_failing,
+      count(*) FILTER (WHERE c.delivered_count > 0 OR c.last_open_at IS NOT NULL OR c.last_click_at IS NOT NULL)::int AS proven, ${sql.join(reasons, sql`, `)}
     FROM c LEFT JOIN delivery_domain_stats d ON d.workspace_id = ${workspaceId} AND d.domain = split_part(c.email, '@', 2)`);
   const { rows: [last] } = await db.execute<{ id: string; accepted: number; bounced: number; complained: number }>(sql`SELECT c.id, t.accepted, t.bounced, t.complained
     FROM sending_campaigns c CROSS JOIN LATERAL (SELECT coalesce(sum(accepted), 0)::int AS accepted, coalesce(sum(bounced), 0)::int AS bounced, coalesce(sum(complained), 0)::int AS complained
@@ -78,7 +81,7 @@ export async function measureListRisk(db: DbExecutor, workspaceId: string, listI
     WHERE workspace_id = ${workspaceId} AND day >= current_date - ${RECENT_DAYS}::int`);
   const n = Number(m!.n), share = (k: number) => n ? k / n : 0;
   const counts = { flagged: Number(m!.flagged), deadDomains: Number(m!.dead_domains), unengaged: Number(m!.unengaged), unengagedBase: Number(m!.unengaged_base),
-    neverMailed: Number(m!.never_mailed), softFailing: Number(m!.soft_failing), byReason: Object.fromEntries(RISKS.map(r => [r, Number(m!['r_' + r])])) as Record<Risk, number> };
+    neverMailed: Number(m!.never_mailed), softFailing: Number(m!.soft_failing), proven: Number(m!.proven), byReason: Object.fromEntries(RISKS.map(r => [r, Number(m!['r_' + r])])) as Record<Risk, number> };
   const values: ListRisk['values'] = {};
   if (n) { values.FLAGGED_SOURCE = share(counts.flagged); values.DEAD_DOMAINS = share(counts.deadDomains); values.NEVER_MAILED = share(counts.neverMailed); }
   if (counts.unengagedBase >= UNENGAGED.minimumBase) values.UNENGAGED = counts.unengaged / counts.unengagedBase;

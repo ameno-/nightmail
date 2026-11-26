@@ -21921,7 +21921,7 @@ describe('List hygiene', () => {
         await runListRisk();
         const { rows: [review] } = await db.query('SELECT r.list_risk FROM sending_campaign_reviews r JOIN sending_campaigns c ON c.review_id = r.id WHERE c.id = $1', [campaign.id]);
         const risk = review.list_risk;
-        assert.deepEqual([risk.sampled, risk.exact, risk.counts.flagged, risk.counts.byReason.disposable, risk.counts.deadDomains, risk.counts.neverMailed, risk.lastSend], [20, true, 3, 3, 5, 20, null]);
+        assert.deepEqual([risk.sampled, risk.exact, risk.counts.flagged, risk.counts.byReason.disposable, risk.counts.deadDomains, risk.counts.neverMailed, risk.counts.proven, risk.lastSend], [20, true, 3, 3, 5, 20, 0, null]);
         assert.deepEqual([risk.values.FLAGGED_SOURCE, risk.values.DEAD_DOMAINS, risk.values.NEVER_MAILED, risk.values.UNENGAGED], [0.15, 0.25, 1, undefined]);
         // FLAGGED_SOURCE over its high line; NEVER_MAILED over its high line counts only as elevated.
         assert.equal(risk.band, 'high');
