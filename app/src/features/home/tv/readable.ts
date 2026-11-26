@@ -8,14 +8,14 @@ import { DESCRIPTION, LEAD, QUESTIONS, TITLE } from './said.ts'
 // What the public pages say for readers that aren't browsers (pricing/readable.ts) when the homepage is the television
 // (VITE_HOME=tv: home-tv.ts, and price-pages.ts for the files it writes). Its Markdown twin leads with the price of
 // sending, then has the steps its "Copy for your agent" points agents to and the comparison its tape plays; the product
-// in every page's structured data is pitched on sending at that price. Everything else is the factory homepage's.
+// in every page's structured data is pitched on that price, sent or received; the rest is the factory homepage's.
 export { jsonLd } from '../../pricing/readable.ts'
 
 const url = (path: string) => publicOrigin + path
 const { table, trademarks } = factory
 
-/** What the homepage's pitch says: sending, at the billing code's price, with its free allowance. */
-const sendingPitch = () => `${nightmail.perThousand} per 1,000 emails sent, after the first ${formatCount(nightmail.freeSent)} free every month`
+/** The billing code's price, for mail sent and received, with both free allowances. */
+const pricePitch = () => `${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month`
 
 /** The homepage's steps for an agent asked to set up sending (its "Copy for your agent" points here): the device flow for
  *  its own key (api/src/agent-setup.ts, the same one the dashboard's agent prompt falls back to), the docs, a first send
@@ -63,8 +63,8 @@ export function structuredData(page: Parameters<typeof factory.structuredData>[0
   const data = factory.structuredData(page) as { '@graph': { '@id'?: string; description?: string; offers?: { description?: string } }[] }
   const app = data['@graph'].find(node => node['@id'] === url('/#app'))
   if (!app?.offers) throw new Error('The structured data has no product to describe (pricing/readable.ts, app).')
-  app.description = `An email API on Amazon SES for transactional and marketing email: ${sendingPitch()}.`
-  app.offers.description = `${sendingPitch()}. Contacts and teammates: no charge.`
+  app.description = `An email API on Amazon SES that sends and receives transactional and marketing email: ${pricePitch()}.`
+  app.offers.description = `${pricePitch()}. Contacts and teammates: no charge.`
   // The homepage's own: the page, and the questions it answers (words.tsx says them on the page).
   if (page === 'home') data['@graph'].unshift(
     { '@type': 'WebPage', '@id': url('/'), url: url('/'), name: `${productName}: ${TITLE}`, description: DESCRIPTION, inLanguage: 'en', isPartOf: { '@id': url('/#website') }, about: { '@id': url('/#app') } } as object,
