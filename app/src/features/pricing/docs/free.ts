@@ -2,7 +2,7 @@
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
 import { BUILTIN_CAPS } from '../../../../../api/src/builtin-limits.ts'
 import { EVALUATION, GROWTH } from '../../../../../api/src/standing-model.ts'
-import { dayOf, formatCount, nightmail, shownSources, type Comparison, type Source } from '../prices.ts'
+import { formatCount, nightmail, shownSources, type Comparison, type Source } from '../prices.ts'
 import { ORDERED } from '../page/comparison.ts'
 import { factsSection } from '../page/facts.ts'
 import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
@@ -146,7 +146,7 @@ export function freeEmailApi(): Doc {
   ].find(text => text.length <= 160 && text.length >= 140) ?? ''
   const doc: Doc = {
     path, title: 'Free email API plans', searchTitle, description, h1, answer: [[caption]], sections, questions: [],
-    cardWords: { lines: [`${formatCount(nightmail.freeSent)} emails free.`, 'Every month.'], caption: [`${productName}, beside ${spelled(apis.rows.length)} email APIs’ ${what}, checked ${dayOf(latest)}.`, `Beside ${apis.rows.length} email APIs’ ${what}, checked ${dayOf(latest)}.`].find(t => t.length <= 70)! },
+    cardWords: { lines: [`${formatCount(nightmail.freeSent)} emails free.`, 'Every month.'], caption: [`${productName}, beside ${spelled(apis.rows.length)} email APIs’ ${what}, checked ${when}.`, `Beside ${apis.rows.length} email APIs’ ${what}, checked ${when}.`].find(t => t.length <= 70)! },
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] }, lead,
     related: [
       { title: 'Compare', path: '/compare', line: `${productName} beside every email service it is compared with.` },
