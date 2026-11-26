@@ -37610,7 +37610,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   // Deferred capture late failures (L87 item 3): EMPTY_AUDIENCE and invalid recipient fail loudly, leaving draft editable.
   test('fast campaign launch: deferred >5k launch fails loudly on late EMPTY_AUDIENCE and leaves draft editable', async t => {
-    const { g, draft, launch, audience, call } = await launchFixture(t);
+    const { g, w, draft, launch, audience, call } = await launchFixture(t);
     const listId = await audience(5_100, 10, 'latefail');
     const c = await draft('latefail', listId);
     // Preview caches audience_estimate on sending_campaigns.
@@ -37621,16 +37621,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(res.status, 202, JSON.stringify(res.body));
     assert.equal(res.body.queued, 510);
     // Everyone unsubscribes after the 202 before the background capture runs.
-    const { rows: [cRow] } = await g.query('SELECT workspace_id, review_id FROM sending_campaigns WHERE id=$1', [c.id]);
-    await g.query("UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE workspace_id=$1", [cRow.workspace_id]);
+    await g.query("UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE workspace_id=$1", [w]);
     const { nodeRuntime } = await import('./src/adapters/node.js');
     const { jobHandlers } = await import('./src/sending.js');
     const { processJobs } = await import('./src/jobs.js');
-    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+    // A shared queue drain can finish without claiming this campaign. Give the worker only the job the launch queued.
+    const schema = 'late_empty_' + randomUUID().replaceAll('-', ''), url = new URL(FIXTURE_DATABASE_URL!);
+    await g.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.jobs (LIKE public.jobs INCLUDING ALL)`);
+    cleanup(t, async () => { await g.query(`DROP SCHEMA ${schema} CASCADE`); });
+    const queued = await g.query(`INSERT INTO ${schema}.jobs SELECT * FROM public.jobs
+      WHERE workspace_id=$1 AND id=$2 AND type='campaign.run' AND status='pending' AND available_at<=now()`, [w, 'campaign.run:' + c.id]);
+    assert.equal(queued.rowCount, 1, 'The launch must have queued its campaign.run for immediate processing.');
+    url.searchParams.set('options', `-c search_path=${schema},public`);
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: url.href });
     cleanup(t, close);
     Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
-    await g.query("UPDATE jobs SET available_at = clock_timestamp() WHERE workspace_id=$1 AND id=$2", [cRow.workspace_id, 'campaign.run:' + c.id]);
-    await processJobs(runtime, jobHandlers, 2, 1, 15_000);
+    assert.equal(await processJobs(runtime, jobHandlers, 1, 1, 15_000), 1);
     const view = await call('GET', `/v1/campaigns/${c.id}`);
     assert.equal(view.status, 200);
     assert.equal(view.body.state, 'failed');
