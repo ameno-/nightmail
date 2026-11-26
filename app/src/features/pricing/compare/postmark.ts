@@ -71,6 +71,6 @@ export const postmark: Entry = {
   gaps: [
     gap('dedicated IPs', 'Postmark provides dedicated IPs to customers sending 300,000 messages a month or more.', /\bdedicated IPs?\b/i, GAPS_READ('https://postmarkapp.com/dedicated-ips', 'Dedicated IPs Available to customers sending 300k messages a month or more.')),
     gap('weekly DMARC report digests', 'Postmark’s DMARC monitoring sends a free weekly email that summarizes the DMARC reports for your domains.', /\bDMARC (?:reports?|digests?|monitoring)\b/i, GAPS_READ('https://dmarc.postmarkapp.com/', 'A free weekly email to help monitor & implement DMARC')),
-    gap('libraries for Python, Ruby, .NET, Java and PHP', 'Postmark has official libraries for TypeScript, Python, Ruby, Rails, .NET, Java and PHP.', LANGUAGES, GAPS_READ('https://postmarkapp.com/developer/integration/official-libraries', 'Official libraries - TypeScript - Python SDK - Rails gem - Ruby gem - .NET - Java - PHP')),
+    gap('libraries for Python, Ruby, .NET, Java and PHP', 'Postmark has official libraries for Python, Ruby (and Rails), .NET, Java and PHP.', LANGUAGES, GAPS_READ('https://postmarkapp.com/developer/integration/official-libraries', 'Official libraries - TypeScript - Python SDK - Rails gem - Ruby gem - .NET - Java - PHP')),
   ],
 }
