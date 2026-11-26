@@ -2371,9 +2371,16 @@ export type CampaignAudienceCounts = {
          */
         summary: string | null;
         /**
-         * Every finding behind the verdict.
+         * The findings behind the verdict in the original codes, one per code: a newly registered domain, one new here and a new link domain read NEW_DOMAIN, a jump over the usual day SIZE_JUMP; blocklist findings appear only in findings. Prefer findings.
          */
         reasons: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
+            message: string;
+        }>;
+        /**
+         * Every finding behind the verdict, with its own code: NEW_REGISTRATION (registered recently, from public registry data), NEW_HERE (registered long ago, new to this workspace), NEW_DOMAIN (added recently, registration not known), USUAL_JUMP, NEW_LINK_DOMAIN, BLOCKLISTED_BEFORE (an earlier send drew replies naming a blocklist and none has finished without since), BLOCKLIST_UNCOUNTED (a recent send's blocklist replies aren't counted yet, so it isn't taken for clean), and the original codes.
+         */
+        findings?: Array<{
             code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS' | 'NEW_REGISTRATION' | 'NEW_HERE' | 'USUAL_JUMP' | 'NEW_LINK_DOMAIN' | 'BLOCKLISTED_BEFORE' | 'BLOCKLIST_UNCOUNTED';
             message: string;
         }>;
@@ -2557,9 +2564,13 @@ export type CampaignAudienceCounts = {
         } | null;
         required: {
             /**
-             * BLOCKLISTED: mail from this From domain or with these links drew replies naming a blocklist and no send has finished without any since; a consent confirmation does not waive it.
+             * Kept as it was: a newly registered domain reads NEW_DOMAIN and a blocklist SIZE_JUMP. reason says which.
              */
-            by: 'NEW_REGISTRATION' | 'BLOCKLISTED' | 'NEW_DOMAIN' | 'SIZE_JUMP';
+            by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * What requires the ramp. BLOCKLISTED: mail from this From domain or with these links drew replies naming a blocklist and no send has finished without any since; a consent confirmation does not waive it.
+             */
+            reason?: 'NEW_REGISTRATION' | 'BLOCKLISTED' | 'NEW_DOMAIN' | 'SIZE_JUMP';
             /**
              * The largest daily limit that counts as a ramp: the plan's first day.
              */
@@ -2704,9 +2715,16 @@ export type CampaignQueued = {
          */
         summary: string | null;
         /**
-         * Every finding behind the verdict.
+         * The findings behind the verdict in the original codes, one per code: a newly registered domain, one new here and a new link domain read NEW_DOMAIN, a jump over the usual day SIZE_JUMP; blocklist findings appear only in findings. Prefer findings.
          */
         reasons: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
+            message: string;
+        }>;
+        /**
+         * Every finding behind the verdict, with its own code: NEW_REGISTRATION (registered recently, from public registry data), NEW_HERE (registered long ago, new to this workspace), NEW_DOMAIN (added recently, registration not known), USUAL_JUMP, NEW_LINK_DOMAIN, BLOCKLISTED_BEFORE (an earlier send drew replies naming a blocklist and none has finished without since), BLOCKLIST_UNCOUNTED (a recent send's blocklist replies aren't counted yet, so it isn't taken for clean), and the original codes.
+         */
+        findings?: Array<{
             code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS' | 'NEW_REGISTRATION' | 'NEW_HERE' | 'USUAL_JUMP' | 'NEW_LINK_DOMAIN' | 'BLOCKLISTED_BEFORE' | 'BLOCKLIST_UNCOUNTED';
             message: string;
         }>;
@@ -2890,9 +2908,13 @@ export type CampaignQueued = {
         } | null;
         required: {
             /**
-             * BLOCKLISTED: mail from this From domain or with these links drew replies naming a blocklist and no send has finished without any since; a consent confirmation does not waive it.
+             * Kept as it was: a newly registered domain reads NEW_DOMAIN and a blocklist SIZE_JUMP. reason says which.
              */
-            by: 'NEW_REGISTRATION' | 'BLOCKLISTED' | 'NEW_DOMAIN' | 'SIZE_JUMP';
+            by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * What requires the ramp. BLOCKLISTED: mail from this From domain or with these links drew replies naming a blocklist and no send has finished without any since; a consent confirmation does not waive it.
+             */
+            reason?: 'NEW_REGISTRATION' | 'BLOCKLISTED' | 'NEW_DOMAIN' | 'SIZE_JUMP';
             /**
              * The largest daily limit that counts as a ramp: the plan's first day.
              */
