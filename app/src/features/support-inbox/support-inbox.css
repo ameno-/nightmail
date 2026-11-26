@@ -1,8 +1,7 @@
-/* The support inbox (/support), Signal Log: a dense list beside its facet rail (cards on a phone), and a conversation
-   with its timeline and the customer panel beside it (a sheet on a phone). Borderless: the list, the transcript and
-   the panel sit on the page's own surface, apart by 24px of space; no rule draws a row, a column or a section, and rows
-   show hover and selection as a solid fill. Labels are small mono caps, facts muted keys with mono values, statuses a
-   dot and a word; the accent stays on buttons. */
+/* The support inbox list (/support), Signal Log: a dense list beside its facet rail (cards on a phone). Borderless: the
+   list sits on the page's own surface; no rule draws a row or a column, and rows show hover and selection as a solid
+   fill. Labels are small mono caps, statuses a dot and a word; the accent stays on buttons. A conversation's own styles
+   are in conversation.css. */
 .sinbox-page { display: flex; flex-direction: column; gap: var(--page-gap); min-width: 0; }
 .sinbox-page > .sinbox-toolbar { padding-bottom: 0; }
 /* A tab's count holds its width while it loads (Tabs draws the slot empty), so the tabs after it never move. */
@@ -43,166 +42,11 @@
 /* No rule under a row (the shared table draws none in the borderless console either). */
 .sinbox-page .ui-table :is(th, td) { border-bottom: 0; }
 
-/* One conversation. Its title and facts hold one line each, so the header is as tall loaded as loading. On a wide window
-   it keeps the wide measure, left-aligned, so the transcript's lines stay readable beside the customer panel. */
-.sinbox-conversation-page .ui-page-header { flex-wrap: nowrap; }
-.sinbox-conversation-page .ui-page-header > .cluster:first-child { flex: 1 1 auto; flex-wrap: nowrap; min-width: 0; }
-.sinbox-conversation-page .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; flex-wrap: nowrap; }
-.sinbox-conversation-page .ui-page-header__text { flex: 1; min-width: 0; }
-.sinbox-conversation-page .ui-page-header h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sinbox-title-skeleton { display: inline-flex; align-items: center; height: var(--leading-lg); vertical-align: top; }
-.sinbox-subtitle { display: flex; align-items: center; height: 20px; margin: 0; overflow: hidden; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 20px; white-space: nowrap; }
-.sinbox-fact { display: inline-flex; flex: none; align-items: center; gap: var(--space-6); }
-.sinbox-fact ~ .sinbox-fact::before { content: '·'; margin-inline: var(--space-8); color: var(--color-faint); }
-.sinbox-fact svg { width: 14px; height: 14px; color: var(--color-faint); }
-.sinbox-fact .ui-status { font-family: var(--font-mono); }
-.sinbox-fact__key { color: var(--color-muted); font-size: var(--text-xs); }
-.sinbox-conversation { display: grid; grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
-.sinbox-transcript { display: flex; flex-direction: column; min-width: 0; padding-right: var(--space-24); }
-.sinbox-earlier { margin: 0 0 var(--space-12); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); }
-.sinbox-timeline { margin: 0; padding: 0; list-style: none; }
-.sinbox-message { min-width: 0; padding-block: var(--space-16); }
-.sinbox-timeline > :first-child { padding-top: 0; }
-.sinbox-message[data-pending] { opacity: .7; }
-.sinbox-message__meta { display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 20px; font-size: var(--text-sm); line-height: 20px; }
-.sinbox-message__author { flex: none; font-weight: var(--font-weight-bold); }
-.sinbox-message__from { min-width: 0; overflow: hidden; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
-.sinbox-message__via { flex: none; color: var(--color-muted); font-size: var(--text-xs); }
-.sinbox-message[data-author='agent'] .sinbox-message__author { color: var(--color-muted); }
-/* A note is the one surface step up: staff's own words, never the customer's or the agent's. */
-.sinbox-message[data-note] { margin-block: var(--space-8); padding: var(--space-12) var(--space-16); border-radius: var(--radius-md); background: var(--color-layer-1); }
-.sinbox-timeline > .sinbox-message[data-note]:first-child { padding-top: var(--space-12); }
-.sinbox-message[data-held] :is(.sinbox-text, .sinbox-message__body) { color: var(--color-muted); }
-.sinbox-held { margin: var(--space-8) 0 0; color: var(--color-warning); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.sinbox-held[data-decided] { color: var(--color-muted); }
-/* A held answer's choices, under it; a confirmation says what it means beside them. */
-.sinbox-draft { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8) var(--space-12); margin-top: var(--space-8); }
-.sinbox-draft__actions { gap: var(--space-8); }
-.sinbox-draft__warn { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.sinbox-composer__editing { margin: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.sinbox-composer__editing button { position: relative; padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
-.sinbox-composer__editing button::before { content: ''; position: absolute; inset: -12px -4px; }
-/* What happened besides the messages: one quiet mono line each. */
-.sinbox-event { display: flex; align-items: center; gap: var(--space-8); min-width: 0; padding-block: var(--space-6); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 20px; }
-.sinbox-event svg { flex: none; width: 14px; height: 14px; }
-.sinbox-event__text { min-width: 0; overflow-wrap: anywhere; }
-.sinbox-event time { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.sinbox-event[data-kind='paused'], .sinbox-event[data-kind='ticket'] { color: var(--color-muted); }
-/* A customer email: its subject when it differs, the reply, then its toggles and attachments. */
-.sinbox-email__subject { margin: var(--space-8) 0 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.sinbox-email__toggles { gap: var(--space-4); margin-top: var(--space-4); }
-.sinbox-email__html { margin-top: var(--space-8); }
-.sinbox-files { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-8); margin: var(--space-8) 0 0; padding: 0; list-style: none; }
-.sinbox-files button { position: relative; display: inline-flex; align-items: center; gap: var(--space-6); max-width: 320px; min-height: 28px; padding: 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: var(--color-control); color: var(--color-text); font: inherit; font-size: var(--text-xs); cursor: pointer; }
-.sinbox-files button::before { content: ''; position: absolute; inset: -8px 0; }
-.sinbox-files button:disabled { color: var(--color-faint); cursor: not-allowed; }
-@media (hover: hover) and (pointer: fine) { .sinbox-files button:not(:disabled):hover { background: var(--color-control-hover); } }
-.sinbox-files button svg { flex: none; color: var(--color-faint); }
-.sinbox-files__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sinbox-files__size { flex: none; color: var(--color-faint); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-/* The agent's brief, folded above the timeline. */
-.sinbox-summary { margin-bottom: var(--space-16); }
-.sinbox-summary > summary { display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 32px; color: var(--color-muted); font-size: var(--text-sm); list-style: none; cursor: pointer; }
-.sinbox-summary > summary::-webkit-details-marker { display: none; }
-.sinbox-summary > summary svg { flex: none; width: 14px; height: 14px; color: var(--color-faint); }
-.sinbox-summary__label { flex: none; font-weight: var(--font-weight-bold); }
-.sinbox-summary__title { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); }
-.sinbox-summary[open] .sinbox-summary__title { white-space: normal; -webkit-mask-image: none; mask-image: none; }
-.sinbox-summary__chevron { margin-left: auto; transition: transform 150ms ease-out; }
-@media (prefers-reduced-motion: reduce) { .sinbox-summary__chevron { transition: none; } }
-.sinbox-summary[open] .sinbox-summary__chevron { transform: rotate(90deg); }
-.sinbox-summary__body { display: grid; gap: var(--space-8); margin: var(--space-8) 0 0; font-size: var(--text-sm); line-height: 22px; }
-.sinbox-summary__body dt { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); }
-.sinbox-summary__body dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-.sinbox-summary__note { margin: var(--space-8) 0 0; color: var(--color-faint); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.sinbox-message__meta .ui-status { font-family: var(--font-mono); }
-.sinbox-message__time { margin-left: auto; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.sinbox-message__body { padding-top: var(--space-8); font-size: var(--text-sm); line-height: 22px; overflow-wrap: anywhere; white-space: pre-wrap; }
-.sinbox-text { padding-top: var(--space-8); font-size: var(--text-sm); line-height: 22px; overflow-wrap: anywhere; }
-.sinbox-text > * { margin: 0; }
-.sinbox-text > * + * { margin-top: var(--space-8); }
-.sinbox-text :is(ul, ol) { padding-left: var(--space-20); }
-.sinbox-text li + li { margin-top: var(--space-4); }
-.sinbox-text strong { font-weight: var(--font-weight-bold); }
-.sinbox-text code { padding: 0 var(--space-4); border-radius: var(--radius-xs); background: var(--color-chip, var(--color-layer-2)); font-family: var(--font-mono); font-size: var(--text-xs); }
-.sinbox-text pre { padding: var(--space-8) var(--space-12); white-space: pre-wrap; border-radius: var(--radius-sm); background: var(--color-well, var(--color-layer-1)); font-size: var(--text-xs); line-height: 18px; }
-.sinbox-text pre code { padding: 0; background: none; }
-.sinbox-tools { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-16); margin: var(--space-8) 0 0; padding: 0; list-style: none; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: 16px; }
-.sinbox-tools li { display: inline-flex; align-items: center; gap: var(--space-6); }
-.sinbox-tools svg { width: 12px; height: 12px; }
-
-/* The reply, held at the bottom of the window while the transcript scrolls; the transcript fades out above it. */
-.sinbox-composer { position: sticky; bottom: 0; z-index: 1; display: grid; gap: var(--space-8); margin-top: auto; padding: var(--space-12) 0 var(--space-16); background: var(--color-surface); }
-.sinbox-composer::before { content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: var(--space-16); background: linear-gradient(to bottom, transparent, var(--color-surface)); pointer-events: none; }
-.sinbox-composer .ui-textarea { min-height: 88px; resize: vertical; }
-/* Reply or note: two words, the chosen one in the text colour. */
-.sinbox-composer__modes { display: flex; gap: var(--space-16); }
-.sinbox-composer__modes button { position: relative; padding: 0; border: 0; background: none; color: var(--color-faint); font: inherit; font-size: var(--text-sm); font-weight: var(--font-weight-bold); line-height: 20px; cursor: pointer; }
-.sinbox-composer__modes button::before { content: ''; position: absolute; inset: -12px -8px; }
-.sinbox-composer__modes button[aria-pressed='true'] { color: var(--color-text); }
-@media (hover: hover) and (pointer: fine) { .sinbox-composer__modes button[aria-pressed='false']:hover { color: var(--color-muted); } }
-.sinbox-composer--idle { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); color: var(--color-muted); font-size: var(--text-sm); }
-.sinbox-composer__actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
-.sinbox-composer__hint { min-width: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.sinbox-composer__failed { min-width: 0; color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.sinbox-composer__buttons { flex: none; flex-wrap: nowrap; }
-.sinbox-composer--idle[data-blocked] > span:first-child { color: var(--color-warning); }
-
-/* The customer panel beside the transcript: 24px of space, then labelled sections, on the same surface. */
-.sinbox-panel { position: sticky; top: 0; min-width: 0; padding-left: var(--space-24); }
-.sinbox-panel__body { display: flex; flex-direction: column; gap: var(--space-20); min-width: 0; }
-.sinbox-panel__body .ui-label { margin-bottom: var(--space-4); }
-/* Key and value rows, 28px each, apart by alignment alone: the key's padding keeps it from its value. */
-.ui-kv.sinbox-kv { grid-template-columns: 112px minmax(0, 1fr); column-gap: 0; }
-.ui-kv.sinbox-kv :is(dt, dd) { border-bottom: 0; }
-.ui-kv.sinbox-kv dt { padding-right: var(--space-16); }
-.sinbox-address { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
-
-.sinbox-faint { color: var(--color-faint); }
-.sinbox-list, .sinbox-notes { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-.sinbox-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: var(--row-height-dense); font-size: var(--text-sm); line-height: 20px; }
-.sinbox-list__main { min-width: 0; overflow: hidden; color: var(--color-text); text-overflow: ellipsis; white-space: nowrap; }
-a.sinbox-list__main { text-decoration: none; }
-@media (hover: hover) and (pointer: fine) { a.sinbox-list__main:hover { text-decoration: underline; text-underline-offset: 3px; } }
-a.sinbox-list__main:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
-.sinbox-list__meta { flex: none; max-width: 65%; overflow: hidden; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
-.sinbox-notes li { display: grid; gap: var(--space-4); padding-block: var(--space-6); font-size: var(--text-sm); line-height: 20px; }
-.sinbox-notes p { margin: 0; overflow-wrap: anywhere; }
-.sinbox-notes .sinbox-list__meta { max-width: none; }
-
-
 /* The shortcuts sheet. */
 .sinbox-keys { display: grid; margin: 0; font-size: var(--text-sm); }
 .sinbox-keys > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: var(--space-12); min-height: var(--row-height-dense); }
 .sinbox-keys dt { display: flex; gap: var(--space-4); }
 .sinbox-keys dd { margin: 0; }
 .sinbox-keys kbd { min-width: 20px; padding: 0 var(--space-4); border-radius: var(--radius-xs); background: var(--color-chip, var(--color-layer-2)); font-family: var(--font-mono); font-size: var(--text-label); line-height: 18px; text-align: center; }
-
-@media (max-width: 1100px) { .sinbox-conversation { grid-template-columns: minmax(0, 1fr) 280px; } }
-@media (max-width: 899px) {
-  .sinbox-conversation { grid-template-columns: minmax(0, 1fr); }
-  .sinbox-transcript { padding-right: 0; }
-  .sinbox-panel { margin-top: var(--space-24); padding: var(--space-20) 0 0; }
-  .sinbox-composer { bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); }
-  /* The reply is one line until it is used, so the transcript keeps the screen. */
-  .sinbox-composer .ui-textarea { min-height: var(--control-height); height: var(--control-height); padding-block: calc((var(--control-height) - var(--textarea-leading)) / 2); resize: none; transition: height var(--motion-duration, 120ms), padding var(--motion-duration, 120ms); }
-  .sinbox-composer:focus-within .ui-textarea, .sinbox-composer[data-filled] .ui-textarea { height: 112px; padding-block: var(--space-8); }
-  .sinbox-composer:not(:focus-within):not([data-filled]):not([data-unavailable]) .sinbox-composer__actions { display: none; }
-}
-
-/* A phone's conversation header: the title, then its facts on two full-width lines (where it is, then the agent), then
-   the actions on a line of their own, so nothing is cut off. The skeleton has the same lines. */
-@media (max-width: 639px) {
-  .sinbox-conversation-page .ui-page-header { flex-wrap: wrap; row-gap: var(--space-12); }
-  .sinbox-conversation-page .ui-page-header > .cluster:last-child:not(:first-child) { flex: 1 1 100%; justify-content: flex-start; }
-  .sinbox-subtitle { flex-wrap: wrap; align-content: flex-start; height: 40px; }
-  .sinbox-subtitle > .sinbox-fact:nth-child(3) { flex-basis: 100%; min-width: 0; }
-  .sinbox-subtitle > .sinbox-fact:nth-child(3)::before { content: none; }
-}
 /* A card leaves out what a row has nothing for (no ticket). */
 .sinbox-table .ui-card__segment:empty { display: none; }
-.sinbox-sheet .sinbox-panel__body { padding-bottom: var(--space-8); }
-
-/* An approval's preview: exactly what would be sent, as text (never rendered), and why it can't go when it can't. */
-.sinbox-approval__preview { margin: var(--space-12) 0 0; padding: var(--space-12) var(--space-16); max-height: 240px; overflow: auto; border-radius: var(--radius-md); background: var(--color-layer-1); color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
-.sinbox-approval__blocked { margin: var(--space-12) 0 0; color: var(--color-warning); font-size: var(--text-sm); line-height: var(--leading-sm); }

@@ -1,10 +1,11 @@
 import type { ReactNode } from 'react'
-import { MoreHorizontal } from 'lucide-react'
+import { Bot, ChevronRight, Mail, MessageSquare, MoreHorizontal } from 'lucide-react'
 import { useLocation } from 'react-router'
-import { Button, IconButton, LoadingRegion, PageHeader, SearchField, Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn, type Tone } from '../../components/ui'
+import { BackLink, Button, IconButton, LoadingRegion, PageHeader, SearchField, Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn, type Tone } from '../../components/ui'
+import { PrivateAddress } from '../../components/PrivateAddress'
 import { channelLabels, type Channel, type InboxCounts, type InboxView, type SupportConversation } from '../../data/support-inbox'
-import { ActionsTrigger } from '../operator/skeletons'
 import './support-inbox.css'
+import './conversation.css'
 
 // The support inbox's column definitions (card slots included), shared by the route skeleton and the loaded list. A
 // phone's card: the customer and last activity, the conversation (its subject, then the last message itself), then its
@@ -58,32 +59,45 @@ export function SupportInboxSkeleton({ view, channel }: { view: InboxView; chann
   </>
 }
 
-// A conversation before it loads: the header's title and facts line, the transcript and the customer panel.
-export function ConversationBodySkeleton({ panel }: { panel: boolean }) {
-  return <div className="sinbox-conversation" aria-hidden="true">
-    <div className="sinbox-transcript"><ol className="sinbox-timeline">{[78, 54, 66].map((width, index) => <li key={index} className="sinbox-message">
-      <div className="sinbox-message__meta"><Skeleton width={96} height={12} /></div>
-      <div className="sinbox-message__body"><SkeletonText width={`${width}%`} lineHeight={22} /><SkeletonText width={`${width - 24}%`} lineHeight={22} /></div>
-    </li>)}</ol></div>
-    {panel && <aside className="sinbox-panel"><div className="sinbox-panel__body"><h3 className="ui-label ui-label--rule">Customer</h3><Skeleton height={140} /></div></aside>}
-  </div>
+/** Who a conversation is with, for its header: the person, else their address, else the workspace that filed it. */
+export function whoOf(c: SupportConversation): ReactNode {
+  const address = c.customer?.email ?? c.sender
+  return c.customer?.name ?? (address ? <PrivateAddress value={address} /> : c.workspace?.name ?? 'Unknown sender')
 }
-/** The header's actions: Customer (the panel, on a phone), Done (e: marks it done if it needs you, and opens the next) and
- *  the actions menu. On a phone they are a line of their own under the title and facts. */
-export function ConversationActions({ panel, customer, done, menu }: { panel: boolean; customer?: () => void; done?: { onClick: () => void; title: string }; menu?: ReactNode }) {
-  return <>{!panel && <Button disabled={!customer} onClick={customer}>Customer</Button>}
-    <Button disabled={!done} title={done?.title} onClick={done?.onClick}>Done</Button>
-    {menu ?? (panel ? <ActionsTrigger disabled /> : <IconButton label="Conversation actions" disabled><MoreHorizontal size={16} /></IconButton>)}</>
+const channelIcons = { chat: MessageSquare, email: Mail, agent_feedback: Bot }
+/** A conversation's header, loaded or not (one height either way): back, who (after the channel's icon, its slot held
+ *  while loading) and where it stands (a button that opens Details, with a chevron on a phone), then Details on a wide
+ *  screen, Done and the menu. */
+export function ConversationHeader({ channel, who, status, onDetails, done, menu }: { channel?: Channel; who?: ReactNode; status?: ReactNode; onDetails?: () => void; done?: { onClick: () => void; title: string }; menu?: ReactNode }) {
+  const Icon = channel && channelIcons[channel]
+  return <header className="sinbox-chat__header sinbox-chat__column">
+    <BackLink to="/support" />
+    <button type="button" className="sinbox-chat__who" disabled={!onDetails} onClick={onDetails} aria-haspopup="dialog" title={onDetails ? 'Details' : undefined}>
+      <span className="sinbox-chat__name"><span className="sinbox-chat__channel">{Icon && <Icon size={14} aria-label={channelLabels[channel!]} />}</span><span className="sinbox-chat__name-text">{who ?? <Skeleton width={140} height={14} />}</span>{who && <ChevronRight size={16} aria-hidden="true" className="sinbox-chat__chevron" />}</span>
+      <span className="sinbox-chat__state">{status}</span>
+    </button>
+    <div className="cluster sinbox-chat__actions">
+      <Button variant="ghost" className="sinbox-chat__details" disabled={!onDetails} onClick={onDetails}>Details</Button>
+      <Button disabled={!done} title={done?.title} onClick={done?.onClick}>Done</Button>
+      {menu ?? <IconButton label="Conversation actions" disabled><MoreHorizontal size={16} /></IconButton>}
+    </div>
+  </header>
 }
-export function SupportConversationSkeleton({ panel }: { panel: boolean }) {
-  return <div className="sinbox-conversation-page">
-    <PageHeader backTo="/support" title={<span className="sinbox-title-skeleton"><Skeleton width={260} height={14} /></span>} subtitle={<p className="sinbox-subtitle"><Skeleton width={220} height={10} /></p>} actions={<ConversationActions panel={panel} />} />
-    <LoadingRegion label="Loading the conversation"><ConversationBodySkeleton panel={panel} /></LoadingRegion>
-  </div>
+/** The thread before it loads: a few bubbles and lines where the messages go. */
+export function ThreadSkeleton() {
+  return <div className="sinbox-chat__scroll"><LoadingRegion label="Loading the conversation"><div className="sinbox-chat__column sinbox-chat__thread" aria-hidden="true">
+    {[62, 78, 48].map((width, index) => <div key={index} className="sinbox-msg" data-role={index % 2 ? 'agent' : 'customer'} data-first="">
+      <p className="sinbox-msg__meta"><Skeleton width={96} height={10} /></p>
+      <div className={index % 2 ? 'sinbox-msg__prose' : 'sinbox-msg__bubble'} style={{ width: `${width}%` }}><SkeletonText width="100%" lineHeight={20} /><SkeletonText width="60%" lineHeight={20} /></div>
+    </div>)}
+  </div></LoadingRegion></div>
+}
+export function SupportConversationSkeleton() {
+  return <div className="sinbox-chat"><ConversationHeader /><ThreadSkeleton /></div>
 }
 // The route-level placeholder while the support inbox's code loads.
-export function SupportRouteSkeleton({ operator, panel }: { operator: 'operator' | 'operator:read' | null | undefined; panel: boolean }) {
+export function SupportRouteSkeleton({ operator }: { operator: 'operator' | 'operator:read' | null | undefined }) {
   const { pathname, search } = useLocation()
   if (!operator) return null
-  return pathname.startsWith('/support/') ? <SupportConversationSkeleton panel={panel} /> : <SupportInboxSkeleton view={viewOf(search)} channel={channelOf(search)} />
+  return pathname.startsWith('/support/') ? <SupportConversationSkeleton /> : <SupportInboxSkeleton view={viewOf(search)} channel={channelOf(search)} />
 }
