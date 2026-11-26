@@ -7,6 +7,7 @@ import { freeEmailApi } from './free.ts'
 import { vendorAlternatives } from './alternatives.ts'
 import { ALTERNATIVES_VENDORS, PRICING_VENDORS } from './registry.ts'
 import { vendorPricing } from './vendor-pricing.ts'
+import { hubCard, hubDoc } from '../page/hub.ts'
 
 // The pages that answer a question about email prices (docs/doc.ts), every one the registry names (registry.ts). pages.ts
 // lists them among the price pages, so each gets what a price page gets (app/price-pages.ts): its own HTML with the words
@@ -50,6 +51,13 @@ export function docProblems(): string[] {
     if (/\b(?:cheapest|best) (?:email|transactional|api|provider|service|option|choice|alternative|way to send|free)|\b(?:largest|biggest|most generous|highest) free\b|\bmost generous\b|Nightmail[^.]*\b(?:cheapest|best)\b/i.test([doc.path === QUESTION.path ? doc.searchTitle.replace(QUESTION.title, '') : doc.searchTitle, doc.description, JSON.stringify([doc.h1, doc.answer, doc.cardWords, doc.sections, doc.copy, doc.llms])].join(' ')))
       problems.push(`${doc.path} says "cheapest" or "best": no page states either of Nightmail (Ryan, A294).`)
     if (/\bAmazon SES\b|\bBento\b/.test(JSON.stringify(doc))) problems.push(`${doc.path} names Amazon SES or Bento: pages compare only providers Nightmail costs less than (Ryan, A294).`)
+  }
+  // A card gives the day or days read exactly as its page's caption does (docs/alternatives.ts, checkedOn), never only the
+  // latest of a span.
+  const pageText = (answer: unknown) => JSON.stringify(answer).replaceAll('\\u00a0', ' ').replaceAll('\u00a0', ' ')
+  for (const { path, card, answer } of [...DOCS.map(doc => ({ path: doc.path, card: doc.cardWords.caption, answer: doc.answer })), { path: '/compare', card: hubCard().caption, answer: hubDoc().answer }]) {
+    const day = card.match(/checked ([^.]+)\./)?.[1]
+    if (day && !pageText(answer).includes(`checked ${day}`)) problems.push(`${path}'s card says "checked ${day}", which its page's caption doesn't.`)
   }
   if (new Set(DOCS.map(doc => doc.path)).size !== DOCS.length) problems.push('Two pages have the same address (docs/registry.ts).')
   return problems

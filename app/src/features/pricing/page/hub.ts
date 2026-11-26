@@ -1,10 +1,10 @@
 // (With extensions: the build's config imports this file, app/price-pages.ts.)
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
-import { dayOf, formatCount, type Comparison } from '../prices.ts'
+import { formatCount, type Comparison } from '../prices.ts'
 import { billAt, GROUPS, ORDERED } from './comparison.ts'
 import { START } from '../start.ts'
 import { ALTERNATIVES_VENDORS } from '../docs/registry.ts'
-import { DASH } from '../docs/alternatives.ts'
+import { checkedOn, DASH } from '../docs/alternatives.ts'
 import { factsSection } from './facts.ts'
 import type { CardWords } from '../../../../link-card.ts'
 import { plain, type PageDoc, type Table, type Text } from './shape.ts'
@@ -41,14 +41,14 @@ function table(spec: (typeof TABLES)[number]): Table {
 }
 
 export function hubDoc(): PageDoc {
-  const modified = ORDERED.map(c => c.offer.checked).sort().at(-1)!
+  const modified = ORDERED.map(c => c.offer.checked).sort().at(-1)!, when = checkedOn(ORDERED.map(c => c.offer.checked))
   const counts = GROUPS.map(group => `${ORDERED.filter(c => c.focus === group.focus).length} ${group.noun}`)
   const sections = [...GROUPS.map(group => ({ id: group.id, title: group.title, blocks: TABLES.filter(spec => spec.group === group.id).map(table) })), factsSection()]
   return {
     path: '/compare', title: 'Compare', searchTitle: 'Email API alternatives and pricing compared',
-    description: `${productName} beside ${ORDERED.length} email services, developer APIs, newsletters and agent inboxes: a month at three sizes on each, read ${dayOf(modified)}.`,
+    description: `${productName} beside ${ORDERED.length} email services, developer APIs, newsletters and agent inboxes: a month at three sizes on each, read ${when}.`,
     h1: [[`${productName} costs less`], [`than each of these ${ORDERED.length}.`]],
-    answer: [[`At every size shown · checked ${dayOf(modified).replaceAll(' ', '\u00a0')}`]],
+    answer: [[`At every size shown · checked ${when.replaceAll(' ', '\u00a0')}`]],
     sections,
     // The vendors' alternatives pages (docs/registry.ts), which link back here.
     questions: [], sources: [], related: [...ALTERNATIVES_VENDORS.flatMap(slug => { const c = ORDERED.find(o => o.slug === slug); return c ? [{ title: `${c.offer.vendor} alternatives`, path: `/alternatives/${slug}`, line: `${productName} and the services nearest ${c.offer.vendor} in price.` }] : [] }),
@@ -57,7 +57,7 @@ export function hubDoc(): PageDoc {
       { title: 'Free email API plans', path: '/free-email-api', line: `${productName}’s free allowance beside the compared email APIs’ smaller free plans.` }],
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }],
     modified,
-    llms: `What a month costs on ${productName} and on ${counts.join(', ')}, at three sizes each, read ${dayOf(modified)}.`,
+    llms: `What a month costs on ${productName} and on ${counts.join(', ')}, at three sizes each, read ${when}.`,
   }
 }
 
@@ -75,8 +75,8 @@ export function hubMarkdown(doc = hubDoc()): string {
   ].join('\n\n') + '\n'
 }
 
-/** /compare's link-preview card (link-card.ts draws it): how many services it prices, and the day the newest was read. */
+/** /compare's link-preview card (link-card.ts draws it): how many services it prices, and the days they were read, as the
+ *  page says them. */
 export function hubCard(): CardWords {
-  const modified = ORDERED.map(c => c.offer.checked).sort().at(-1)!
-  return { name: 'compare', lines: [`${ORDERED.length} email services,`, 'priced side by side.'], caption: `Each price from its own pricing page, checked ${dayOf(modified)}.` }
+  return { name: 'compare', lines: [`${ORDERED.length} email services,`, 'priced side by side.'], caption: `Each price from its own pricing page, checked ${checkedOn(ORDERED.map(c => c.offer.checked))}.` }
 }
