@@ -55,7 +55,7 @@ const operatorPages: readonly NavItem[] = [['/glass', 'Glass']]
 // thumb-tap away and always in view, and More, a sheet with the rest. A drawer would hide every destination behind a
 // button; the tab bar keeps the main ones visible and says where you are.
 const tabs = ['/overview', '/logs', '/receiving', '/campaigns']
-const icons: Record<string, LucideIcon> = { '/overview': LayoutGrid, '/logs': ScrollText, '/receiving': Inbox, '/campaigns': Send, '/audience': Users, '/domains': Globe, '/api-keys': KeyRound, '/docs': BookOpen, '/settings': Settings, '/support': LifeBuoy, '/operator': ShieldCheck }
+const icons: Record<string, LucideIcon> = { '/overview': LayoutGrid, '/logs': ScrollText, '/receiving': Inbox, '/campaigns': Send, '/audience': Users, '/domains': Globe, '/api-keys': KeyRound, '/docs': BookOpen, '/settings': Settings, '/support': LifeBuoy, '/operator': ShieldCheck, '/glass': LayoutGrid }
 const glyphOf = (path: string) => icons[path] ?? (path.startsWith('/newsletters') ? Newspaper : null)
 const iconOf = (path: string, size: IconSize = 'md') => { const glyph = glyphOf(path); return glyph ? <Icon icon={glyph} size={size} /> : null }
 const current = (path: string, pathname: string) => pathname === path || pathname.startsWith(`${path}/`)
@@ -66,7 +66,7 @@ const groupOf = (path: string) => path.startsWith('/newsletters') ? 'Marketing' 
 // letter when Receiving became Mail routing), ⌘K finds any page or action, and J and K move through a list's rows.
 const goKeys: Record<string, string> = { '/overview': 'O', '/logs': 'L', '/receiving': 'R', '/campaigns': 'C', '/audience': 'A', '/domains': 'D', '/api-keys': 'K', '/settings': 'S' }
 // What else ⌘K finds each page by: its old name, the things on it.
-const pageWords: Record<string, string> = { '/overview': 'home dashboard', '/logs': 'emails sent received delivered bounced', '/receiving': 'receiving inbound addresses rules destinations inboxes', '/campaigns': 'marketing broadcast templates', '/audience': 'contacts lists segments subscribers', '/domains': 'dns dkim verify', '/api-keys': 'tokens smtp app passwords agents', '/docs': 'documentation guides reference', '/settings': 'billing members webhooks account', '/support': 'inbox conversations', '/operator': 'staff admin health' }
+const pageWords: Record<string, string> = { '/overview': 'home dashboard', '/logs': 'emails sent received delivered bounced', '/receiving': 'receiving inbound addresses rules destinations inboxes', '/campaigns': 'marketing broadcast templates', '/audience': 'contacts lists segments subscribers', '/domains': 'dns dkim verify', '/api-keys': 'tokens smtp app passwords agents', '/docs': 'documentation guides reference', '/settings': 'billing members webhooks account', '/support': 'inbox conversations', '/operator': 'staff admin health', '/glass': 'live board deliverability health status' }
 const commandId = (path: string) => path.startsWith('/newsletters') ? 'go-newsletter' : `go-${path.slice(1).replace(/[^a-z0-9]+/g, '-')}`
 const typing = (target: EventTarget | null) => Boolean((target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]'))
 const commandKey = `${modKey}K`
@@ -296,9 +296,10 @@ export function AppShell() {
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
     {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
   </>
-  // ⌘K lists every page of the navigation in the sidebar's order, each with its G shortcut.
-  const commands = useMemo<Command[]>(() => links.map(([path, title]) => ({ id: commandId(path), path, title, section: 'Pages', icon: glyphOf(path), words: pageWords[path], locked: locked(path),
-    shortcut: goKeys[path] ? { keys: ['G', goKeys[path]], label: `G then ${goKeys[path]}` } : undefined, run: () => navigate(path) })), [links.map(([path, title]) => `${path}:${title}`).join('\n'), access.canAdminister, navigate]) // eslint-disable-line react-hooks/exhaustive-deps
+  // ⌘K lists every page of the navigation in the sidebar's order (plus Glass for operators), each with its G shortcut.
+  const commandLinks: readonly NavItem[] = [...links, ...unlisted]
+  const commands = useMemo<Command[]>(() => commandLinks.map(([path, title]) => ({ id: commandId(path), path, title, section: 'Pages', icon: glyphOf(path), words: pageWords[path], locked: locked(path),
+    shortcut: goKeys[path] ? { keys: ['G', goKeys[path]], label: `G then ${goKeys[path]}` } : undefined, run: () => navigate(path) })), [commandLinks.map(([path, title]) => `${path}:${title}`).join('\n'), access.canAdminister, navigate]) // eslint-disable-line react-hooks/exhaustive-deps
   const grouped = groups.map(([name]) => ({ name, links: links.filter(([path]) => groupOf(path) === name) })).filter(group => group.links.length)
   const section = [...links, ...unlisted].find(([path]) => on(path) ?? (location.pathname === path || location.pathname.startsWith(`${path}/`)))?.[1] ?? 'Overview'
   const workspaceName = access.multiTenant ? session?.identity?.workspaces?.find(item => item.id === session?.identity?.workspaceId)?.name ?? 'Workspace' : regionId || productName

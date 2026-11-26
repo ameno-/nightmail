@@ -240,7 +240,7 @@ const pages = ids => [
   ['Operator', '/operator', { from: '/overview' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
-  ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator', click: 'Waitlist' }],
+  ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator?view=signups', click: 'Waitlist' }],
   // Sign-ups: the limit and what fills it over every workspace; Set limit opens its fields once the numbers are in.
   ['Operator · sign-ups', '/operator?view=signups', { from: '/operator', click: 'Sign-ups' }],
   ['Operator · sign-up limit dialog', '/operator?view=signups', { dialog: 'Set limit' }],
@@ -250,7 +250,7 @@ const pages = ids => [
   ['Operator · abuse · cluster', `/operator/abuse/${ids.abuseCluster}`, { from: '/operator?view=abuse', row: 'Several accounts · Shared card' }],
   ['Operator · abuse · alerts', '/operator?view=abuse&show=alerts', { from: '/operator?view=abuse', click: 'Alerts' }],
   ['Operator · abuse · Slack card', '/operator?view=abuse&show=alerts', { dialog: 'High risk' }],
-  ['Operator · lists', '/operator?view=lists', { from: '/operator', click: 'Lists' }],
+  ['Operator · lists', '/operator?view=lists', { from: '/operator?view=abuse', click: 'Lists' }],
   // Health: six facts and one table of what the minute tick last wrote, the open alerts first.
   ['Operator · health', '/operator?view=health', { from: '/operator', click: 'Health' }],
   // Glass: the board's tiles, funnel, region rows (two at least), metric rows and feed column have fixed sizes, and feed
