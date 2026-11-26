@@ -22,7 +22,7 @@ import { LegalFooterLinks } from './LegalLinks'
 import { PrivacyToggle } from './PrivacyToggle'
 import { NightmailWordmark } from './NightmailLogo'
 import { togglePrivacy } from '../lib/privacy'
-import { SupportHost, SupportTrigger, supportTriggerProps, useSupportChat, type SupportChat } from './SupportChat'
+import { SupportHost, supportTriggerProps, useSupportChat, type SupportChat } from './SupportChat'
 import { notesModifierLabel, useUiNotesMode, useUiNotesShortcut } from '../lib/ui-notes-mode'
 import { productName } from '../../../api/src/brand'
 import { newsletterLinks, useNewsletters, useShownNewsletter } from '../features/newsletters/shared'
@@ -79,7 +79,7 @@ export function AppShell() {
   const access = useWorkspaceAccess()
   const location = useLocation()
   const scoreAbout = useScoreAbout()
-  // The support chat, hosted only: Help at the foot of the sidebar (in the top bar and More on a phone or tablet, and ⌘K),
+  // The support chat, hosted only: Help at the foot of the sidebar (in More on a phone or tablet, and ⌘K),
   // one conversation for the whole visit that stays open across pages. A self-hosted installation has no Help.
   const support = useSupportChat({ hosted: access.multiTenant, staff: Boolean(session?.identity?.operator) })
   const help = support.mode ? () => support.setOpen(true) : null
@@ -315,7 +315,6 @@ export function AppShell() {
     <header className="mobile-bar">
       <NavLink className="wordmark" to="/overview" aria-label={`${productName.toLowerCase()} overview`}><NightmailWordmark /></NavLink>
       <div className="mobile-bar__context">{context}</div>
-      {support.mode && <SupportTrigger chat={support} />}
       <ThemeToggle />
     </header>
     {scoreHost}

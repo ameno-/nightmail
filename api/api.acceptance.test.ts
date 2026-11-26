@@ -12353,6 +12353,77 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Support chat tickets: a message the chat could not take goes to Needs you through Nightmail alone, within the hourly limit', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: supportSigningKey() } });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      const { supportPlatform, platformRuntime } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async (req, conversation) => app.fetch(req, { ...runtime, ...platformRuntime(conversation) }), () => runtime.config);
+      const operator = await sessionFixture(t, { staff: true });
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'support ticket acceptance fixture')`, [operator.userId]);
+      const file = (message: string) => local('POST', '/v1/contact-support', { page: '/logs', requestIds: [], ticket: { message } });
+      const inbox = async () => ok(await send('GET', '/v1/operator/support-inbox?view=needs_you&channel=chat', session(operator))).data as Json[];
+
+      // No chat yet, and the support platform is down: the message opens a chat of its own, with a ticket, in Needs you.
+      const first = ok(await file('Why did my import bounce?'), 201);
+      assert.deepEqual([first.token, first.url, first.ticket.replyTo], [null, null, manager!.email], 'A filed handoff is spent: nothing to sign.');
+      const id = first.ticket.conversationId;
+      const row = (await db.query('SELECT channel, user_id, workspace_id, status, ticket_type, agent_state, paused_by, evidence, messages FROM support_conversations WHERE id = $1', [id])).rows[0];
+      assert.deepEqual([row.channel, row.user_id, row.workspace_id, row.status, row.ticket_type, row.agent_state, row.paused_by, row.evidence.filed, row.messages], ['chat', manager!.userId, wid, 'ticketed', 'staff', 'paused', 'ticket', true, 1]);
+      const item = (await inbox()).find(c => c.id === id);
+      assert.ok(item, 'It needs staff at once.');
+      assert.deepEqual([item.needsYou.reasons, item.preview.text, item.customer.userId, item.workspace.id], [['ticket', 'paused'], 'Why did my import bounce?', manager!.userId, wid]);
+      const detail = ok(await send('GET', `/v1/operator/support-inbox/${id}`, session(operator)));
+      assert.deepEqual(detail.messages.map((m: Json) => [m.author, m.kind, m.text]), [['customer', 'filed', 'Why did my import bounce?']]);
+      assert.equal(detail.conversation.page, '/logs');
+      assert.ok(detail.events.some((e: Json) => e.kind === 'ticket' && e.details.reason === 'chat_unavailable' && e.details.by === 'nightmail'), JSON.stringify(detail.events));
+      // It is the person's chat now: the panel continues it.
+      assert.equal(ok(await local('GET', '/v1/support-conversations/current')).conversation.id, id);
+
+      // More from the panel goes into the same conversation; the same words again (a retry) are the same message.
+      const second = ok(await file('It was the CSV from Monday.'), 201), again = ok(await file('It was the CSV from Monday.'), 201);
+      assert.deepEqual([second.ticket.conversationId, again.ticket.messageId], [id, second.ticket.messageId]);
+      assert.equal((await db.query('SELECT messages FROM support_conversations WHERE id = $1', [id])).rows[0].messages, 2);
+      // A filed message is the next thing new: a conversation staff marked done comes back.
+      ok(await send('POST', `/v1/operator/support-inbox/${id}/done`, session(operator), {}));
+      assert.equal((await inbox()).some(c => c.id === id), false);
+      ok(await file('Still bouncing today.'), 201);
+      assert.equal((await inbox()).some(c => c.id === id), true);
+
+      // The support platform reads what it needs to adopt it, through the binding only.
+      const filed = await platform.filedConversation(id);
+      assert.equal(filed.status, 200, JSON.stringify(filed.body));
+      assert.deepEqual([filed.body.filed, filed.body.user.id, filed.body.workspace?.id, filed.body.page, filed.body.messages.map(m => m.text)],
+        [true, manager!.userId, wid, '/logs', ['Why did my import bounce?', 'It was the CSV from Monday.', 'Still bouncing today.']]);
+      error(await local('GET', `/v1/operator/support/conversations/${id}/filed`), 403);
+
+      // A chat the support platform holds (it dropped after the person sent something): the message goes into that chat.
+      assert.equal((await platform.closeConversation(id)).status, 200);
+      const base32 = 'abcdefghijklmnopqrstuvwxyz234567', held = `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`;
+      assert.equal((await platform.registerConversation({ conversationId: held, evidence: { kind: 'handoff', token: ok(await local('POST', '/v1/contact-support', {}), 201).token } })).status, 201);
+      assert.equal((await platform.mirrorMessages(held, [{ id: 'msg_aaaaaaaaaaaaaaaa', author: 'customer', text: 'Can you check my DKIM?' }])).status, 200);
+      const dropped = ok(await file('Can you check my DKIM?'), 201);
+      assert.deepEqual([dropped.ticket.conversationId, dropped.ticket.messageId], [held, 'msg_aaaaaaaaaaaaaaaa'], 'The mirrored copy is the same message.');
+      const heldRow = (await db.query('SELECT ticket_type, status, messages, evidence FROM support_conversations WHERE id = $1', [held])).rows[0];
+      assert.deepEqual([heldRow.ticket_type, heldRow.status, heldRow.messages, heldRow.evidence.filed], ['staff', 'ticketed', 1, undefined]);
+      assert.equal((await platform.filedConversation(held)).body.filed, false);
+      assert.equal(ok(await send('GET', `/v1/operator/support-inbox/${held}`, session(operator))).conversation.page, null, 'Its page is the handoff that opened it.');
+
+      // A ticket's words go in ticket.message alone; and past the hourly limit nothing is filed.
+      error(await local('POST', '/v1/contact-support', { message: 'a', ticket: { message: 'b' } }), 422, 'VALIDATION_FAILED');
+      const used = (await db.query(`SELECT count(*)::int AS n FROM support_handoffs WHERE user_id = $1 AND created_at > now() - interval '1 hour'`, [manager!.userId])).rows[0].n;
+      for (let i = used; i < 10; i++) ok(await file(`More detail ${i}`), 201);
+      error(await file('One too many'), 429, 'SUPPORT_RATE_LIMITED');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM support_messages WHERE text = 'One too many'`)).rows[0].n, 0);
+    });
+  });
+
   test('Support request logs: Workers Logs lines of the conversation’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
     // One clock for the whole test, as Postgres's now() is one for its transaction: the default window ends at the next
     // whole minute and keys the 60-second cache, so two reads either side of a minute boundary missed it (dev, Nov 17).

@@ -920,12 +920,15 @@ async function measure(browser, job, fx) {
       await settle(page, net);
     }
     if (job.support) {
-      // Open the chat and let the greeting finish: the panel is idle and no caret is left in it. From the workspace menu,
-      // a dropdown opens on pointer down and the phone's sheet on click.
+      // Open the chat and let the greeting finish: the panel is idle and no caret is left in it: from the sidebar's Help, the
+      // phone's More, or the workspace menu (a dropdown opens on pointer down, the phone's sheet on click).
       const opened = job.support === 'menu'
         ? await page.evaluate(() => { const trigger = document.querySelector('#sidebar-workspace'); trigger?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' })); trigger?.click(); return Boolean(trigger); })
           && await page.waitForFunction(() => [...document.querySelectorAll('[role=menuitem], .ui-action-sheet__item')].find(el => el.getClientRects().length && el.textContent.trim() === 'Help'), null, { timeout: 10_000 }).then(item => item.evaluate(el => { el.click(); return true; }), () => false)
-        : await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });
+        : await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); })
+          // A phone or tablet has Help in More.
+          || await page.evaluate(() => { const more = [...document.querySelectorAll('.tab-bar button')].find(el => el.getAttribute('aria-label') === 'More'); more?.click(); return Boolean(more); })
+            && await page.waitForFunction(() => [...document.querySelectorAll('.more-sheet__link')].find(el => el.getClientRects().length && el.textContent.trim() === 'Help'), null, { timeout: 10_000 }).then(item => item.evaluate(el => { el.click(); return true; }), () => false);
       if (!opened) problems.push('no Help button');
       else await page.waitForFunction(() => document.querySelector('#support-panel[data-open]:not([data-busy])') && !document.querySelector('#support-panel .support-caret'), null, { timeout: 30_000, polling: 100 });
       await settle(page, net);

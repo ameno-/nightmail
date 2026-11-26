@@ -120,10 +120,11 @@ export function AccountSwitcher({ help = null }: { help?: (() => void) | null } 
     </Sheet>
     {create}
   </>
+  // Near the window's edge (Get started's menu, at the right) the menu keeps the header's own inset from it.
   return <>
     <DropdownPrimitive.Root open={open} onOpenChange={next => { setOpen(next); if (next) intent() }}>
       <DropdownPrimitive.Trigger asChild>{trigger}</DropdownPrimitive.Trigger>
-      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces" data-private
+      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} collisionPadding={12} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces" data-private
         onCloseAutoFocus={event => { if (helping.current) { helping.current = false; event.preventDefault() } }}>
         <div className="ui-popover-scroll">{sections.slice(0, -1).map((section, index) => <MenuGroup key={index} entries={section} named={named} />)}</div>
         <MenuGroup entries={sections[sections.length - 1]} named={named} className="account-menu__actions" />

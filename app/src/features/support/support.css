@@ -73,6 +73,9 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-user { max-width: 100%; padding: var(--space-6) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-2); white-space: pre-wrap; }
 .support-failed { display: flex; align-items: center; gap: var(--space-4); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .support-failed .ui-button { margin-right: calc(-1 * var(--button-pad-x)); }
+/* Under what went to the team as a ticket (the chat couldn't take it): one quiet line, its text read from the left. */
+.support-filed { display: flex; align-items: flex-start; gap: var(--space-6); max-width: 100%; margin: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.support-filed svg { flex: none; margin-top: var(--space-2); }
 
 /* The caret at the end of text that is still arriving. An empty inline box with padding (not an inline-block), so it
    travels with the text without counting as a layout shift. */

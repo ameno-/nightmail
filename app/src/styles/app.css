@@ -176,10 +176,10 @@ html[data-privacy='on']:not([data-peek]) .private-field:not(:focus)::placeholder
 .agent-waiting__review { flex: none; }
 .app-shell--compact .agent-waiting { right: var(--space-8); bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--space-8)); width: calc(100vw - 2 * var(--space-8)); }
 .app-shell--compact .agent-waiting__review { height: var(--control-height); }
-/* A phone's page ends clear of it (the document scrolls, so only its end grows); in onboarding, whose page doesn't
-   scroll to clear it, it sits over the header instead of over the page's last button. */
+/* A phone's page ends clear of it (the document scrolls, so only its end grows). On Get started it sits at the bottom of the
+   screen too, never over the header's controls; that page always ends with room for it (onboarding.css). */
 .app-shell--compact:has(.agent-waiting) { padding-bottom: calc(calc(var(--tab-bar-height) + env(safe-area-inset-bottom)) + var(--space-40) + var(--space-32)); }
-@media (max-width: 640px) { .onboarding-shell .agent-waiting { top: calc(env(safe-area-inset-top) + var(--space-8)); right: var(--space-8); bottom: auto; width: calc(100vw - 2 * var(--space-8)); animation-name: toast-in-top; } }
+@media (max-width: 640px) { .onboarding-shell .agent-waiting { right: var(--space-8); bottom: calc(env(safe-area-inset-bottom) + var(--space-8)); width: calc(100vw - 2 * var(--space-8)); } }
 @media (prefers-reduced-motion: reduce) { .agent-waiting, .agent-waiting__pulse { animation: none; } }
 .standing-banner__fix { flex: none; }
 /* Below 1100 px the text wraps instead of being cut (the reserved lines are two, three on a phone); below 900 px the button drops below it. */
@@ -433,8 +433,8 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
 .account-sheet__account[aria-current] { cursor: default; }
 .account-sheet__workspace { padding-left: calc(var(--space-16) + var(--space-28) + var(--space-12)); }
 /* Help (components/SupportChat.tsx): a row at the foot of the sidebar on a desktop, with the chat docked in the page's
-   bottom-right corner (notices move to its left while it is open); in the top bar on a phone or tablet. A dot marks a
-   reply that arrived while the chat was closed. --launcher-size and --launcher-inset place the corner's floating controls
+   bottom-right corner (notices move to its left while it is open); in More on a phone or tablet. A dot at the row's end
+   marks a reply that arrived while the chat was closed. --launcher-size and --launcher-inset place the corner's floating controls
    (the chat, UI notes' tray). */
 :root { --launcher-size: 32px; --launcher-inset: calc(var(--page-inset) + var(--space-16)); }
 /* Toasts and an agent's waiting card stay clear of the open chat: beside its docked card on a desktop (the dashboard's and
@@ -446,18 +446,9 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
 }
 @media (min-width: 900px) and (prefers-reduced-motion: no-preference) { .agent-waiting { transition: translate 260ms var(--ease-out-strong); } }
 @media (max-width: 899px) { body:has(#support-panel[data-open]) .agent-waiting { visibility: hidden; } }
-/* The support address, where the chat can't help: underlined in the text's own colour, so it reads as the way forward. */
-.support-email { position: relative; color: var(--color-text); text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; overflow-wrap: anywhere; }
-/* A 44px tall target for a finger, without moving the line it sits in. */
-.support-email::after { content: ''; position: absolute; inset: calc(-1 * var(--space-16)) calc(-1 * var(--space-4)); }
-.support-trigger { position: relative; }
-.support-trigger:not(.sidebar-action)[aria-expanded='true'] { background: var(--color-layer-2); color: var(--color-text); }
-.support-trigger::before { content: ''; position: absolute; top: 3px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-text); box-shadow: 0 0 0 2px var(--color-deep); opacity: 0; transform: scale(.4); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); pointer-events: none; }
-/* In the sidebar's row the dot sits at the row's end, where the navigation's shortcuts are. */
-.sidebar-action.support-trigger::before { position: static; flex: none; order: 1; box-shadow: none; }
+/* The dot sits at the row's end, where the navigation's shortcuts are. */
+.support-trigger::before { content: ''; flex: none; order: 1; width: 6px; height: 6px; border-radius: 50%; background: var(--color-text); opacity: 0; transform: scale(.4); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); pointer-events: none; }
 .support-trigger[data-unread]::before { opacity: 1; transform: none; }
-.mobile-bar .support-trigger { flex: none; width: 44px; height: 44px; margin-right: calc(-1 * var(--space-8)); }
-.mobile-bar .support-trigger::before { top: 11px; right: 11px; }
 .support-panel--error { position: fixed; right: var(--launcher-inset); bottom: calc(var(--launcher-inset) + var(--launcher-size) + var(--space-12)); z-index: 40; display: flex; flex-direction: column; width: min(400px, calc(100vw - var(--sidebar-width) - 2 * var(--launcher-inset))); height: auto; background: var(--color-surface); color: var(--color-text); border-radius: var(--radius-lg); box-shadow: var(--shadow-dialog); overflow: hidden; }
 .support-panel--error.support-panel--sheet { inset: auto 0 calc(var(--tab-bar-height, 0px) + env(safe-area-inset-bottom)); width: auto; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; }
 .support-panel--error .support-panel__header { display: flex; align-items: center; gap: var(--space-12); height: 56px; padding: 0 var(--space-8) 0 var(--space-16); border-bottom: 1px solid var(--color-border-muted); }

@@ -20492,6 +20492,35 @@
           },
           "shareContent": {
             "type": "boolean"
+          },
+          "ticket": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "conversationId": {
+                "type": "string",
+                "description": "Your support chat that now holds the message: the Help panel continues it."
+              },
+              "messageId": {
+                "type": "string",
+                "description": "The message as the conversation holds it."
+              },
+              "replyTo": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Where the team replies by email: your account address."
+              }
+            },
+            "required": [
+              "conversationId",
+              "messageId",
+              "replyTo"
+            ],
+            "description": "The message filed as a ticket (ticket in the request), or null."
           }
         },
         "required": [
@@ -20499,7 +20528,8 @@
           "url",
           "token",
           "expiresAt",
-          "shareContent"
+          "shareContent",
+          "ticket"
         ]
       },
       "BillingSummary": {
@@ -73712,6 +73742,22 @@
                   "message": {
                     "type": "string",
                     "maxLength": 2000
+                  },
+                  "ticket": {
+                    "type": "object",
+                    "properties": {
+                      "message": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 8000,
+                        "description": "What the person wrote, as they wrote it in the chat."
+                      }
+                    },
+                    "required": [
+                      "message"
+                    ],
+                    "additionalProperties": false,
+                    "description": "The support chat couldn't take this message (it couldn't start, Nightmail support couldn't be reached, or it dropped after it was sent): file it as a ticket for the team instead. It goes into your open support chat in this workspace, or opens one, and the team replies by email to your account address, and in the chat. Counts against the same hourly limit. Send the words here, not in message."
                   }
                 },
                 "additionalProperties": false

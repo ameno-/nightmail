@@ -1,18 +1,18 @@
 import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useLocation } from 'react-router'
-import { MessageCircleQuestionMark, X } from 'lucide-react'
+import { X } from 'lucide-react'
 import { chunk } from '../lib/preloadable'
 import { usePhone } from '../lib/media'
 import { Button, IconButton } from './ui'
 import { NightmailMark } from './NightmailLogo'
-import { addresses, productName } from '../../../api/src/brand'
+import { productName } from '../../../api/src/brand'
 
 // The support chat's Help controls and the panel's host, in the dashboard shell (AppShell) and on Get started, which has no
 // shell (onboarding). The panel's code loads once the page is idle (hover, focus or press warms it sooner); the
 // conversation and its transport start when Help opens.
 //
 // Where it runs: every hosted workspace talks to the live support Worker; a self-hosted installation has no Help. Help is
-// the only way to reach support from the dashboard: when the chat can't start, the panel says so with the support address.
+// the only way to reach support from the dashboard: what the chat can't take goes to the team as a ticket.
 // ?support=demo (kept for the browser session; ?support=off clears it) gets the scripted demo conversation, in development
 // and for Nightmail staff only. ?support=<conversationId> opens the panel on that chat conversation; an email conversation
 // continues by email, so Help opens a conversation of its own instead.
@@ -53,15 +53,11 @@ export function useSupportChat({ hosted, staff }: { hosted: boolean; staff: bool
 }
 
 // What makes a control the chat's Help: it toggles the panel, warms its code first, and a dot marks a reply that arrived
-// while the chat was closed. The sidebar's Help row (AppShell) on a desktop; the top bar's button on a phone or tablet.
+// while the chat was closed. The sidebar's Help row (AppShell); a phone or tablet opens the chat from More, and ⌘K finds it.
 export function supportTriggerProps(chat: SupportChat) {
   return { id: 'support-trigger', className: 'support-trigger', 'aria-haspopup': 'dialog' as const, 'aria-expanded': chat.open, 'aria-controls': chat.used ? 'support-panel' : undefined,
     'aria-description': chat.unread && !chat.open ? 'New reply' : undefined, 'data-unread': chat.unread || undefined,
     onPointerEnter: chat.preload, onFocus: chat.preload, onPointerDown: chat.preload, onClick: () => chat.setOpen(!chat.open) }
-}
-export function SupportTrigger({ chat }: { chat: SupportChat }) {
-  const label = chat.open ? 'Close help' : chat.unread ? 'Help (new reply)' : 'Help'
-  return <IconButton {...supportTriggerProps(chat)} aria-description={undefined} variant="ghost" size="sm" label={label}><MessageCircleQuestionMark size={16} /></IconButton>
 }
 
 export function SupportHost({ chat }: { chat: SupportChat }) {
@@ -90,9 +86,6 @@ export function SupportHost({ chat }: { chat: SupportChat }) {
   </SupportErrorBoundary>
 }
 
-/** The support address, as a link: what the panel offers whenever the chat can't help (it can't start, or stops). */
-export function SupportEmail() { return <a className="support-email" href={`mailto:${addresses.support}`}>{addresses.support}</a> }
-
 // Isolates any render or chunk failure inside the support panel so it never takes down the dashboard.
 class SupportErrorBoundary extends Component<{ open: boolean; phone: boolean; onClose: () => void; children: (attempt: number) => ReactNode }, { failed: boolean; attempt: number }> {
   state = { failed: false, attempt: 0 }
@@ -115,7 +108,7 @@ class SupportErrorBoundary extends Component<{ open: boolean; phone: boolean; on
           <div className="support-panel__actions"><IconButton label="Close" onClick={onClose}><X size={16} /></IconButton></div>
         </header>
         <div className="support-error" role="alert">
-          <p>Support couldn’t load: retry, or email <SupportEmail />.</p>
+          <p>Support couldn’t load.</p>
           <Button size="sm" onClick={this.retry}>Retry</Button>
         </div>
       </section>

@@ -1,6 +1,6 @@
 import { supportActionsApi, supportApi, type CurrentSupportConversation } from '../../data/support'
 import { ApiError } from '../../data/types'
-import { parseServerMessage, sniff, type ClientMessage, type Connection, type SupportTransport, type TransportEvent } from './protocol'
+import { FileError, parseServerMessage, sniff, type ClientMessage, type Connection, type FiledTicket, type SupportTransport, type TransportEvent } from './protocol'
 import { hostedHosts, productName, supportHost } from '../../../../api/src/brand'
 
 // The live transport (support/PROTOCOL.md §1–2, §5): one continuous conversation per person and workspace.
@@ -95,6 +95,19 @@ const handoff = async (shareContent: boolean) => {
   return token
 }
 
+/** Files a message the chat can't take as a ticket for the team (POST /v1/contact-support with ticket): Nightmail's own
+ *  API, so it works while the support Worker is down. 429 is the person's hourly limit; anything else is kept and retried. */
+async function fileTicket(text: string): Promise<FiledTicket> {
+  try {
+    const { ticket } = await supportApi.contact({ shareContent: false, ticket: text })
+    if (!ticket) throw new FileError('unreachable')
+    return ticket
+  } catch (error) {
+    if (error instanceof FileError) throw error
+    throw new FileError(error instanceof ApiError && error.status === 429 ? 'capped' : 'unreachable')
+  }
+}
+
 export function createSocketTransport({ origin, userId, workspaceId, resume }: { origin: string; userId: string; workspaceId: string; resume?: string | null }): SupportTransport {
   forgetSaved(false)
   const key = storageKey(userId, workspaceId)
@@ -111,8 +124,16 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
   // signing another, so an outage doesn't use up the person's handoffs for the hour (10, api/src/support.ts) and keep the
   // chat refused after the service is back.
   let unspent: { token: string; at: number } | null = null
+  // The support Worker couldn't be reached last time: a new handoff (each counts against that same hourly limit, as every
+  // filed ticket does) waits until it answers again, asked with a request that spends nothing (an empty resume: 400).
+  let unreachable = false
+  const answers = async () => {
+    try { return (await fetch(`${origin}/chat/resume`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status < 500 }
+    catch { return false }
+  }
   const nextHandoff = async () => {
     if (unspent && Date.now() - unspent.at < 8 * 60_000) return unspent.token
+    if (unreachable && !await answers()) throw new StartError(0, 'NETWORK')
     const token = await handoff(false)
     unspent = { token, at: Date.now() }
     return token
@@ -191,6 +212,7 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
         if (current !== generation) return
         if (error instanceof StartError && error.code === 'RATE_LIMITED') { setState('unavailable', { reason: 'RATE_LIMITED', retryAt: Date.now() + (error.retryAfter ?? 60) * 1000 }); return }
         if (error instanceof StartError && (error.code === 'NO_HANDOFF' || error.status >= 400 && error.status < 500 && error.status !== 408)) { setState('unavailable', { reason: error.code }); return }
+        unreachable = true
         schedule()
         return
       }
@@ -199,7 +221,7 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
       let opened = false
       const ws = socket = new WebSocket(started.socketUrl)
       ws.onopen = () => {
-        opened = true; attempt = 0
+        opened = true; attempt = 0; unreachable = false
         setState('open')
         ping = setInterval(() => send({ type: 'ping' }), 30_000)
       }
@@ -271,20 +293,28 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
       }
     },
     restart() { save(key, null); started = null; wantCreate = false; generation++; teardown(); attempt = 0; setState('ready') },
+    // The ticket's conversation is this person's chat now (Nightmail put the message in their open chat, or opened one):
+    // reconnecting resumes it, never starts another.
+    async file(text) {
+      const ticket = await fileTicket(text)
+      wantCreate = false
+      if (started?.conversationId !== ticket.conversationId) { started = null; save(key, { conversationId: ticket.conversationId }) }
+      return ticket
+    },
     dispose() { disposed = true; generation++; clearTimeout(retry); teardown(); window.removeEventListener('online', online); listeners.clear() },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
   }
 }
 
 /** No support Worker for this dashboard (supportOrigin() is null): refused from the start (a listener hears it as it
- *  subscribes, so the panel never shows a loading state first), and the panel gives the support address instead. */
+ *  subscribes, so the panel never shows a loading state first), so every message is filed as a ticket for the team. */
 export function createUnavailableTransport(): SupportTransport {
   const listeners = new Set<(event: TransportEvent) => void>()
   const refused: TransportEvent = { type: 'connection', state: 'unavailable', reason: 'NOT_CONFIGURED' }
   const refuse = () => { for (const listener of listeners) listener(refused) }
   const unavailable = () => Promise.reject(new Error(`${productName} support isn’t available here.`))
   return {
-    kind: 'live', connect: refuse, send: () => false, allowContent: async () => {}, readAction: unavailable, decideAction: unavailable, restart: refuse,
+    kind: 'live', connect: refuse, send: () => false, allowContent: async () => {}, readAction: unavailable, decideAction: unavailable, restart: refuse, file: fileTicket,
     uploads: false, upload: unavailable, dispose: () => listeners.clear(),
     subscribe(listener) { listeners.add(listener); listener(refused); return () => { listeners.delete(listener) } },
   }
