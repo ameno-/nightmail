@@ -30,7 +30,8 @@ import { EXPIRES_MS, isKind, KINDS, validToken } from './support-approvals.js';
 // The conversation page is one timeline: every message (the customer's, each with the stored email it came from when it
 // was mailed; the agent's, sent or held and why; staff replies and staff notes) and what happened besides
 // (support_events: a ticket filed, its priority, the agent paused and handed back, resolved, done), with the agent's
-// ticket brief above it. A staff note (kind 'note') is never delivered and changes no triage.
+// ticket brief above it. A note (kind 'note': a staff member's, or the feedback triage agent's on an agent feedback report,
+// author agent, src/feedback-triage.ts) is never delivered and changes no triage.
 //
 // Needs you, the inbox's default view, is what only a person can move forward. A conversation needs staff when nobody
 // marked it done since anything new happened (a message, a failed delivery, more blocked work, a ticket, a pause) and at
@@ -344,6 +345,7 @@ export function registerSupportInbox(app: App) {
       if (m.delivery && m.author !== 'agent') throw new ApiError(422, 'VALIDATION_FAILED', 'Only an agent answer has a delivery.', `messages.${i}.delivery`);
       if (m.reason && m.delivery !== 'held') throw new ApiError(422, 'VALIDATION_FAILED', 'Only a held answer has a reason.', `messages.${i}.reason`);
       if (m.source && m.author !== 'customer') throw new ApiError(422, 'VALIDATION_FAILED', 'Only a customer message comes from an email.', `messages.${i}.source`);
+      if (m.kind === 'note') throw new ApiError(422, 'VALIDATION_FAILED', 'A note comes from staff or the feedback triage agent, never from a mirror.', `messages.${i}.kind`);
       if (m.at && Date.parse(m.at) > Date.now() + 5 * 60_000) throw new ApiError(422, 'VALIDATION_FAILED', 'A message cannot be written in the future.', `messages.${i}.at`);
       if (messages.findIndex(other => other.id === m.id) !== i) throw new ApiError(422, 'VALIDATION_FAILED', 'Each message appears once.', `messages.${i}.id`);
     });
