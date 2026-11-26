@@ -568,11 +568,17 @@ export function registerSupportConversations(app: App) {
       // One request per address at a time (the waitlist's links take the same lock), so both counts hold.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${email},46400))`);
       // That account's own presses, from a session that proves no mailbox, are the person the email came from asking: they
-      // neither count nor are refused, so someone holding a leaked link can't use up the day's links and lock them out. Every
-      // other press counts, whether or not a link is made, so a refusal never says whether an account has the address (only
-      // the account itself is told apart, and it knows its own address).
+      // don't count against anyone else's, so someone holding a leaked link can't use up the day's links and lock them out,
+      // and they have a daily allowance of their own per address (as many as the address's), so they never make unlimited
+      // mail either. Every other press counts, whether or not a link is made, so a refusal never says whether an account has
+      // the address (only the account itself is told apart, and it knows its own address).
       const { rows: [own] } = await tx.execute<{ is: boolean }>(sql`SELECT EXISTS (SELECT FROM nightmail_users u WHERE u.id = ${presser.userId} AND ${forAccount}) AS is`);
-      if (!own!.is) {
+      if (own!.is) {
+        const charged = await tx.execute(sql`INSERT INTO api_request_budgets AS b(workspace_id, key_id, window_start, used) VALUES ('global', ${`support-signin-own:${await digest(email)}`}, date_trunc('day', now()), 1)
+          ON CONFLICT (workspace_id, key_id) DO UPDATE SET used = CASE WHEN b.window_start = excluded.window_start THEN b.used + 1 ELSE 1 END, window_start = excluded.window_start
+          WHERE b.window_start <> excluded.window_start OR b.used < ${SUPPORT_LINKS.perAddress} RETURNING 1`);
+        if (!charged.rowCount) throw new ApiError(429, 'SIGN_IN_LINK_LIMIT', 'Too many sign-in links were asked for today. Use one already sent, or try again tomorrow.');
+      } else {
         const today = sql`link_window_at > now() - interval '1 day'`;
         const { rows: [asked] } = await tx.execute<{ conversation: number; address: number }>(sql`SELECT
           (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE conversation_id = ${conversationId} AND ${today}) AS conversation,

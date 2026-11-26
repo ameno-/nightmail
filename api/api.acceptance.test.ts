@@ -2443,6 +2443,10 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 and two 
   assert.deepEqual(await answer(await ask(again,{},as(bob))).then(([s,b])=>[s,b.error.code]),[429,'SIGN_IN_LINK_LIMIT']);
   assert.equal((await ask(again,{},as(ada))).status,202);
   assert.equal((await links(again)).length,SUPPORT_LINKS.perAddress-SUPPORT_LINKS.perConversation+1);
+  // Ada's own presses have an allowance of their own, as many a day as the address's (four used): never unlimited mail.
+  assert.equal((await ask(again,{},as(ada))).status,202);
+  assert.deepEqual(await answer(await ask(again,{},as(ada))).then(([s,b])=>[s,b.error.code]),[429,'SIGN_IN_LINK_LIMIT']);
+  assert.equal((await links(again)).length,SUPPORT_LINKS.perAddress-SUPPORT_LINKS.perConversation+2);
   // Per network: its pending sign-ins (eight), whatever the conversation, before anything is looked up.
   const network = {'x-nightmail-client-ip':`2001:db8:${net}:77::1`}, lost = {id:`conv_${'c'.repeat(26)}`,message:mine.message};
   for (let i = 0; i < 8; i++) assert.equal((await ask(lost,{},{...as(ada),...network})).status,404);
