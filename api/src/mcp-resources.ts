@@ -128,6 +128,14 @@ type Schema = Record<string, any>;
 // Listing only: show required fields and everyday options without copying entire DTOs.
 // Omitted properties remain valid in their normal positions. Dispatch always validates
 // against the full operation, never against this deliberately open summary.
+// A field's type alone (no properties or variants), for fields below the summarised depth.
+function typeOnly(field: Schema, defs: Schema): Schema {
+  if (field.$ref) return typeOnly(defs[field.$ref.slice('#/$defs/'.length)], defs);
+  if (field.type) return { type: field.type };
+  if (Array.isArray(field.enum) && field.enum.every((x: unknown) => typeof x === 'string')) return { type: 'string' };
+  const types = [...new Set(((field.oneOf ?? field.anyOf) as Schema[] | undefined ?? []).flatMap(v => [typeOnly(v, defs).type ?? []].flat()))];
+  return types.length ? { type: types.length === 1 ? types[0] : types } : {};
+}
 function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
   if (field.$ref) return fieldSummary(defs[field.$ref.slice('#/$defs/'.length)], defs, depth);
   if (field.const !== undefined) return { const: field.const };
@@ -142,16 +150,20 @@ function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
       if (other && typeof other.type === 'string' && !other.properties && !other.items && !other.enum && !other.oneOf && !other.anyOf) return { type: [other.type, 'null'] };
     }
     // Nested unions (e.g. segment rule ASTs) belong in describe_tool rather than duplicating every variant in tools/list.
-    if (depth >= 1) return resolved.every(v => v.type === 'object' || v.properties) ? { type: 'object' } : {};
+    if (depth >= 1) return resolved.every(v => v.type === 'object' || v.properties) ? { type: 'object' } : typeOnly(field, defs);
     return { anyOf: variants.map(v => fieldSummary(v, defs, depth + 1)) };
   }
   const schema: Schema = field.type ? { type: field.type } : {};
-  if (field.items) schema.items = depth < 1 ? fieldSummary(field.items, defs, depth + 1) : {};
+  if (field.items) schema.items = depth < 1 ? fieldSummary(field.items, defs, depth + 1) : typeOnly(field.items, defs);
   if (depth < 1 && field.properties) {
     const required: string[] = field.required ?? [];
     const properties = Object.entries<Schema>(field.properties).filter(([k]) => required.includes(k) || commonBodyFields.has(k));
     if (properties.length) schema.properties = Object.fromEntries(properties.map(([k, v]) => [k, fieldSummary(v, defs, depth + 1)]));
     if (required.length) schema.required = required;
+  } else if (depth === 1 && field.properties && field.required?.length) {
+    // One level further: a nested object's required fields, by type only.
+    schema.properties = Object.fromEntries((field.required as string[]).filter(k => field.properties[k]).map(k => [k, typeOnly(field.properties[k], defs)]));
+    schema.required = field.required;
   }
   return schema;
 }

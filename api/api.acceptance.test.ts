@@ -742,6 +742,17 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
     // A resource with one action (sendFeedback) lists that action's arguments without a branch.
     const branch = schema.oneOf ? schema.oneOf.find((v:Json)=>v.properties.action.const===action) : schema;
     assert.ok(branch, `${name}.${action}`); assert.deepEqual(branch.required ?? [], catalog.get(operation)!.tool.inputSchema.required ?? []);
+    // Every required field and required array item in the plain summary keeps a concrete schema (never empty {}).
+    const checkReq = (node: Json, at: string) => {
+      for (const req of (node?.required ?? []) as string[]) {
+        const prop = node.properties?.[req];
+        if (!prop) continue;
+        assert.ok(Object.keys(prop).length > 0, `${at}.${req} lost its type`);
+        if (prop.type === 'array' && prop.items) assert.ok(Object.keys(prop.items).length > 0, `${at}.${req}[] lost its item type`);
+        checkReq(prop, `${at}.${req}`);
+      }
+    };
+    checkReq(branch, `${name}.${action}`);
   }
   for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);
   // Campaign delivery controls are owner/admin only; MCP listings follow REST, so a member's grant is never offered them.

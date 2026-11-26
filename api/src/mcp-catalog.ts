@@ -429,7 +429,7 @@ export const HUMAN_STEPS: Record<string, string> = {
   downloadInboundAttachment: 'The link webhook payloads carry: it redirects to the file. Agents read the same link with getInboundAttachment (attachments · getInbound), which answers the same credentials.',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
   bindMcpConnection: 'Human step: a signed-in person binds a connected MCP client to a default workspace in the dashboard. Agents set their own default with setDefaultWorkspace.',
-  listAgents: 'Dashboard step: lists connected agents and MCP sign-ins for a signed-in owner or admin.',
+  listAgents: 'Human step: lists connected agents and MCP sign-ins for a signed-in owner or admin in the dashboard.',
   revokeAgent: 'Human step: a signed-in owner or admin revokes a connected agent or MCP sign-in in the dashboard.',
 };
 /** Internal routes (Nightmail operators and support grants): never tools, and not listed in the customer coverage document. */
