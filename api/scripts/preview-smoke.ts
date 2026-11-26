@@ -58,18 +58,33 @@ for (const [path, type, text] of [['/compare/resend.md', 'text/markdown', '# Nig
   if (response.status !== 200 || !response.headers.get('content-type')?.startsWith(type) || !body.includes(text)) failures.push(`GET ${path}: expected ${type} with “${text}”, got HTTP ${response.status} ${response.headers.get('content-type')}.`);
 }
 // Every address the sitemap lists is a page search engines may index: 200, its own og:url, and no noindex in an
-// X-Robots-Tag or a robots meta (a signed-in screen's header must never reach a public page). Its Markdown twin, for each
-// price page, is Markdown.
+// X-Robots-Tag or a robots meta (a signed-in screen's header must never reach a public page); and the Markdown twin its
+// head names is Markdown (a price page's <path>.md, an operation's /docs/operations/<id>.md, a guide's /docs.md, a legal
+// document's /legal/<slug>.md). The docs and legal pages are in it (app/site-pages.ts), so these are some 700 requests:
+// one the dev proxy drops is asked again, as above.
+const fetchKept = async (path: string) => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) }), body = await response.text();
+      const dropped = response.status === 500 && !response.headers.get('x-request-id') && (response.headers.get('content-type') ?? '').startsWith('text/plain');
+      if (!dropped || attempt === 2) return { response, body };
+    } catch (error) { if (attempt === 2) throw error; }
+    retried++;
+  }
+};
 const sitemap = await (await fetch(origin + '/sitemap.xml', { signal: AbortSignal.timeout(20_000) })).text();
 const listed = [...sitemap.matchAll(/<loc>https?:\/\/[^/<]+([^<]*)<\/loc>/g)].map(match => match[1] || '/');
+const twins = new Map<string, boolean>();
 for (const path of listed) {
-  const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
-  const html = await response.text(), robots = response.headers.get('x-robots-tag') ?? '';
+  const { response, body: html } = await fetchKept(path), robots = response.headers.get('x-robots-tag') ?? '';
   if (response.status !== 200 || /noindex/i.test(robots) || /<meta name="robots" content="[^"]*noindex/i.test(html)) failures.push(`GET ${path} (in sitemap.xml): expected an indexable 200, got HTTP ${response.status}${robots ? `, X-Robots-Tag: ${robots}` : ''}${/<meta name="robots"/.test(html) ? ', a robots meta' : ''}.`);
   if (path !== '/' && !new RegExp(`<meta property="og:url" content="[^"]*${path}" />`).test(html)) failures.push(`GET ${path} (in sitemap.xml): its HTML doesn't name it as its og:url.`);
-  if (path.startsWith('/pricing/') || path.startsWith('/compare/')) {
-    const twin = await fetch(origin + path + '.md', { signal: AbortSignal.timeout(20_000) });
-    if (twin.status !== 200 || !twin.headers.get('content-type')?.startsWith('text/markdown')) failures.push(`GET ${path}.md: expected its Markdown twin, got HTTP ${twin.status} ${twin.headers.get('content-type')}.`);
+  const twin = /<link rel="alternate" type="text\/markdown" href="https?:\/\/[^/"]+([^"]+)"/.exec(html)?.[1];
+  if (!twin) { failures.push(`GET ${path} (in sitemap.xml): its head names no Markdown twin.`); continue; }
+  if (!twins.has(twin)) {
+    const { response: copy } = await fetchKept(twin);
+    twins.set(twin, copy.status === 200 && !!copy.headers.get('content-type')?.startsWith('text/markdown'));
+    if (!twins.get(twin)) failures.push(`GET ${twin} (the Markdown twin of ${path}): expected Markdown, got HTTP ${copy.status} ${copy.headers.get('content-type')}.`);
   }
 }
 const missing = await fetch(origin + '/assets/does-not-exist.js');

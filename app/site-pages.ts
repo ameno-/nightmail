@@ -19,16 +19,25 @@ import { docsTitle, operationDescription, operationEntries, operationTitle } fro
 // - The legal pages (features/legal): legal.html for /legal and legal/<slug>.html for each document in
 //   features/legal/content, named and described by its front matter, its card dated by its `updated`. Each document's
 //   Markdown is its twin (legal/<slug>.md), and the index's is legal.md.
-// Workers Assets and api/src/server.ts serve each file at its address; an operation or a legal document with no page is
-// not found (api/src/site-index.ts). The canonical address names the hosted site on every stage, as the price pages' does;
+// Each is listed in sitemap.xml (below). Workers Assets and api/src/server.ts serve each file at its address; an
+// operation or a legal document with no page is not found (api/src/site-index.ts). The canonical address names the hosted site on every stage, as the price pages' does;
 // the card is fetched from the stage's own host, as index.html's is; a stage on another host still asks not to be
 // indexed (vite.config.ts, publicOrigin).
 const attr = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
 const openApi = fileURLToPath(new URL('../api/openapi.json', import.meta.url))
 const legalContent = fileURLToPath(new URL('./src/features/legal/content/', import.meta.url))
 
-/** names: a docs page's own names, without the docs', longest first (a link preview's title falls back to them). */
-type SitePage = { path: string; title: string; names?: string[]; description: string; markdown: string; card: CardWords; twin?: string }
+/** names: a docs page's own names, without the docs', longest first (a link preview's title falls back to them).
+ *  modified: the sitemap's lastmod (YYYY-MM-DD), where the page has a date of its own. */
+type SitePage = { path: string; title: string; names?: string[]; description: string; markdown: string; card: CardWords; twin?: string; modified?: string }
+
+/** A legal document's date as its front matter writes it ("26 November 2026"), as a sitemap's lastmod (2026-11-26). */
+function isoDay(day: string): string {
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+  const match = /^(\d{1,2}) ([A-Z][a-z]+) (\d{4})$/.exec(day.trim()), month = match ? months.indexOf(match[2]!) : -1
+  if (!match || month < 0) throw new Error(`A legal document's date isn't "26 November 2026"-shaped: ${day}`)
+  return `${match[3]}-${String(month + 1).padStart(2, '0')}-${match[1]!.padStart(2, '0')}`
+}
 
 /** A title as a card's lines: one if it fits, else two (a card has room for no more) of near lengths, the first the longer
  *  by a little ("Give a coding agent / its own key", "Send from the / built-in domain"). */
@@ -62,10 +71,10 @@ export function sitePages(): Plugin {
         { path: '/docs', title: docsTitle(null), description: document.info.description ?? '', markdown: '/docs.md', card: docsCard },
         ...GUIDE_NAMES.map(guide => ({ path: `/docs/${guide.id}`, title: docsTitle(guide.title), names: [guide.title], description: guide.summary, markdown: '/docs.md', card: { name: `docs-${guide.id}`, lines: titleLines(guide.title), caption: `Guide · ${productName} API docs` } })),
         ...operations.map(operation => ({ path: `/docs/api/${operation.id}`, title: docsTitle(operation.summary), names: [operation.summary, operationTitle(operation.id)], description: operationDescription(operation), markdown: `/docs/operations/${operation.id}.md`, card: docsCard })),
-        { path: '/legal', title: legalTitle('Legal'), description: `The terms and policies that apply to ${productName}: ${legal.map(doc => doc.title).join(', ')}.`, markdown: '/legal.md',
+        { path: '/legal', title: legalTitle('Legal'), modified: isoDay(latest), description: `The terms and policies that apply to ${productName}: ${legal.map(doc => doc.title).join(', ')}.`, markdown: '/legal.md',
           card: { name: 'legal', lines: ['Terms and policies'], caption: `${legal.length} documents, last updated ${latest}.` },
           twin: [`# Legal`, `Canonical page: ${publicOrigin}/legal`, `The terms and policies that apply to ${productName}.`, legal.map(doc => `- [${doc.title}](${publicOrigin}/legal/${doc.slug}.md): ${doc.description} Updated ${doc.updated}.`).join('\n')].join('\n\n') + '\n' },
-        ...legal.map(doc => ({ path: `/legal/${doc.slug}`, title: legalTitle(doc.title), description: doc.description, markdown: `/legal/${doc.slug}.md`,
+        ...legal.map(doc => ({ path: `/legal/${doc.slug}`, title: legalTitle(doc.title), modified: isoDay(doc.updated), description: doc.description, markdown: `/legal/${doc.slug}.md`,
           card: { name: `legal-${doc.slug}`, lines: titleLines(doc.title), caption: `Updated ${doc.updated}.` },
           twin: [`# ${doc.title}`, `Canonical page: ${publicOrigin}/legal/${doc.slug}`, `Updated ${doc.updated}. Effective ${doc.effective}.`, doc.body].join('\n\n') + '\n' })),
       ]
@@ -91,6 +100,16 @@ export function sitePages(): Plugin {
         this.emitFile({ type: 'asset', fileName: `${page.path.slice(1)}.html`, source: html })
         if (page.twin) this.emitFile({ type: 'asset', fileName: page.markdown.slice(1), source: page.twin })
       }
+      // Every page here joins the sitemap the price pages wrote (price-pages.ts, earlier in vite.config.ts's plugins): each
+      // is public, answers 200 and names itself as canonical (the support agent's operations are in no API definition, so
+      // they have no page here and stay not found). A legal document's lastmod is its own updated date, the index's the
+      // newest of them. The docs pages have none: api/openapi.json carries no date, and the deploy's checkout is shallow
+      // (a Docker build has no history), so a date from git would claim every page changed on every deploy, and no
+      // lastmod is truer than that. One file for all of them: 345 addresses are far inside a sitemap's 50,000, and the
+      // address Search Console reads (robots.txt names it) stays the same.
+      const sitemap = bundle['sitemap.xml']
+      if (sitemap?.type !== 'asset' || !String(sitemap.source).includes('</urlset>')) return this.error('The site\'s pages join sitemap.xml, which price-pages.ts writes first: the bundle has none.')
+      sitemap.source = String(sitemap.source).replace('</urlset>', pages.map(page => `  <url><loc>${publicOrigin}${page.path}</loc>${page.modified ? `<lastmod>${page.modified}</lastmod>` : ''}</url>\n`).join('') + '</urlset>')
       // An old name redirects to its new page (site-index.ts): the page must exist, and the old name must be no operation's.
       for (const [old, now] of Object.entries(RENAMED_OPERATIONS)) if (!pages.some(page => page.path === `/docs/api/${now}`) || pages.some(page => page.path === `/docs/api/${old}`)) this.error(`RENAMED_OPERATIONS (api/src/site-index.ts) sends ${old} to ${now}, which has no reference page, or ${old} is an operation again.`)
       if (!pages.some(page => page.path === '/docs/api/sendEmail')) this.error(`The docs pages have no sendEmail: api/openapi.json isn't ${productName}'s API definition.`)
