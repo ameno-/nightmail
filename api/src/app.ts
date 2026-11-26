@@ -229,6 +229,7 @@ function logRequest(c: Ctx, durationMs: number) {
   countRequest({ route, method: c.req.method, status, durationMs: activeMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
     event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs, slow: durationMs >= SLOW_REQUEST_MS || undefined,
+    ...(failure?.mcpStale ? { protocolEra: 'legacy', staleReason: failure.mcpStale } : {}),
     code, field: failure?.field, databaseCode: failure?.databaseCode, attachment: failure?.attachmentTypes,
     // Which endpoint a caller expected, scrubbed (unmatchedTemplate): only for a path no route answered.
     path: route === 'unmatched' ? unmatchedPath(c, workspace || undefined) : undefined,
