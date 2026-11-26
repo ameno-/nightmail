@@ -4,31 +4,34 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
  *  CSS) goes as the app's page is first drawn, in the same frame and at the same place, so nothing moves: the reader's
  *  scroll stays, their focus moves to the same control here, the rows they opened stay open, what they typed or slid is
  *  set here, and a button they pressed while the app loaded (home/shell/boot.js holds it) is pressed here.
- *  shell: the shell's id; page: the app's page under #root. Whether there was one. */
-export function useShellTakeover(shellId: string, page: string) {
+ *  shell: the shell's id; page: the app's page under #root; ready: whether the app's page has all it shows (a reference
+ *  page waits for the API definition and this installation's address, and the painted page stays over it until then).
+ *  Whether there was one. */
+export function useShellTakeover(shellId: string, page: string, ready = true) {
   const [painted] = useRef([typeof document !== 'undefined' && document.getElementById(shellId) !== null]).current
   const carried = useRef<{ typed: (string | null)[]; pressed: Place | null } | null>(null)
   useLayoutEffect(() => {
     const shell = document.getElementById(shellId)
-    if (!shell) return
+    if (!shell || !ready) return
     const focused = placeOf(shell, document.activeElement), opened = [...shell.querySelectorAll('details')].map(row => row.open)
     const held = window as Window & { __nightmailShellPress?: Element }
     carried.current = { typed: [...shell.querySelectorAll('input')].map(input => input.value !== input.defaultValue ? input.value : null), pressed: placeOf(shell, held.__nightmailShellPress) }
     delete held.__nightmailShellPress
     shell.remove()
-    document.querySelector('style[data-shell-css]')?.remove()
+    document.querySelector('[data-shell-css]')?.remove()
     // The rows the reader opened (a price page's questions, a legal page's contents) stay open, before the app's page is
     // first painted.
     document.querySelector(page)?.querySelectorAll('details').forEach((row, i) => { if (opened[i]) row.open = true })
     atPlace(document.querySelector(page), focused)?.focus({ preventScroll: true })
-  }, [])
+  }, [ready])
   useEffect(() => {
     const was = carried.current, app = document.querySelector(page)
     if (!was || !app) return
+    carried.current = null
     const inputs = [...app.querySelectorAll('input')], setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
     was.typed.forEach((value, i) => { const input = inputs[i]; if (value !== null && input) { setValue.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })) } })
     atPlace(app, was.pressed)?.click()
-  }, [])
+  }, [ready])
   return painted
 }
 // The controls a reader can see: a painted page may draw one in two forms and show the one for the theme (a legal page's

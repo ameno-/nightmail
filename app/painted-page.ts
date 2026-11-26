@@ -52,14 +52,28 @@ export function pageCss(bundle: Rollup.OutputBundle, modules: string[]) {
   return [...css]
 }
 
-export type Paint = {
+/** The CSS a painted page needs: the shell's, the page's own, then the app's cut down to what these pages use. */
+export type PaintCss = {
   /** The shell's id, as boot.js and the app's takeover find it. */
   shell: string
-  /** The page as the app draws it, and the CSS it loads in the app (pruned here to what the page uses). */
-  body: string
+  /** The CSS the page loads in the app (pruned here to what the pages use). */
   css: string
   /** CSS of the painted page alone, after the shell's. */
   extraCss?: string
+  /** Keep the app's own faces of the first fonts' families: a character outside the first fonts then comes from the face
+   *  the app sets it in, as once the app is up (the legal pages' ÷), where without them it is the local fallback's until
+   *  the app takes over. (The first fonts, defined after them, still serve their characters.) */
+  wholeFaces?: boolean
+}
+/** The painted pages' CSS for these pages (their HTML, head and body, joined): inlined in one page, or one shared file. */
+export function paintedCss(page: PaintCss, html: string): string {
+  const pruned = pruneCss(page.css, usedNames(html, THEME_ATTRIBUTES))
+  return `${shellCss(page.shell)}${page.extraCss ?? ''}${page.wholeFaces ? pruned : pruned.replace(WHOLE_FACES, '')}`
+}
+
+export type Paint = PaintCss & {
+  /** The page as the app draws it. */
+  body: string
   /** Pictures of the first screen, preloaded after the fonts. */
   preloads?: string[]
   /** What the app may show under the shell before its page (a spinner), and its page: boot.js keeps the shell over them. */
@@ -67,14 +81,18 @@ export type Paint = {
   /** The boot script's file, and the app's (appFiles). */
   boot: string
   files: AppFiles
-  /** Keep the app's own faces of the first fonts' families: a character outside the first fonts then comes from the face
-   *  the app sets it in, as once the app is up (the legal pages' ÷), where without them it is the local fallback's until
-   *  the app takes over. (The first fonts, defined after them, still serve their characters.) */
-  wholeFaces?: boolean
+  /** One stylesheet shared by many painted pages (paintedCss over all of them, emitted once), linked in place of the CSS
+   *  inlined in each: render-blocking as the inlined CSS is, and cached from one page to the next. */
+  sheet?: string
   /** For a page a visitor reads: where this browser has signed in, theme.js turns the shell off before the first paint and
    *  the app draws the page from the start (public/theme.js, data-members). */
   members?: boolean
+  /** The address the page is painted for (its examples name it): anywhere else, theme.js turns the shell off. */
+  origin?: string
 }
+
+/** The theme.js attributes a painted page's script tag carries (public/theme.js). */
+const themeAttributes = (page: Pick<Paint, 'members' | 'origin'>) => ` data-plain=""${page.members ? ' data-members=""' : ''}${page.origin ? ` data-origin="${page.origin}"` : ''}`
 
 /** template (an appFiles template with this page's head) with the page painted over #root. Throws on a template that
  *  isn't index.html's shape. */
@@ -89,12 +107,12 @@ export function paint(template: string, page: Paint): string {
     ...FIRST_FONTS.map(font => `<link rel="preload" href="${font.url}" as="font" type="font/woff2" crossorigin />`),
     ...page.preloads ?? [],
   ].map(line => `\n    ${line}`).join(''))
-  set(/(<script src="\/theme.js")(?=><\/script>)/, page.members ? ' data-plain="" data-members=""' : ' data-plain=""')
+  set(/(<script src="\/theme.js")(?=><\/script>)/, themeAttributes(page))
   // Nothing is drawn until the whole painted page has arrived (#root follows it): over a slow connection a page drawn
   // while its HTML streams in grows as each row's rest arrives (Chrome; other browsers ignore it).
   set(/(<\/title>)/, '\n    <link rel="expect" href="#root" blocking="render" />')
-  const pruned = pruneCss(page.css, usedNames(html + page.body, THEME_ATTRIBUTES))
-  set(/(<\/title>)/, `\n    <style data-shell-css>${shellCss(page.shell)}${page.extraCss ?? ''}${page.wholeFaces ? pruned : pruned.replace(WHOLE_FACES, '')}</style>\n    <style>${firstFaces}</style>`)
+  const styles = page.sheet ? `<link rel="stylesheet" href="${page.sheet}" data-shell-css />` : `<style data-shell-css>${paintedCss(page, html + page.body)}</style>`
+  set(/(<\/title>)/, `\n    ${styles}\n    <style>${firstFaces}</style>`)
   if (!html.includes('<div id="root"></div>')) throw new Error('index.html has no <div id="root"></div>.')
   const { files } = page
   return html.replace('<div id="root"></div>', `<div id="${page.shell}">${page.body}</div>\n    <div id="root"></div>\n    <script src="${page.boot}" defer data-shell="${page.shell}" data-press="button" data-wait="none" data-keep="${page.keep}" data-css="${files.css}" data-preload="${files.preload.join(' ')}" data-entry="${files.entry}"></script>`)

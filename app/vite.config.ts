@@ -138,7 +138,7 @@ export default defineConfig(({ command, mode }) => {
     define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha), 'import.meta.env.VITE_DESIGN_SHEET': JSON.stringify(process.env.VITE_DESIGN_SHEET ?? '') },
     // (The homepage's station kit is inlined whatever its size: it is one lazily loaded stylesheet, features/home/machines.tsx.)
     build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)) } } },
-    plugins: [slimReactEmail, legalMarkdown(), react(), fileHeaders(tv ? televisionFirstFiles : homeFirstFiles), publicOrigin, brandedBootScript(), publicBeacon, ...tv ? televisionHome() : [homeShell()], pricePages(tv ? televisionWords : undefined, VERDICT_PAGES), ...VERDICT_PAGES ? [verdictApp()] : [], sitePages(), inlineScriptsKept()],
+    plugins: [slimReactEmail, legalMarkdown(), react(), fileHeaders(tv ? televisionFirstFiles : homeFirstFiles), publicOrigin, brandedBootScript(), publicBeacon, ...tv ? televisionHome() : [homeShell()], pricePages(tv ? televisionWords : undefined, VERDICT_PAGES), ...VERDICT_PAGES ? [verdictApp()] : [], sitePages({ address: process.env.VITE_PUBLIC_URL ? stageOrigin : null }), inlineScriptsKept()],
     server: {
       host: '127.0.0.1', port: 5173, strictPort: true,
       proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json', '/internal'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),

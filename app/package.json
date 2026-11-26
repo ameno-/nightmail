@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview --host 127.0.0.1",
-    "cls": "bun run build && node scripts/cls.mjs",
+    "cls": "VITE_PUBLIC_URL=http://127.0.0.1:47173 bun run build && node scripts/cls.mjs",
     "design-lint": "bun scripts/design-lint/index.ts"
   },
   "dependencies": {

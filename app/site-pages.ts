@@ -5,7 +5,7 @@ import { productName, publicOrigin } from '../api/src/brand.ts'
 import { RENAMED_OPERATIONS } from '../api/src/site-index.ts'
 import { legalMarkdown, renderLegal } from './legal-markdown.ts'
 import { linkCard, maxLine, shareTitle, withCard, type CardWords } from './link-card.ts'
-import { appFiles, pageCss, paint } from './painted-page.ts'
+import { appFiles, pageCss, paint, paintedCss } from './painted-page.ts'
 import { GUIDE_NAMES } from './src/features/docs/guide-names.ts'
 import { docsTitle, operationDescription, operationEntries, operationTitle } from './src/features/docs/meta.ts'
 
@@ -33,6 +33,7 @@ const attr = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '
 const openApi = fileURLToPath(new URL('../api/openapi.json', import.meta.url))
 const legalContent = fileURLToPath(new URL('./src/features/legal/content/', import.meta.url))
 const legalShell = fileURLToPath(new URL('./src/features/legal/prerender.tsx', import.meta.url))
+const docsShell = fileURLToPath(new URL('./src/features/docs/prerender.tsx', import.meta.url))
 const bootScript = fileURLToPath(new URL('./src/features/home/shell/boot.js', import.meta.url))
 /** A painted legal page shows the theme switch theme.js's theme has (features/legal/prerender.tsx draws one for each); with
  *  no script, the light one. */
@@ -40,7 +41,7 @@ const THEME_SWITCH = 'html:not([data-theme=dark]) #page-shell [data-theme-only=d
 
 /** names: a docs page's own names, without the docs', longest first (a link preview's title falls back to them).
  *  modified: the sitemap's lastmod (YYYY-MM-DD), where the page has a date of its own. */
-type SitePage = { path: string; title: string; names?: string[]; description: string; markdown: string; card: CardWords; twin?: string; modified?: string; painted?: { html?: string } }
+type SitePage = { path: string; title: string; names?: string[]; description: string; markdown: string; card: CardWords; twin?: string; modified?: string; painted?: { html?: string }; operation?: string }
 
 /** Where a page is drawn at build time, its stylesheets are the bundle's (painted-page.ts inlines them), not modules: Vite's
  *  module runner has no CSS pipeline. */
@@ -49,6 +50,12 @@ const noCss: Plugin = {
   resolveId: source => /\.css(?:\?|$)/.test(source) ? '\0no-css' : null,
   load: id => id === '\0no-css' ? 'export default ""' : null,
 }
+
+/** Text as React writes it in HTML (renderToStaticMarkup escapes these five). */
+const reactText = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;')
+/** An operation's parameter names, where its definition lists them inline (a $ref'd one is checked by the page itself). */
+const operationParameters = (operation: { operation: Record<string, any>; pathItem: Record<string, any> }) =>
+  [...(Array.isArray(operation.pathItem.parameters) ? operation.pathItem.parameters : []), ...(Array.isArray(operation.operation.parameters) ? operation.operation.parameters : [])].flatMap(parameter => typeof parameter?.name === 'string' ? [parameter.name as string] : [])
 
 /** A legal document's date as its front matter writes it ("26 November 2026"), as a sitemap's lastmod (2026-11-26). */
 function isoDay(day: string): string {
@@ -67,7 +74,10 @@ function titleLines(title: string): CardWords['lines'] {
   return splits.reduce((best, split) => score(split) < score(best) ? split : best)
 }
 
-export function sitePages(): Plugin {
+/** origin: the address the build is made for, where it names one (VITE_PUBLIC_URL: the deploy's stages, the layout check's
+ *  fixture). Only then are the reference pages painted, with examples for that address; a build that doesn't know its
+ *  address (a self-hosted image) writes their heads alone, as before, so no example ever names another installation. */
+export function sitePages({ address }: { address: string | null }): Plugin {
   let root = ''
   return {
     name: 'nightmail:site-pages', apply: 'build', enforce: 'post',
@@ -91,7 +101,7 @@ export function sitePages(): Plugin {
       const pages: SitePage[] = [
         { path: '/docs', title: docsTitle(null), description: document.info.description ?? '', markdown: '/docs.md', card: docsCard },
         ...GUIDE_NAMES.map(guide => ({ path: `/docs/${guide.id}`, title: docsTitle(guide.title), names: [guide.title], description: guide.summary, markdown: '/docs.md', card: { name: `docs-${guide.id}`, lines: titleLines(guide.title), caption: `Guide · ${productName} API docs` } })),
-        ...operations.map(operation => ({ path: `/docs/api/${operation.id}`, title: docsTitle(operation.summary), names: [operation.summary, operationTitle(operation.id)], description: operationDescription(operation), markdown: `/docs/operations/${operation.id}.md`, card: docsCard })),
+        ...operations.map(operation => ({ path: `/docs/api/${operation.id}`, title: docsTitle(operation.summary), names: [operation.summary, operationTitle(operation.id)], description: operationDescription(operation), markdown: `/docs/operations/${operation.id}.md`, card: docsCard, operation: operation.id })),
         { path: '/legal', title: legalTitle('Legal'), modified: isoDay(latest), description: `The terms and policies that apply to ${productName}: ${legal.map(doc => doc.title).join(', ')}.`, markdown: '/legal.md',
           card: { name: 'legal', lines: ['Terms and policies'], caption: `${legal.length} documents, last updated ${latest}.` }, painted: {},
           twin: [`# Legal`, `Canonical page: ${publicOrigin}/legal`, `The terms and policies that apply to ${productName}.`, legal.map(doc => `- [${doc.title}](${publicOrigin}/legal/${doc.slug}.md): ${doc.description} Updated ${doc.updated}.`).join('\n')].join('\n\n') + '\n' },
@@ -113,10 +123,20 @@ export function sitePages(): Plugin {
         return String((asset as { source: string | Uint8Array }).source)
       }).join('')
       const { module: shell } = await runnerImport<typeof import('./src/features/legal/prerender.tsx')>(legalShell, { root, configFile: false, logLevel: 'error', plugins: [legalMarkdown(), noCss] })
+      // The reference pages, where the build knows its address: drawn by the app's docs page (prerender.tsx) from the API
+      // definition it fetches, with one stylesheet for all of them (the docs' CSS cut down to what any of them uses).
+      const painter = address ? (await runnerImport<typeof import('./src/features/docs/prerender.tsx')>(docsShell, { root, configFile: false, logLevel: 'error', plugins: [noCss] })).module.docsPainter(document as never, address) : null
+      const reference = new Map(painter ? pages.flatMap(page => page.operation ? [[page.path, painter(page.path)] as const] : []) : [])
+      const docsPaint = { shell: 'page-shell', css: [...new Set([files.css.slice(1), ...pageCss(bundle, ['/features/docs/index.tsx'])])].map(file => {
+        const asset = bundle[file]
+        if (asset?.type !== 'asset') this.error(`The docs' stylesheet ${file} isn't in the bundle.`)
+        return String((asset as { source: string | Uint8Array }).source)
+      }).join('') }
+      const sheet = reference.size ? `/${this.getFileName(this.emitFile({ type: 'asset', name: 'docs-painted.css', source: paintedCss(docsPaint, files.template + [...reference.values()].join('')) }))}` : undefined
       for (const page of pages) {
         const card = linkCard(page.card)
         if (!bundle[card.file]) this.emitFile({ type: 'asset', fileName: card.file, source: card.source })
-        let html = withCard(page.painted ? files.template : source, card, origin)
+        let html = withCard(page.painted || reference.has(page.path) ? files.template : source, card, origin)
         const set = (pattern: RegExp, value: string) => {
           if (!pattern.test(html)) this.error(`index.html has no ${pattern.source} for ${page.path}.`)
           html = html.replace(pattern, (_match, start: string) => start + value)
@@ -124,9 +144,9 @@ export function sitePages(): Plugin {
         const canonical = publicOrigin + page.path
         set(/(<title>)[^<]*/, attr(page.title))
         for (const name of ['name="description"', 'property="og:description"', 'name="twitter:description"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(page.description))
-        // A link preview's title: the page's title if it fits a small card, else one of its names, with the docs' or alone
-        // (an operation's summary, else its name: link-card.ts).
-        const share = shareTitle(page.title, ...(page.names ?? []).flatMap(name => [`${name} · ${productName} docs`, name]))
+        // A link preview's title: the page's title if it fits a small card, else one of its names, with the docs' name as the
+        // title has it or alone (an operation's summary, else its name: link-card.ts).
+        const share = shareTitle(page.title, ...(page.names ?? []).flatMap(name => [docsTitle(name), name]))
         for (const name of ['property="og:title"', 'name="twitter:title"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(share))
         set(/(<!-- Link previews\.)[^>]*-->/, ' This page\'s own (app/site-pages.ts). -->')
         set(/(<meta property="og:type" content="website" \/>)/, `\n    <meta property="og:url" content="${attr(canonical)}" />\n    <link rel="canonical" href="${attr(canonical)}" />`)
@@ -137,6 +157,15 @@ export function sitePages(): Plugin {
           // The document the app shows, as the page says it: its compiled Markdown, byte for byte.
           if (page.painted.html !== undefined && !body.includes(page.painted.html)) return this.error(`${page.path} is painted without its document's HTML as legal-markdown.ts compiles it: the app's page and this one would differ.`)
           html = paint(html, { shell: 'page-shell', body, css: legalCss, extraCss: THEME_SWITCH, keep: '.boot-loader, .legal-page', boot: `/${boot}`, files, members: true, wholeFaces: true })
+        }
+        const body = reference.get(page.path)
+        if (body !== undefined) {
+          // What the operation's Markdown copy says of it, as the page says it: its name, call, description and parameters.
+          const operation = operations.find(item => item.id === page.operation)!
+          const said = [operation.summary, operation.path, operation.description, ...operationParameters(operation)].filter(Boolean).map(text => reactText(text))
+          const missing = said.find(text => !body.includes(text))
+          if (missing !== undefined) return this.error(`${page.path} is painted without “${missing}”, which its API definition says.`)
+          html = paint(html, { ...docsPaint, body, keep: '.boot-loader, .docs-page', boot: `/${boot}`, files, sheet, members: true, origin: address! })
         }
         this.emitFile({ type: 'asset', fileName: `${page.path.slice(1)}.html`, source: html })
         if (page.twin) this.emitFile({ type: 'asset', fileName: page.markdown.slice(1), source: page.twin })

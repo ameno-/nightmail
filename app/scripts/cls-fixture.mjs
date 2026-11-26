@@ -91,7 +91,9 @@ function pageLink({ latency, bytesPerSecond }) {
   };
 }
 
-export async function start(repo, { dist = 'app/dist', log = () => {}, servers = 1, delay = null, fontDelay = 0, throttle = null } = {}) {
+// port: the first server's own port, where the build's pages are painted for an address on this machine (the reference
+// pages, app/site-pages.ts: theme.js shows them only at that address).
+export async function start(repo, { dist = 'app/dist', log = () => {}, servers = 1, delay = null, fontDelay = 0, throttle = null, port = null } = {}) {
   const api = join(repo, 'api');
   const require = createRequire(join(api, 'package.json'));
   const pg = require('pg');
@@ -178,8 +180,8 @@ export async function start(repo, { dist = 'app/dist', log = () => {}, servers =
     const reads = new Agent({ keepAlive: true, maxSockets: 6 });
     cleanups.push(() => { reads.destroy(); bulk.destroy(); });
     let serverLog = '';
-    const serve = async () => {
-      const apiPort = await freePort(), proxyPort = await freePort();
+    const serve = async index => {
+      const apiPort = await freePort(), proxyPort = index === 0 && port ? port : await freePort();
       const apiOrigin = `http://127.0.0.1:${apiPort}`, origin = `http://127.0.0.1:${proxyPort}`;
       const server = spawn('node', ['--import', 'tsx', 'src/server.ts'], { cwd: api, env: envFor(apiPort, origin), stdio: ['ignore', 'ignore', 'pipe'] });
       server.stderr.on('data', chunk => { serverLog = (serverLog + chunk).slice(-20_000); });
@@ -291,7 +293,7 @@ export async function start(repo, { dist = 'app/dist', log = () => {}, servers =
       cleanups.push(async () => { proxy.closeAllConnections(); await new Promise(r => proxy.close(r)); });
       return { origin, apiOrigin };
     };
-    const started = await Promise.all(Array.from({ length: Math.max(1, servers) }, serve));
+    const started = await Promise.all(Array.from({ length: Math.max(1, servers) }, (_, index) => serve(index)));
     const origins = started.map(s => s.origin), origin = origins[0], apiOrigin = started[0].apiOrigin;
     log(`api: ${origins.join(' ')}`);
 

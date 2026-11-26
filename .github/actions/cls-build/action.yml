@@ -18,8 +18,9 @@ runs:
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: app/dist
-        key: cls-dist-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+        key: cls-dist-v2-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
     - if: steps.dist.outputs.cache-hit != 'true'
       shell: bash
       working-directory: app
-      run: ./node_modules/.bin/vite build
+      # Built for the fixture's address, so the reference pages are painted for it (app/site-pages.ts, scripts/cls.mjs).
+      run: VITE_PUBLIC_URL=http://127.0.0.1:47173 ./node_modules/.bin/vite build

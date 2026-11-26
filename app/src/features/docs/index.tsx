@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useIsFetching, useQuery } from '@tanstack/react-query'
 import { Link, Navigate, useLocation, useNavigationType, useParams } from 'react-router'
 import { Alert, EmptyState, ErrorState, Input, SkeletonText, SubNav, Tabs } from '../../components/ui'
@@ -12,11 +12,12 @@ import { openApiQuery } from './openapi'
 import { docsTitle, operationDescription, operationEntries, tagTitle } from './meta'
 import './docs.css'
 import { productName, productSlug, publicOrigin, sdkPackage } from '../../../../api/src/brand'
+import { useShellTakeover } from '../../lib/shell-takeover'
 
 type Schema = Record<string, any>
-type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; permission?: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
+export type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; permission?: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
 type QuickstartStep = { title: string; text: string; code?: string }
-type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
+export type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
 // What each operation needs, stated by the API (operation-permissions.ts).
 const permissionExtension = `x-${productSlug}-permission`
 // Examples are written for the hosted origin; this instance's own goes in their place, so a copied command works here.
@@ -35,7 +36,7 @@ function typeLabel(document: Document, input: Schema): string {
   return schema.type ?? (schema.properties ? 'object' : 'value')
 }
 function schemaName(input: Schema): string | null { return typeof input?.$ref === 'string' ? input.$ref.split('/').at(-1) ?? null : null }
-function operations(document?: Document): Operation[] {
+export function operations(document?: Document): Operation[] {
   if (!document) return []
   const result: Operation[] = operationEntries(document).map(({ operation, pathItem, ...entry }) => ({ ...entry, permission: operation[permissionExtension]?.text, parameters: [...(Array.isArray(pathItem.parameters) ? pathItem.parameters : []), ...(Array.isArray(operation.parameters) ? operation.parameters : [])], requestBody: operation.requestBody, responses: operation.responses ?? {}, samples: operation['x-codeSamples'] ?? [] }))
   // Groups follow the document's tag order (Emails and Domains first); operations keep path order within a group.
@@ -131,8 +132,8 @@ function OperationPage({ document, operation: raw }: {document: Document; operat
 
 // Pages: /docs (the overview), /docs/<guide> and /docs/api/<operationId>. Overview sections keep anchors (#sending-limits).
 const operationPath = (id: string) => `/docs/api/${encodeURIComponent(id)}`
-type Page = { kind: 'overview' } | { kind: 'guide'; guide: Guide } | { kind: 'operation'; id: string } | { kind: 'missing' }
-function pageOf(splat: string): Page {
+export type Page = { kind: 'overview' } | { kind: 'guide'; guide: Guide } | { kind: 'operation'; id: string } | { kind: 'missing' }
+export function pageOf(splat: string): Page {
   const parts = splat.split('/').filter(Boolean)
   if (!parts.length) return { kind: 'overview' }
   const guide = parts.length === 1 ? guides.find(item => item.id === parts[0]) : undefined
@@ -221,7 +222,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
 
 // The tab's title and the description search results and link previews read, per page (meta.ts): the same as the
 // page's own HTML carries (app/site-pages.ts).
-const defaultDescription = window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.content ?? ''
+const defaultDescription = typeof window === 'undefined' ? '' : window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.content ?? ''
 function useDocumentMeta(title: string, description: string) {
   useEffect(() => {
     window.document.title = title
@@ -230,15 +231,16 @@ function useDocumentMeta(title: string, description: string) {
   useEffect(() => () => window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.setAttribute('content', defaultDescription), [])
 }
 // A new page opens at its top, or at the section its link names once that section has rendered. Back and Forward
-// leave scrolling to the dashboard (or the browser), which restores where that page was left.
-function useAnchorScroll(ready: boolean) {
+// leave scrolling to the dashboard (or the browser), which restores where that page was left. A page that takes over
+// from the one painted before the app (painted) stays where the reader has it: that one opened at the section itself.
+function useAnchorScroll(ready: boolean, painted: boolean) {
   const location = useLocation(), navigationType = useNavigationType()
   const landed = useRef(false)
   useEffect(() => {
     if (!ready) return
     const first = !landed.current
     landed.current = true
-    if (navigationType === 'POP' && !first) return
+    if ((navigationType === 'POP' && !first) || (first && painted)) return
     const id = anchor(location.hash)
     const target = id ? window.document.getElementById(id) : null
     if (target) target.scrollIntoView({ block: 'start' })
@@ -259,34 +261,49 @@ export function DocsPage() {
   const title = missing ? 'Page not found' : page.kind === 'guide' ? page.guide.title : page.kind === 'operation' ? current?.summary ?? 'API reference' : `${productName} API`
   const description = page.kind === 'guide' ? page.guide.summary : current ? operationDescription(current) : spec?.info.description ?? defaultDescription
   useDocumentMeta(docsTitle(page.kind === 'overview' ? null : title), description)
-  useAnchorScroll(Boolean(site.origin) && (page.kind === 'guide' || missing || Boolean(spec)))
+  // A reference page's own file paints it for a visitor before this code (app/site-pages.ts, prerender.tsx): this page
+  // takes its place once it has what it shows, the API definition and this installation's address.
+  const painted = useShellTakeover('page-shell', '#root .docs-page', (Boolean(spec) && Boolean(site.origin)) || site.foreign)
+  useAnchorScroll(Boolean(site.origin) && (page.kind === 'guide' || missing || Boolean(spec)), painted)
+  const legacy = page.kind === 'overview' && location.hash ? legacyPath(location.hash, all) : null
+  if (legacy) return <Navigate replace to={legacy} />
+  const renamed = renamedGuides[splat.replace(/\/$/, '')]
+  if (renamed) return <Navigate replace to={`/docs/${renamed}${location.hash}`} />
+  return <DocsView spec={spec} all={all} page={page} missing={missing} title={title} site={site} inShell={inShell} pending={query.isPending} error={query.isError ? query.error : null} retry={() => query.refetch()} />
+}
+
+/** A docs page as the app draws it once it has the API definition and this installation's address: the contents beside
+ *  the page. DocsPage draws it in the app, and prerender.tsx at build time, where a reference page is painted for a
+ *  visitor before the app's code (app/site-pages.ts). */
+export function DocsView({ spec, all, page, missing, title, site, inShell, pending, error, retry }: {
+  spec?: Document; all: Operation[]; page: Page; missing: boolean; title: string; site: { origin: string | null; foreign: boolean; error?: unknown; retry?: () => void }
+  inShell: boolean; pending: boolean; error: unknown; retry: () => void
+}) {
   const [search, setSearch] = useState('')
   const q = search.trim().toLowerCase()
   const filtered = q ? all.filter(operation => `${operation.id} ${operation.summary} ${operation.path} ${operation.tag}`.toLowerCase().includes(q)) : all
   const groups = [...new Set(filtered.map(operation => operation.tag))]
   const shownGuides = q ? guides.filter(item => `${item.title} ${item.summary}`.toLowerCase().includes(q)) : guides
   const active = pathOf(page)
-  // The contents keep the open page in view: a deep link to an operation far down the list shows where it is.
+  const current = page.kind === 'operation' ? all.find(operation => operation.id === page.id) : undefined
+  // The contents keep the open page in view: a deep link to an operation far down the list shows where it is, from the
+  // first frame (a painted page's contents are kept so too: home/shell/boot.js, data-shell-reveal).
   const contents = useRef<HTMLDivElement>(null)
-  useEffect(() => {
+  useLayoutEffect(() => {
     const box = contents.current, item = box?.querySelector('[aria-current="page"]')
     if (!box || !item) return
     const outer = box.getBoundingClientRect(), inner = item.getBoundingClientRect()
     if (inner.top < outer.top || inner.bottom > outer.bottom - 24) box.scrollTop += inner.top - outer.top - outer.height / 3
   }, [active, all.length])
-  const legacy = page.kind === 'overview' && location.hash ? legacyPath(location.hash, all) : null
-  if (legacy) return <Navigate replace to={legacy} />
-  const renamed = renamedGuides[splat.replace(/\/$/, '')]
-  if (renamed) return <Navigate replace to={`/docs/${renamed}${location.hash}`} />
   // The contents list what the search matches; the phone's picker always lists every page.
   const item = (to: string, label: string, method?: string) => ({ to, label, current: active === to, ...method && { lead: <span data-method={method}>{method}</span>, text: `${method.toUpperCase()} ${label}` } })
   const guideItems = (list: Guide[], overview: boolean) => [...overview ? [item('/docs', 'Overview and quickstart')] : [], ...list.map(guide => item(`/docs/${guide.id}`, guide.title))]
   const operationGroups = (list: Operation[]) => [...new Set(list.map(operation => operation.tag))].map(group => ({ title: tagTitle(group), items: list.filter(operation => operation.tag === group).map(operation => item(operationPath(operation.id), operation.summary, operation.method)) }))
-  const shownGroups = [...shownGuides.length ? [{ title: 'Guides', items: guideItems(shownGuides, !q) }] : [], ...query.isPending ? [] : operationGroups(filtered)]
+  const shownGroups = [...shownGuides.length ? [{ title: 'Guides', items: guideItems(shownGuides, !q) }] : [], ...pending ? [] : operationGroups(filtered)]
   return <SubNav className="docs-frame" title="Docs" titleAs="div" label="Guides and API operations" main={inShell ? 'div' : 'main'} scrollRef={contents} fallback={title}
     top={<Input type="search" aria-label="Search the documentation" placeholder="Search guides and API" value={search} onChange={event => setSearch(event.target.value)} />}
     groups={shownGroups} pickerGroups={[{ title: 'Guides', items: guideItems(guides, true) }, ...operationGroups(all)]}
-    after={query.isPending ? <div className="stack docs-nav-loading"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && q && !shownGuides.length ? <p className="muted docs-nav-empty">Nothing matches.</p> : null}>
-    {site.foreign && site.origin ? <ForeignHost origin={site.origin} /> : !site.origin ? (site.error ? <ErrorState error={site.error} onRetry={site.retry} /> : <DocsArticleSkeleton />) : <DocsOrigin.Provider value={site.origin}>{missing ? <MissingPage /> : page.kind === 'guide' ? <GuidePage guide={page.guide} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : !spec ? <DocsArticleSkeleton /> : current ? <OperationPage document={spec} operation={current} /> : <DocsOverview document={spec} all={all} />}</DocsOrigin.Provider>}
+    after={pending ? <div className="stack docs-nav-loading"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && q && !shownGuides.length ? <p className="muted docs-nav-empty">Nothing matches.</p> : null}>
+    {site.foreign && site.origin ? <ForeignHost origin={site.origin} /> : !site.origin ? (site.error ? <ErrorState error={site.error} onRetry={site.retry} /> : <DocsArticleSkeleton />) : <DocsOrigin.Provider value={site.origin}>{missing ? <MissingPage /> : page.kind === 'guide' ? <GuidePage guide={page.guide} /> : error ? <ErrorState error={error} onRetry={retry} /> : !spec ? <DocsArticleSkeleton /> : current ? <OperationPage document={spec} operation={current} /> : <DocsOverview document={spec} all={all} />}</DocsOrigin.Provider>}
   </SubNav>
 }
