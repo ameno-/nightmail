@@ -5,7 +5,7 @@ import { runnerImport, type Plugin, type Rollup } from 'vite'
 import { productName, publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
 import { CRAWL_DISALLOW } from '../api/src/site-index.ts'
 import { pruneCss, usedNames } from './critical-css.ts'
-import { linkCard, withCard } from './link-card.ts'
+import { linkCard, shareTitle, withCard } from './link-card.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
 import { docProblems } from './src/features/pricing/docs/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
@@ -123,14 +123,15 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
         }).join(''),
         scene: fileOf('home/tv/crt/scene.webp'),
       } : null
-      const hub = hubDoc(), hubPage: PricePage = { path: hub.path, file: 'compare.html', title: hub.title, searchTitle: hub.searchTitle, description: hub.description, card: hubCard(), comparison: null, modified: hub.modified }
+      const hub = hubDoc(), hubPage: PricePage = { path: hub.path, file: 'compare.html', title: hub.title, searchTitle: hub.searchTitle, shareTitle: 'Email API pricing compared', description: hub.description, card: hubCard(), comparison: null, modified: hub.modified }
       const written: { page: PricePage; file: string; doc?: PageDoc; set?: boolean; robots?: boolean }[] = [
         ...PRICE_PAGES.map(page => ({ page, file: page.file, doc: page.doc ?? (verdict && page.comparison ? comparisonDoc(page.comparison) : undefined) })),
         ...verdict ? [{ page: hubPage, file: hubPage.file, doc: hub }, { page: hubPage, file: 'compare/with-set.html', doc: hub, set: true, robots: true }] : [],
       ]
 
       for (const { page, file, doc, set: withSet, robots } of written) {
-        const title = page.searchTitle, canonical = canonicalOrigin + page.path, card = linkCard(page.card)
+        // Search results get the page's search title; link previews a short one (link-card.ts, shareTitle).
+        const title = page.searchTitle, share = shareTitle(page.shareTitle, page.title, page.searchTitle), canonical = canonicalOrigin + page.path, card = linkCard(page.card)
         if (!bundle[card.file]) this.emitFile({ type: 'asset', fileName: card.file, source: card.source })
         let html = withCard(template, card, origin)
         const set = (pattern: RegExp, value: string) => {
@@ -139,9 +140,9 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
         }
         set(/(<title>)[^<]*/, attr(title))
         set(/(<meta name="description" content=")[^"]*/, attr(page.description))
-        set(/(<meta property="og:title" content=")[^"]*/, attr(title))
+        set(/(<meta property="og:title" content=")[^"]*/, attr(share))
         set(/(<meta property="og:description" content=")[^"]*/, attr(page.description))
-        set(/(<meta name="twitter:title" content=")[^"]*/, attr(title))
+        set(/(<meta name="twitter:title" content=")[^"]*/, attr(share))
         set(/(<meta name="twitter:description" content=")[^"]*/, attr(page.description))
         set(/(<!-- Link previews\.)[^>]*-->/, ' This page\'s own (app/price-pages.ts). -->')
         set(/(<meta property="og:type" content="website" \/>)/, `\n    <meta property="og:url" content="${attr(canonical)}" />\n    <link rel="canonical" href="${attr(canonical)}" />`)

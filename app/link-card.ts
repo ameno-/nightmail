@@ -259,6 +259,17 @@ function setText(layer: Layer, text: string, left: number, baseline: number, siz
 
 /** A card's words: its file's name (og/<name>-<hash>.png), one or two lines of at most 24 characters and a caption of at
  *  most 70. */
+/** The most a link preview's title holds (og:title, twitter:title): small cards cut a longer one. */
+export const SHARE_TITLE_MAX = 40
+/** A page's title on link previews: the first of its forms that fits SHARE_TITLE_MAX, most specific first, each made from
+ *  the page's own data (its search title stays its <title>); with none that fits, the shortest. Every page family's head
+ *  takes its link-preview title from here (price-pages.ts, site-pages.ts), so a page that names itself in a few words
+ *  gets a short one for nothing. */
+export function shareTitle(...forms: (string | null | undefined)[]): string {
+  const named = forms.filter((form): form is string => !!form)
+  return named.find(form => form.length <= SHARE_TITLE_MAX) ?? named.reduce((short, form) => form.length < short.length ? form : short)
+}
+
 export type CardWords = { name: string; lines: [string] | [string, string]; caption: string }
 export type Card = { file: string; alt: string; type: 'image/png'; width: number; height: number; source: Buffer }
 

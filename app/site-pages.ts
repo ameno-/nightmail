@@ -4,9 +4,9 @@ import type { Plugin } from 'vite'
 import { productName, publicOrigin } from '../api/src/brand.ts'
 import { RENAMED_OPERATIONS } from '../api/src/site-index.ts'
 import { renderLegal } from './legal-markdown.ts'
-import { linkCard, maxLine, withCard, type CardWords } from './link-card.ts'
+import { linkCard, maxLine, shareTitle, withCard, type CardWords } from './link-card.ts'
 import { GUIDE_NAMES } from './src/features/docs/guide-names.ts'
-import { docsTitle, operationDescription, operationEntries } from './src/features/docs/meta.ts'
+import { docsTitle, operationDescription, operationEntries, operationTitle } from './src/features/docs/meta.ts'
 
 // The site's own pages beside the price pages (price-pages.ts), each index.html with its own title, description,
 // canonical address, Markdown twin and link-preview card in its head, so a search engine, an agent or a link preview
@@ -27,7 +27,8 @@ const attr = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '
 const openApi = fileURLToPath(new URL('../api/openapi.json', import.meta.url))
 const legalContent = fileURLToPath(new URL('./src/features/legal/content/', import.meta.url))
 
-type SitePage = { path: string; title: string; description: string; markdown: string; card: CardWords; twin?: string }
+/** names: a docs page's own names, without the docs', longest first (a link preview's title falls back to them). */
+type SitePage = { path: string; title: string; names?: string[]; description: string; markdown: string; card: CardWords; twin?: string }
 
 /** A title as a card's lines: one if it fits, else two (a card has room for no more) of near lengths, the first the longer
  *  by a little ("Give a coding agent / its own key", "Send from the / built-in domain"). */
@@ -59,8 +60,8 @@ export function sitePages(): Plugin {
       const latest = legal.map(doc => doc.updated).sort((a, b) => Date.parse(b) - Date.parse(a))[0]!
       const pages: SitePage[] = [
         { path: '/docs', title: docsTitle(null), description: document.info.description ?? '', markdown: '/docs.md', card: docsCard },
-        ...GUIDE_NAMES.map(guide => ({ path: `/docs/${guide.id}`, title: docsTitle(guide.title), description: guide.summary, markdown: '/docs.md', card: { name: `docs-${guide.id}`, lines: titleLines(guide.title), caption: `Guide · ${productName} API docs` } })),
-        ...operations.map(operation => ({ path: `/docs/api/${operation.id}`, title: docsTitle(operation.summary), description: operationDescription(operation), markdown: `/docs/operations/${operation.id}.md`, card: docsCard })),
+        ...GUIDE_NAMES.map(guide => ({ path: `/docs/${guide.id}`, title: docsTitle(guide.title), names: [guide.title], description: guide.summary, markdown: '/docs.md', card: { name: `docs-${guide.id}`, lines: titleLines(guide.title), caption: `Guide · ${productName} API docs` } })),
+        ...operations.map(operation => ({ path: `/docs/api/${operation.id}`, title: docsTitle(operation.summary), names: [operation.summary, operationTitle(operation.id)], description: operationDescription(operation), markdown: `/docs/operations/${operation.id}.md`, card: docsCard })),
         { path: '/legal', title: legalTitle('Legal'), description: `The terms and policies that apply to ${productName}: ${legal.map(doc => doc.title).join(', ')}.`, markdown: '/legal.md',
           card: { name: 'legal', lines: ['Terms and policies'], caption: `${legal.length} documents, last updated ${latest}.` },
           twin: [`# Legal`, `Canonical page: ${publicOrigin}/legal`, `The terms and policies that apply to ${productName}.`, legal.map(doc => `- [${doc.title}](${publicOrigin}/legal/${doc.slug}.md): ${doc.description} Updated ${doc.updated}.`).join('\n')].join('\n\n') + '\n' },
@@ -79,7 +80,10 @@ export function sitePages(): Plugin {
         const canonical = publicOrigin + page.path
         set(/(<title>)[^<]*/, attr(page.title))
         for (const name of ['name="description"', 'property="og:description"', 'name="twitter:description"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(page.description))
-        for (const name of ['property="og:title"', 'name="twitter:title"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(page.title))
+        // A link preview's title: the page's title if it fits a small card, else one of its names, with the docs' or alone
+        // (an operation's summary, else its name: link-card.ts).
+        const share = shareTitle(page.title, ...(page.names ?? []).flatMap(name => [`${name} · ${productName} docs`, name]))
+        for (const name of ['property="og:title"', 'name="twitter:title"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(share))
         set(/(<!-- Link previews\.)[^>]*-->/, ' This page\'s own (app/site-pages.ts). -->')
         set(/(<meta property="og:type" content="website" \/>)/, `\n    <meta property="og:url" content="${attr(canonical)}" />\n    <link rel="canonical" href="${attr(canonical)}" />`)
         set(/(<link rel="alternate" type="text\/markdown" href=")[^"]*(?=" title=")/, attr(publicOrigin + page.markdown))
