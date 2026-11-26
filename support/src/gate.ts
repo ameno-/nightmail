@@ -16,6 +16,11 @@ export type GateScope = {
   supportAddress: string;
   /** Email: links must point here (a URL elsewhere holds the reply). The chat panel enforces this itself. */
   linkOrigins?: readonly string[];
+  /**
+   * Addresses and IDs the person already has (theirs): written in their own messages, or returned by reads made for
+   * them in this conversation that their access still covers. An answer may repeat these; never anyone else's.
+   */
+  theirs?: readonly string[];
 };
 export type GateResult = { ok: true } | { ok: false; reasons: string[] };
 
@@ -33,12 +38,12 @@ const FENCE = /<\/?untrusted>|<customer>|<\/customer>|<context>|<\/context>|<not
 export function gate(text: string, scope: GateScope): GateResult {
   const reasons: string[] = [];
   // Nightmail's own addresses (support, abuse, privacy, legal, security) are the contacts an answer passes on.
-  const allowedEmails = new Set([...scope.emails, scope.supportAddress, ...Object.values(addresses)].map(e => e.toLowerCase()));
+  const allowedEmails = new Set([...scope.emails, scope.supportAddress, ...Object.values(addresses), ...scope.theirs ?? []].map(e => e.toLowerCase()));
   for (const email of text.match(EMAIL) ?? []) if (!allowedEmails.has(email.toLowerCase()) && !/^(?:dmarc|postmaster|bounces?)@/i.test(email) && !isExample(email)) reasons.push('email address outside the conversation');
   if (SECRET_PREFIX.test(text)) reasons.push('credential-shaped string');
   if (LONG_HEX.test(text) || LONG_B64.test(text.replace(/v=DKIM1[^`\n]*/g, ''))) reasons.push('long opaque string');
   if (INTERNAL_HOST.test(text)) reasons.push('internal hostname');
-  const allowedIds = new Set(scope.allowedIds);
+  const allowedIds = new Set([...scope.allowedIds, ...scope.theirs ?? []]);
   for (const id of text.match(INTERNAL_ID) ?? []) if (!allowedIds.has(id)) reasons.push('ID outside the grant');
   if (STAFF.test(text)) reasons.push('internal name');
   if (FENCE.test(text)) reasons.push('harness markup');
@@ -52,6 +57,11 @@ export function gate(text: string, scope: GateScope): GateResult {
   const lower = text.toLowerCase();
   for (const fragment of scope.promptFragments) if (fragment.length >= 24 && lower.includes(fragment.toLowerCase())) { reasons.push('system prompt text'); break; }
   return reasons.length ? { ok: false, reasons: [...new Set(reasons)] } : { ok: true };
+}
+
+/** The addresses and internal IDs in a text, as the gate finds them: what `theirs` is collected from. */
+export function namedIn(text: string): string[] {
+  return [...new Set([...text.match(EMAIL) ?? [], ...text.match(INTERNAL_ID) ?? []])];
 }
 
 /**

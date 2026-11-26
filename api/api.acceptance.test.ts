@@ -10036,7 +10036,8 @@ describe('Hosted MCP OAuth and tools', () => {
 
           // A P1 ticket first, then customers nobody else will answer (the longest waiting first), then the rest.
           assert.deepEqual(await order('needs_you'), [p1, blocked, paused, p3]);
-          assert.deepEqual((await ours('needs_you')).map((c: Json) => [c.needsYou.reasons, c.needsYou.urgent]), [[['ticket'], true], [['blocked'], true], [['paused'], true], [['ticket'], false]]);
+          assert.deepEqual((await ours('needs_you')).map((c: Json) => [c.needsYou.reasons, c.needsYou.urgent]), [[['ticket'], true], [['blocked', 'no_reply'], true], [['paused', 'no_reply'], true], [['ticket'], false]],
+            'Nothing was sent back to the two customers for 40 and 50 minutes.');
           assert.deepEqual([(await ours('needs_you'))[1].needsYou.since, (await ours('needs_you'))[2].needsYou.since].map(s => Math.round((Date.now() - Date.parse(s)) / 60_000)), [50, 40], 'Waiting since the customer wrote.');
           assert.deepEqual([await order('agent'), await order('waiting')], [[], [handled]], 'The agent answered: it waits on the customer.');
           assert.equal((await ours('all')).find((c: Json) => c.id === handled).needsYou, null);
@@ -10222,6 +10223,33 @@ describe('Hosted MCP OAuth and tools', () => {
             error(await send('GET', `${inbox}/${chatId}/files/att_${random(16)}`, session(reader)), 404);
             error(await send('GET', `${inbox}/${conv}/files/${shot}`, session(reader)), 404);
           } finally { runtime.config.support!.addressIds = configured; }
+        });
+
+        await t.test('11 no reply sent: a customer who wrote and got nothing back for 10 minutes needs you for it, urgently, and Glass counts it; a held draft or a failed reply reaches nobody, an answer, a notice or a staff reply does', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const row = async (id: string) => ok(await send('GET', `${inbox}?view=all&limit=1&q=${id}`, session(reader))).data[0];
+          const { readGlass } = await import('./src/glass.js'), counted = async () => (await readGlass(runtime)).support.noReply, before = await counted();
+          const held = await stranger(), recent = await stranger(), answered = await stranger(), noticed = await stranger(), staffed = await chat(member);
+          // As in production: the agent wrote an answer, and it was held instead of sent.
+          ok(reply(await platform.mirrorMessages(held, [{ id: msg(), author: 'customer', text: 'The contact form fails.', at: at(30) }, { id: msg(), author: 'agent', kind: 'held', text: 'Thanks, we are on it.', delivery: 'held', reason: 'paused', at: at(29) }])));
+          ok(reply(await platform.mirrorMessages(recent, [{ id: msg(), author: 'customer', text: 'Hello?', at: at(5) }])));
+          ok(reply(await platform.mirrorMessages(answered, [{ id: msg(), author: 'customer', text: 'How do I add a domain?', at: at(30) }, { id: msg(), author: 'agent', kind: 'reply', text: 'Open Domains.', delivery: 'sent', at: at(29) }])));
+          ok(reply(await platform.mirrorMessages(noticed, [{ id: msg(), author: 'customer', text: 'Why are bounces up?', at: at(30) }, { id: msg(), author: 'system', kind: 'notice', text: 'Sent the busy reply', at: at(29) }])));
+          ok(reply(await platform.mirrorMessages(staffed, [{ id: msg(), author: 'customer', text: 'Is my domain verified?', at: at(20) }])));
+          const waiting = await row(held);
+          assert.deepEqual([waiting.needsYou?.reasons, waiting.needsYou?.urgent, Math.round((Date.now() - Date.parse(waiting.needsYou?.since)) / 60_000)], [['no_reply'], true, 30], 'Waiting since the customer wrote.');
+          assert.deepEqual([(await row(recent)).needsYou, (await row(answered)).needsYou, (await row(noticed)).needsYou, (await row(staffed)).needsYou?.reasons], [null, null, null, ['no_reply']], 'Under 10 minutes, answered or told: not yet, or not at all.');
+          assert.equal(await counted() - before, 2, 'Glass counts the two.');
+          // A staff reply answers it; one that fails reaches nobody, so it is back.
+          ok(await send('POST', `${inbox}/${staffed}/replies`, keyed(operator), { text: 'Yes, since this morning.' }), 201);
+          assert.equal((await row(staffed)).needsYou, null);
+          const queued = (await messages(staffed)).filter(m => m.author === 'staff').at(-1)!;
+          ok(reply(await platform.markDelivery(staffed, queued.id, 'failed')));
+          assert.deepEqual((await row(staffed)).needsYou?.reasons, ['failed', 'no_reply']);
+          // Done takes it out, and off Glass.
+          ok(await send('POST', `${inbox}/${held}/done`, keyed(operator)));
+          assert.deepEqual([(await row(held)).needsYou, await counted() - before], [null, 1]);
         });
       } finally { globalThis.fetch = previous; }
     });

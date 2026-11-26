@@ -23,9 +23,9 @@ export const inboxViews: { value: InboxView; label: string; count?: keyof InboxC
 export const viewOf = (search: string): InboxView => { const view = new URLSearchParams(search).get('view'); return inboxViews.some(item => item.value === view && view !== 'needs_you') ? view as InboxView : 'needs_you' }
 export const channelOf = (search: string): Channel | '' => { const channel = new URLSearchParams(search).get('channel'); return channel && Object.hasOwn(channelLabels, channel) ? channel as Channel : '' }
 
-// Where a conversation stands. Needing you, the most pressing reason first: a failed send, blocked work, a customer
-// waiting, a ticket. Otherwise: the agent handling it, waiting on the customer, done or closed.
-export type Triage = { key: 'failed' | 'blocked' | 'waiting' | 'ticket' | 'paused' | 'agent' | 'customer' | 'done' | 'closed'; text: string; tone: Tone }
+// Where a conversation stands. Needing you, the most pressing reason first: a failed send, a customer who got no reply,
+// blocked work, a customer waiting, a ticket. Otherwise: the agent handling it, waiting on the customer, done or closed.
+export type Triage = { key: 'failed' | 'no_reply' | 'blocked' | 'waiting' | 'ticket' | 'paused' | 'agent' | 'customer' | 'done' | 'closed'; text: string; tone: Tone }
 export function triageOf(c: SupportConversation): Triage {
   const reasons = c.needsYou?.reasons
   if (!reasons) {
@@ -37,12 +37,13 @@ export function triageOf(c: SupportConversation): Triage {
     return c.agentState === 'active' ? { key: 'agent', text: 'AI handling', tone: 'success' } : { key: 'paused', text: 'Paused', tone: 'neutral' }
   }
   if (reasons.includes('failed')) return { key: 'failed', text: 'Not sent', tone: 'danger' }
+  if (reasons.includes('no_reply')) return { key: 'no_reply', text: 'No reply sent', tone: 'danger' }
   if (reasons.includes('blocked')) return { key: 'blocked', text: 'Blocked', tone: 'warning' }
   if (reasons.includes('paused') && c.lastAuthor === 'customer') return { key: 'waiting', text: 'Customer waiting', tone: 'warning' }
   if (reasons.includes('ticket')) return { key: 'ticket', text: 'Ticket open', tone: c.needsYou!.urgent ? 'warning' : 'info' }
   return { key: 'paused', text: 'Waiting on you', tone: 'info' }
 }
-const whyFacets: [Triage['key'], string, Tone][] = [['waiting', 'Customer waiting', 'warning'], ['blocked', 'Blocked', 'warning'], ['failed', 'Not sent', 'danger'], ['ticket', 'Ticket open', 'info'], ['paused', 'Waiting on you', 'info']]
+const whyFacets: [Triage['key'], string, Tone][] = [['no_reply', 'No reply sent', 'danger'], ['waiting', 'Customer waiting', 'warning'], ['blocked', 'Blocked', 'warning'], ['failed', 'Not sent', 'danger'], ['ticket', 'Ticket open', 'info'], ['paused', 'Waiting on you', 'info']]
 /** The rail beside the list, from the rows on screen: the one reason each needs you, and its open tickets; and their channel,
  *  which filters the list, counted before that filter (`everyChannel`), so choosing Email never reads as "no chats". */
 export function inboxFacetGroups(rows: SupportConversation[] | undefined, channel: Channel | '', setChannel?: (channel: Channel | '') => void, everyChannel = rows): FacetGroup[] {
