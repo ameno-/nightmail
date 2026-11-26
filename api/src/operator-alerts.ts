@@ -16,6 +16,8 @@ import { postSlack } from './reputation-alerts.js';
 // window that became slow), never while it simply continues.
 //
 // A card carries the workspace's name and plain words: never an address, a domain's contents, a score or a threshold.
+// Support AI cost is the installation's own spend (the health tick finds it past its daily line): once each UTC day, the
+// day being its episode, and its words name that line, which is in the repository (health-thresholds.ts SUPPORT_AI).
 //
 // The database disk card is the exception to the queue: it must post while the database refuses writes, so it never
 // touches it (src/disk-alert.ts).
@@ -32,9 +34,10 @@ const CARDS = {
   signups_low: { emoji: ':hourglass_flowing_sand:', label: 'Sign-ups nearly full' },
   signups_full: { emoji: ':no_entry:', label: 'Sign-ups are full' },
   blocklisted: { emoji: ':rotating_light:', label: 'Blocklist replies' },
+  support_ai_cost: { emoji: ':money_with_wings:', label: 'Support AI cost' },
 } as const;
 // The installation's own cards, about no one workspace: queued under 'platform' and opening the Operator area.
-const PLATFORM_KINDS = new Set<string>(['share_full', 'signin_slow', 'signups_low', 'signups_full']);
+const PLATFORM_KINDS = new Set<string>(['share_full', 'signin_slow', 'signups_low', 'signups_full', 'support_ai_cost']);
 const RAISE = 'Raise the limit in Operator → Sign-ups.';
 type Kind = keyof typeof CARDS;
 const REASONS = { bounces: 'too many bounces', complaints: 'too many spam complaints', screen: 'too much mail flagged as spam', review: 'after a review' } as const;
@@ -60,6 +63,7 @@ const count = (n: unknown) => Number(n).toLocaleString('en-US');
 /** "1 in 20", or "Most" or "All" past one in two. */
 const share = (slow: number, mail: number) => mail / slow >= 2 ? `1 in ${Math.round(mail / slow)}` : slow >= mail ? 'All' : 'Most';
 const whole = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+const cents = (n: number) => `$${(n / 100).toFixed(2)}`;
 
 /** One card: an emoji, a bold label and a few words, an Open button, and the same words as the plain-text fallback. */
 export const slackCard = (card: { emoji: string; label: string } | null, words: string, url: string) => ({
@@ -68,7 +72,7 @@ export const slackCard = (card: { emoji: string; label: string } | null, words: 
     accessory: { type: 'button', action_id: 'open', text: { type: 'plain_text', text: 'Open', emoji: false }, url } }],
 });
 
-/** The Slack message for one alert (slackCard), its button opening the Operator area. Null for a payload that is not one of the ten. */
+/** The Slack message for one alert (slackCard), its button opening the Operator area. Null for a payload that is not one of CARDS. */
 export function operatorCard(publicUrl: string, p: Record<string, unknown>, workspace: { id: string; name: string | null }) {
   const kind = p.kind as Kind, name = cardName(workspace.name ?? '');
   if (typeof kind !== 'string' || !Object.hasOwn(CARDS, kind)) return null;
@@ -83,10 +87,11 @@ export function operatorCard(publicUrl: string, p: Record<string, unknown>, work
     : kind === 'signups_low' && whole(p.open) && whole(p.limit) ? `${count(p.open)} of ${count(p.limit)} places left. ${RAISE}`
     : kind === 'signups_full' && whole(p.limit) ? `All ${count(p.limit)} places are taken. ${RAISE}`
     : kind === 'blocklisted' ? `${name}: a campaign paused because receiving servers named a blocklist.`
+    : kind === 'support_ai_cost' && whole(p.cents) && whole(p.lineCents) ? `${cents(Number(p.cents))} since midnight UTC, past the ${cents(Number(p.lineCents))} daily line. Nothing stops: the turn caps still apply.`
     : null;
   if (!words) return null;
   const origin = publicUrl.replace(/\/$/, '');
-  const url = kind === 'signups_low' || kind === 'signups_full' ? `${origin}/operator?view=signups` : PLATFORM_KINDS.has(kind) ? `${origin}/operator` : `${origin}/operator/workspaces/${encodeURIComponent(workspace.id)}`;
+  const url = kind === 'signups_low' || kind === 'signups_full' ? `${origin}/operator?view=signups` : kind === 'support_ai_cost' ? `${origin}/glass` : PLATFORM_KINDS.has(kind) ? `${origin}/operator` : `${origin}/operator/workspaces/${encodeURIComponent(workspace.id)}`;
   return slackCard(card, words, url);
 }
 
@@ -168,6 +173,15 @@ export async function dailyLimitAlert(runtime: Runtime, workspaceId: string) {
   // One incoming recipient: with none, the function leaves the hours (and what was used) out.
   const allowance = hostedAllowance(runtime.config, workspaceId, 1, 0, true);
   return queue(runtime.db, workspaceId, 'daily_limit', sql`(SELECT jsonb_build_object('used',(a->>'used')::bigint,'limit',(a->>'cap')::bigint) FROM (SELECT ${allowance} AS a) x)`, { daily: true });
+}
+
+/**
+ * Support AI cost: the health tick found today's model cost past the daily line (health-thresholds.ts SUPPORT_AI). One
+ * card each UTC day, kept by the job's ID (the day is its episode), however many ticks call this. Never throws.
+ */
+export function supportCostAlert(db: DbExecutor, costUsd: number, lineUsd: number) {
+  const day = new Date().toISOString().slice(0, 10);
+  return queue(db, PLATFORM, 'support_ai_cost', { cents: Math.round(costUsd * 100), lineCents: Math.round(lineUsd * 100) }, { daily: false, episode: day });
 }
 
 /** Customer share full: the dispatcher's quota sample that found the share used up when the previous one had not. */

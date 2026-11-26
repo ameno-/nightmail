@@ -1,4 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
+import { recordAiUsage } from './support-ai-cost.js';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, errors, isoTime, json, log, nextCursor, notFound, readCursor, response, type App, type Config, type Ctx, type DbExecutor } from './core.js';
 import { auditInsert, operatorContext, operatorRequired } from './audit.js';
@@ -451,9 +452,9 @@ export function registerSupportInbox(app: App) {
     // A new ticket, more blocked work or a pause is something new: it undoes staff's Done.
     const reopen = sql`((ticket_id IS NULL OR ticket_type = 'staff') AND ${ticket?.id ?? null}::text IS NOT NULL AND ticket_id IS DISTINCT FROM ${ticket?.id ?? null}) OR coalesce(${body.blockedWork ?? null}::int, blocked_work) > blocked_work OR (${pause} AND agent_state = 'active')`;
     // The timeline's events, from the row as it was (locked first): the ticket filed, its priority changed, the agent paused for it.
-    type Row = { id: string; ticket_id: string | null; ticket_type: string | null; ticket_severity: string | null; agent_state: string };
+    type Row = { id: string; ticket_id: string | null; ticket_type: string | null; ticket_severity: string | null; agent_state: string; turns: number; cost_usd: string };
     const rows = await c.env.db.transaction(async tx => {
-      const { rows: [before] } = await tx.execute<Row>(sql`SELECT id, ticket_id, ticket_type, ticket_severity, agent_state FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
+      const { rows: [before] } = await tx.execute<Row>(sql`SELECT id, ticket_id, ticket_type, ticket_severity, agent_state, turns, cost_usd FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
       if (!before) return [];
       const { rows: [after] } = await tx.execute<Row>(sql`UPDATE support_conversations SET
         subject = coalesce(${body.subject ?? null}, subject),
@@ -468,8 +469,10 @@ export function registerSupportInbox(app: App) {
         paused_by = CASE WHEN ${pause} AND agent_state = 'active' THEN 'ticket' ELSE paused_by END,
         paused_at = CASE WHEN ${pause} AND agent_state = 'active' THEN now() ELSE paused_at END,
         ticket_brief = coalesce(${ticket?.brief ? JSON.stringify(ticket.brief) : null}::jsonb, ticket_brief)
-      WHERE id = ${id} AND (${ticket?.id ?? null}::text IS NULL OR ticket_id IS NULL OR ticket_id = ${ticket?.id ?? null} OR ticket_type = 'staff') RETURNING id, ticket_id, ticket_type, ticket_severity, agent_state`);
+      WHERE id = ${id} AND (${ticket?.id ?? null}::text IS NULL OR ticket_id IS NULL OR ticket_id = ${ticket?.id ?? null} OR ticket_type = 'staff') RETURNING id, ticket_id, ticket_type, ticket_severity, agent_state, turns, cost_usd`);
       if (!after) return [];
+      // What the counters grew by is what the answering agent spent since the last mirror (support-ai-cost.ts).
+      await recordAiUsage(tx, { conversationId: id, agent: 'support', turns: after.turns - before.turns, costUsd: Number(after.cost_usd) - Number(before.cost_usd) });
       // A ticket Nightmail opened because the conversation needed a person (support-staff-mail.ts) gives way to the agent's.
       if (before.ticket_id !== after.ticket_id && after.ticket_id) await tx.execute(event(id, 'ticket', null, { ticketId: after.ticket_id, type: after.ticket_type, severity: after.ticket_severity }));
       else if (before.ticket_id && after.ticket_severity !== before.ticket_severity) await tx.execute(event(id, 'priority', null, { from: before.ticket_severity, to: after.ticket_severity }));

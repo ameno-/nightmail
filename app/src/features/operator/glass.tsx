@@ -33,6 +33,9 @@ const health: Record<Glass['system']['status'], [string, Tone]> = { ok: ['OK', '
 const empty = (shown: boolean, text: string): GlassFill => ({ label: shown ? text : '', value: '', empty: true })
 const sum = (values: readonly number[]) => values.reduce((total, n) => total + n, 0)
 const plural = (n: number, one: string, many = `${one}s`) => `${number(n)} ${n === 1 ? one : many}`
+/** US dollars to the cent; a cost above zero but under a cent says so. */
+const dollars = (n: number) => n > 0 && n < 0.005 ? '<$0.01' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const channels: Record<string, string> = { chat: 'Chat', email: 'Email', agent_feedback: 'Agent feedback' }
 
 /** A figure that counts from its last value to its new one; the box is the tile's, so its width never moves anything. */
 export function Tick({ value, format = n => number(Math.round(n)) }: { value: number; format?: (n: number) => ReactNode }) {
@@ -110,10 +113,21 @@ const regionFill = (r: GlassRegion): GlassRegionFill => {
 }
 
 function board(g: Glass): GlassBoardFill {
-  const { signups, sending: s, delivery, receiving, builtin, money, screening, system, visitors } = g
+  const { signups, sending: s, delivery, receiving, builtin, money, screening, system, visitors, supportAi: ai } = g
   const f = signups.funnel, ses = system.ses, used = share(ses.total.sentLast24Hours, ses.total.max24HourSend)
   const tripped = builtin.parent?.trippedAt && (!builtin.parent.resetAt || builtin.parent.resetAt < builtin.parent.trippedAt)
+  const counts = (p: Glass['supportAi']['today']) => `${plural(p.turns, 'turn')} · ${plural(p.conversations, 'conversation')}`
   const rows: Record<string, Record<string, GlassFill>> = {
+    // The support AI's spend (api/src/support-ai-cost.ts): past the daily line, Health warns and Slack gets one card that day.
+    ai: {
+      today: { hint: counts(ai.today), value: dollars(ai.today.costUsd), tone: ai.today.costUsd >= ai.line ? 'danger' : ai.today.costUsd >= ai.line / 2 ? 'warning' : undefined },
+      week: { hint: counts(ai.week), value: dollars(ai.week.costUsd) },
+      month: { hint: counts(ai.month), spark: ai.daily, value: dollars(ai.month.costUsd) },
+      // Average per conversation: what the answered conversations cost, over how many; not the triage agent's spend, nor unanswered conversations'.
+      answered: { hint: `30 days · ${number(ai.answered)} answered`, value: ai.answered ? dollars(ai.answeredCostUsd / ai.answered) : '—' },
+      ...Object.fromEntries([0, 1, 2].map(i => { const c = ai.top[i]; return [`top:${i}`, c ? { label: <Link className="glass-ws" to={`/support/${c.id}`}>{c.workspace?.name ?? channels[c.channel ?? ''] ?? 'Conversation'}</Link>,
+        hint: c.workspace ? `${channels[c.channel ?? ''] ?? 'Conversation'} · ${plural(c.turns, 'turn')}` : plural(c.turns, 'turn'), value: dollars(c.costUsd) } : empty(i === 0, 'No AI cost in 30 days')] })),
+    },
     sending: {
       transactional: { hint: 'today', spark: s.hourly.map(h => h.accepted - h.marketing), value: number(s.today.transactional) },
       marketing: { hint: 'today', spark: s.hourly.map(h => h.marketing), value: number(s.today.marketing) },

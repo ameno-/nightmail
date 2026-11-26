@@ -41,11 +41,13 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['POST', /^\/v1\/operator\/support\/staff-mail\/staff-[0-9a-f]{24}-[0-9]{1,6}\/failed$/],
   ['POST', /^\/v1\/operator\/support\/staff-mail\/replies$/],
   // The feedback triage agent (src/feedback-triage.ts): the reports due, and for one report its request trace, the
-  // reports beside it and its one note. Nothing else: no route that sends, replies, resolves or changes an account.
+  // reports beside it, its one note and what reading it cost. Nothing else: no route that sends, replies, resolves or
+  // changes an account.
   ['POST', /^\/v1\/operator\/support\/feedback\/due$/],
   ['GET', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/requests\/req_[0-9a-f]{32}$/],
   ['GET', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/related$/],
   ['POST', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/triage$/],
+  ['POST', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/usage$/],
 ];
 const SUPPORT_READ = /^\/v1\/support\/[A-Za-z0-9_./-]{1,200}$/;
 /** The writes a conversation makes: narrowing its scope to one workspace, and keeping a note about its person. */
@@ -260,6 +262,9 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     /** The triage agent's one note on a report: 201 once, 409 after. */
     feedbackTriage: (conversationId: string, note: TriageNoteInput) =>
       call<{ conversationId: string; ticketId: string | null; messageId: string; classification: string; createdAt: string }>('POST', `/v1/operator/support/feedback/${encodeURIComponent(String(conversationId))}/triage`, note),
+    /** What one reading of a report cost: its model turns and US dollars, added to the support AI's spend. */
+    feedbackUsage: (conversationId: string, usage: { turns: number; costUsd: number }) =>
+      call<{ conversationId: string; turns: number; costUsd: number }>('POST', `/v1/operator/support/feedback/${encodeURIComponent(String(conversationId))}/usage`, usage),
     /**
      * A /v1/support request for one registered conversation: a GET, or a write (POST /v1/support/scope or notes). The
      * conversation rides on the runtime, never in the request; Nightmail derives the customer from its row and answers

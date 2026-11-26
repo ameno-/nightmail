@@ -196,6 +196,28 @@ a.op-cluster-rail__row:focus-visible { background: var(--color-hover); text-deco
    the figure; a slot with nothing in it keeps its row, its label faint. */
 .glass { --metric-spark: 72px; --metric-value: 112px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; gap: var(--space-24) var(--space-32); min-width: 0; max-width: 100%; }
 .glass-group { display: flex; flex-direction: column; min-width: 0; }
+/* Support AI cost: the board's full width, and nothing in it is cut. Wide (the facts fit their worst case, thousands of
+   turns, on the label's line): label, facts, trend, amount. Narrow (a phone): label, trend and amount on the first line,
+   the facts on a second under the label. The label's two parts are grid items of the row (display: contents), and the
+   layout follows the group's own width, so loading and filled rows are the same height. */
+.glass-ai { grid-column: 1 / -1; container-type: inline-size; }
+.glass-ai .ui-metric { grid-template-columns: max-content minmax(0, 1fr) var(--metric-spark) var(--metric-value); grid-template-areas: 'label facts spark value'; column-gap: var(--space-16); }
+.glass-ai .ui-metric__label { display: contents; }
+.glass-ai .ui-metric__label > span:first-child { grid-area: label; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glass .glass-ai .ui-metric__hint { grid-area: facts; overflow: visible; text-overflow: clip; white-space: nowrap; }
+.glass-ai .ui-metric__spark { grid-area: spark; }
+.glass-ai .ui-metric__value { grid-area: value; }
+/* The most expensive conversations: the whole row opens the conversation, through its name's link. */
+.glass-ai .glass-ws::after { content: ''; position: absolute; z-index: 1; inset: 0; }
+@container (max-width: 639px) {
+  .glass-ai .ui-metric { --metric-height: 56px; grid-template-columns: minmax(0, max-content) minmax(0, 1fr) var(--metric-value); grid-template-areas: 'label spark value' 'facts facts facts'; align-content: center; row-gap: var(--space-2); }
+  .glass-ai .ui-metric__spark { justify-content: flex-end; }
+  .glass-ai .ui-metric__spark > * { max-width: var(--metric-spark); }
+}
+/* The narrowest phones (320 px): a tighter gap and amount column, so the longest label (Average per conversation) reads whole. */
+@container (max-width: 300px) {
+  .glass-ai .ui-metric { --metric-value: 96px; column-gap: var(--space-8); }
+}
 .glass-empty .ui-metric__label { color: var(--color-faint); }
 /* A long hint (an alert's words, a workspace) gives way before the label does; a label longer than its cell ends in an ellipsis. */
 .glass .ui-metric__label > span:first-child { flex-shrink: 0; max-width: 100%; }

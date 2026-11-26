@@ -9,7 +9,7 @@ import { external, WorkQueue, type NewWork, type Outcome, type WorkRow, type Wor
 import { attachmentLink, deleteConversationUploads, MAX_ATTACHMENTS, modelImage, safeName, storeImage, type Attachment } from './attachments.js';
 import { cleanImage, ImageRejected, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
 import { customerBlock, firstName, notesBlock, oneLine, type Customer, type Note } from './agent/context.js';
-import type { Harness, HarnessEvent, TurnResult } from './agent/harness.js';
+import { spentBy, type Harness, type HarnessEvent, type TurnResult, type Usage } from './agent/harness.js';
 import { createHarness, MODEL, promptFragments } from './agent/opencode.js';
 import { searchDocs } from './agent/docs.js';
 import { actionTitle, NOTE_MAX, ToolFailure, toolNames, type ActionProposal, type TicketInput, type ToolHost } from './agent/tools.js';
@@ -148,6 +148,12 @@ type Meta = {
   workspace: { id: string; name: string } | null; workspaces: { id: string; name: string; role: string }[];
   verified: Customer['verified']; contentAccess: boolean; page: string | null; handoffMessage: string | null; requestIds: string[];
   threadId: string | null; greeted: boolean; turns: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; costUsd: number;
+  /**
+   * What failed turns spent (failedTurn: one that threw, or ended failed with no answer): counted in what the conversation
+   * cost (spentUsd), never in the turns and token budget its limits read (admit, the chat intake), so an outage on our side
+   * or the model's never uses up a customer's conversation.
+   */
+  failed?: { turns: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; costUsd: number };
   ticketId: string | null; lastActivity: number; closedAt: number | null;
   // The staff inbox: the subject and ticket it lists, the transcript seq mirrored so far and the state last mirrored, the
   // mirror's retry, the last customer email (a staff reply answers it), the sender whose mail passed DMARC, and whether
@@ -424,6 +430,32 @@ export class SupportConversation extends DurableObject<Env> {
   }
   private save(meta: Meta) { this.sql.exec('INSERT INTO _support_meta (id, value) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET value = excluded.value', JSON.stringify(meta)); }
   private update(change: (meta: Meta) => void) { const meta = this.meta(); if (!meta) throw new Error('conversation not opened'); change(meta); this.save(meta); return meta; }
+  /**
+   * Adds a model turn's usage to the conversation's counters; `turns`: whether it counts as a turn (a nudge doesn't). A
+   * failed turn's goes to `failed` instead, which no limit reads.
+   */
+  private charge(usage: Usage, turns: number, failed = false) {
+    return this.update(m => {
+      const into = failed ? m.failed ??= { turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 } : m;
+      into.turns += turns; into.inputTokens += usage.inputTokens; into.outputTokens += usage.outputTokens; into.cacheReadTokens = (into.cacheReadTokens ?? 0) + usage.cacheReadTokens; into.costUsd += usage.costUsd;
+      m.lastActivity = Date.now();
+    });
+  }
+  /**
+   * The counters in D1: the turns and tokens the limits read, and cost_usd, everything spent (failed turns included). The
+   * inbox gets them with the next mirror, which is how Nightmail counts the spend (api/src/support-ai-cost.ts).
+   */
+  private saveUsage(meta: Meta) {
+    return this.env.DB.prepare('UPDATE conversations SET turns = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, updated_at = ? WHERE id = ?').bind(meta.turns, meta.inputTokens, meta.outputTokens, spentUsd(meta), Date.now(), meta.conversationId).run();
+  }
+  /** A turn that threw after its model calls began still spent: counted as a failed turn's, saved and mirrored. */
+  private chargeLost(error: unknown, turns: number) {
+    const lost = spentBy(error);
+    if (!lost) return;
+    const meta = this.charge(lost, turns, true);
+    this.ctx.waitUntil(this.saveUsage(meta).then(() => {}, e => logError(e, { event: 'turn', code: 'USAGE_NOT_SAVED' }, 'warn')));
+    this.mirrorSoon();
+  }
   private fresh(conversationId: string, channel: Meta['channel']): Meta {
     return { conversationId, channel, status: 'open', userId: null, email: null, name: null, role: null, workspace: null, workspaces: [], verified: null, contentAccess: false, page: null, handoffMessage: null,
       requestIds: [], threadId: null, greeted: false, turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, ticketId: null, lastActivity: Date.now(), closedAt: null };
@@ -815,7 +847,7 @@ export class SupportConversation extends DurableObject<Env> {
   /** What the inbox lists about this conversation: its subject, ticket, counters, blocked work and an emailed ticket's pause. */
   private inboxSnapshot(meta: Meta): MirroredState {
     const blocked = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM _support_work WHERE state = 'blocked'").one().n;
-    return { ...meta.subject ? { subject: meta.subject.slice(0, 200) } : {}, ...meta.ticket ? { ticket: { id: meta.ticket.id, type: meta.ticket.type, severity: meta.ticket.severity, ...meta.ticket.brief ? { brief: meta.ticket.brief } : {} } } : {}, turns: meta.turns, costUsd: Math.round(meta.costUsd * 10_000) / 10_000, blockedWork: blocked,
+    return { ...meta.subject ? { subject: meta.subject.slice(0, 200) } : {}, ...meta.ticket ? { ticket: { id: meta.ticket.id, type: meta.ticket.type, severity: meta.ticket.severity, ...meta.ticket.brief ? { brief: meta.ticket.brief } : {} } } : {}, turns: meta.turns, costUsd: Math.round(spentUsd(meta) * 10_000) / 10_000, blockedWork: blocked,
       // After an emailed ticket the team owns the thread: the agent answers no later mail (compose), so the inbox shows it paused.
       ...meta.channel === 'email' && meta.status === 'ticketed' ? { pauseForTicket: true as const } : {} };
   }
@@ -1271,6 +1303,7 @@ export class SupportConversation extends DurableObject<Env> {
       }, this.abort.signal);
     } catch (error) {
       this.abort = null;
+      this.chargeLost(error, 1);
       if (await this.stoppedTurn(messageId)) return;
       const missing = error instanceof MissingSecret ? error.secret : null;
       logError(error, { event: 'chat', code: missing ? 'SECRET_MISSING' : 'TURN_FAILED' });
@@ -1280,7 +1313,7 @@ export class SupportConversation extends DurableObject<Env> {
       return;
     }
     this.abort = null;
-    meta = this.update(m => { m.turns += 1; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.cacheReadTokens = (m.cacheReadTokens ?? 0) + result.usage.cacheReadTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
+    meta = this.charge(result.usage, 1, failedTurn(result, !!result.text.trim()));
     if (await this.stoppedTurn(messageId)) return;
     let final = result.text.trim(), redacted = false;
     if (result.refused) {
@@ -1304,7 +1337,7 @@ export class SupportConversation extends DurableObject<Env> {
     if (final) this.broadcast({ type: 'text.delta', messageId, delta: final });
     this.broadcast({ type: 'message.end', messageId, text: final, redacted });
     this.broadcast({ type: 'status', busy: false });
-    await this.env.DB.prepare('UPDATE conversations SET turns = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, updated_at = ? WHERE id = ?').bind(meta.turns, meta.inputTokens, meta.outputTokens, meta.costUsd, Date.now(), meta.conversationId).run();
+    await this.saveUsage(meta);
   }
 
   /**
@@ -2133,8 +2166,9 @@ export class SupportConversation extends DurableObject<Env> {
         // the model declined, and asking again would only be declined again.
         for (const prompt of [input, { ...input, text: NUDGE, images: [] }]) {
           if (prompt !== input && (progress.model !== undefined || refused || stop.signal.aborted)) break;
-          const result: TurnResult = await external(agent.turn(prompt, this.toolHost(), () => {}, stop.signal));
-          this.update(m => { m.turns += prompt === input ? 1 : 0; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.cacheReadTokens = (m.cacheReadTokens ?? 0) + result.usage.cacheReadTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
+          const turns = prompt === input ? 1 : 0;
+          const result: TurnResult = await external(agent.turn(prompt, this.toolHost(), () => {}, stop.signal).catch(error => { this.chargeLost(error, turns); throw error; }));
+          this.charge(result.usage, turns, failedTurn(result, progress.model !== undefined));
           refused ||= !!result.refused;
         }
       } finally { this.emailTurn = null; }
@@ -2148,7 +2182,7 @@ export class SupportConversation extends DurableObject<Env> {
       }
     }
     const updated = this.meta()!;
-    await external(this.env.DB.prepare('UPDATE conversations SET turns = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, updated_at = ? WHERE id = ?').bind(updated.turns, updated.inputTokens, updated.outputTokens, updated.costUsd, Date.now(), updated.conversationId).run());
+    await external(this.saveUsage(updated));
     // The model declined: the fixed decline is this email's one answer (no account data, so it is sent), and nothing waits.
     if (progress.model === null && progress.declined) { progress.fixed = 'decline'; progress.text = FIXED.decline(origin); progress.mode = 'general'; save(); return; }
     // No reply, even after the nudge: the fixed busy reply, and the team gets the email in a ticket.
@@ -2193,7 +2227,7 @@ export class SupportConversation extends DurableObject<Env> {
     // person Nightmail stamps (its scope: never an address). Any other email ticket names no account, only the address that
     // wrote (M3), whatever an older conversation stored.
     const verified = ticketPerson(meta) ? meta.verified as 'handoff' | 'dmarc' | 'signin' : null;
-    return { conversationId: meta.conversationId, channel: meta.channel, threadId: meta.threadId, costUsd: meta.costUsd, model: MODEL_LABEL, attachments, verified, dmarc, sender: verified ? null : meta.email,
+    return { conversationId: meta.conversationId, channel: meta.channel, threadId: meta.threadId, costUsd: spentUsd(meta), model: MODEL_LABEL, attachments, verified, dmarc, sender: verified ? null : meta.email,
       customer: verified ? { userId: meta.userId, email: meta.email, name: meta.name, role: meta.role, workspaces: meta.workspace ? [meta.workspace] : meta.workspaces.map(w => ({ id: w.id, name: w.name })) }
         : { userId: null, email: null, name: null, role: null, workspaces: [] } };
   }
@@ -2492,6 +2526,14 @@ function recipientOf(scope: Scope, address: string | null) {
 }
 
 /** countToday for one work item: each key is charged once, and a retry reads the stored outcome. */
+/** Everything the conversation's model calls cost: its answered turns' and its failed turns'. */
+const spentUsd = (meta: Meta) => meta.costUsd + (meta.failed?.costUsd ?? 0);
+/**
+ * A turn that failed (OpenCode reported the run failed) before it answered (a chat's text, an email's reply): not the
+ * model declining, not a stop.
+ */
+const failedTurn = (result: TurnResult, answered: boolean) => !!result.error && !result.refused && !result.aborted && !answered;
+
 function charged(progress: { charges?: Charges }, save: () => void): typeof countToday {
   return async (env, key, limit) => {
     const charges = progress.charges ??= {};
