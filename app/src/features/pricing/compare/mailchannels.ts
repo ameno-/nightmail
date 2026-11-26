@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs MailChannels (/compare/mailchannels): a comparison's whole entry (prices.ts, Entry). Every figure was
 // read on MailChannels' own pages on CHECKED: the Email API's Pay as You Grow sizes in its pricing page's size menu,
@@ -47,5 +47,4 @@ export const mailChannels: Entry = {
   ],
   // MailChannels' readers first see the API, the allowances and the receiving it leaves out.
   panels: ['send', 'free', 'receive', 'route', 'agent', 'campaign', 'domain'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

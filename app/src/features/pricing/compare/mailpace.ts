@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs MailPace (/compare/mailpace): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // MailPace's own pages on CHECKED. MailPace has one plan: $10 a month covers the first 10,000 emails sent or received,
@@ -43,5 +43,4 @@ export const mailPace: Entry = {
   ],
   // MailPace's readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'campaign', 'agent', 'route', 'domain'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

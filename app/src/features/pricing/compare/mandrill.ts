@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type Offer, type Plan } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Plan } from '../prices.ts'
 
 // Nightmail vs Mandrill (/compare/mandrill): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailchimp's own pages on CHECKED. Mandrill is Mailchimp's transactional email (renamed Mailchimp Transactional in
@@ -48,5 +48,4 @@ export const mandrill: Entry = {
   ],
   // Mandrill's readers first see the API, the allowances and the campaigns it leaves to Mailchimp.
   panels: ['send', 'free', 'campaign', 'receive', 'agent', 'domain', 'route'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

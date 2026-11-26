@@ -14,7 +14,7 @@ import { createHarness, MODEL, promptFragments } from './agent/opencode.js';
 import { searchDocs } from './agent/docs.js';
 import { actionTitle, NOTE_MAX, ToolFailure, toolNames, type ActionProposal, type TicketInput, type ToolHost } from './agent/tools.js';
 import { fenced, toolResult, untrusted } from './agent/projection.js';
-import { addresses, hostedDomain, productName } from '../../api/src/brand.js';
+import { hostedDomain, productName } from '../../api/src/brand.js';
 
 // One support conversation (chat or email) per Durable Object (design §1). It holds:
 // - its conversation ID, the only identity it ever passes to Nightmail: Nightmail registered the conversation from its own
@@ -89,6 +89,21 @@ const NUDGE = '[You ended your turn without calling reply, so the customer has n
 const ALREADY_REPLIED = 'You already replied to this email, and only that reply is sent. End your turn now.';
 /** What chat shows when the customer writes while staff have paused the agent (once per pause). */
 const PAUSED = `Someone from the ${productName} team is handling this conversation and will reply here.`;
+/**
+ * A chat message the agent can't answer (passToTeam), told in one plain reply: passed to the team as a ticket, added to
+ * the ticket the conversation already has, or (past the ticket caps) passed on without one. Never an address to write to.
+ */
+const PASSED = {
+  ticket: 'I can’t answer this one right now, so I’ve passed it to our team as a ticket. They’ll reply here, or by email when this chat isn’t open.',
+  added: 'I can’t answer this one right now either, so I’ve added it to your ticket. Our team will reply here, or by email when this chat isn’t open.',
+  team: 'I can’t answer this one right now, so I’ve passed it to our team. They’ll reply here, or by email when this chat isn’t open.',
+} as const;
+/** A message past the transcript's bound: not kept here, but in the conversation's ticket. */
+const CHAT_FULL = 'This conversation is full, so I’ve passed your message to our team with it. They’ll reply here, or by email when this chat isn’t open.';
+/** A chat turn's input: the customer's words (or a harness note, hidden), their screenshots, and `full` past the transcript's bound. */
+type ChatInput = { text?: string; hidden?: boolean; attachments?: string[]; full?: boolean };
+/** Why a chat message gets no answer from the agent: a daily cap, the conversation's own limits, or the model failing. */
+type Unanswered = 'person' | 'workspace' | 'global' | 'turns' | 'budget' | 'messages' | 'failed' | 'setup';
 /** The fixed replies, as the staff inbox shows them. */
 const FIXED_LABEL: Record<string, string> = { help: 'Sent the sign-in-and-Help reply', signin: 'Sent the sign-in reply', access: 'Sent the access-changed reply', busy: 'Sent the busy reply', decline: 'Sent the decline reply',
   unanswered: 'No general answer: over the answering limits. It waits for them to confirm it signed in.' };
@@ -185,7 +200,8 @@ type Meta = {
  * 'notice' told the customer something that answers them (busy, declined, a chat notice); 'waiting' asked them to do
  * something before we answer (the sign-in reply, the access-changed reply), so it is no reply; 'status' records their
  * own choice in the conversation (content access allowed): it asks nothing and answers nothing, so it is no reply either;
- * 'unanswered' records that an email gets no general answer until its sender claims it (its `source`), and reached nobody.
+ * 'unanswered' records that an email gets no general answer until its sender claims it (its `source`), or that a message
+ * went to the team unanswered (passToTeam, or a ticket the caps refused): it reached nobody, so No reply sent holds it.
  */
 type Transcript = { id: string; role: 'user' | 'assistant' | 'staff'; kind: 'first' | 'reply' | 'notice' | 'waiting' | 'status' | 'unanswered' | 'held' | 'staff' | null; text: string; at: string; tools: { id: string; label: string; ok: boolean }[];
   attachments?: { id: string; type: string; width: number | null; height: number | null; name: string }[]; author?: string | null; channel?: 'email';
@@ -243,6 +259,11 @@ type Composed = {
   /** The held entry (staff inbox) that keeps what the model wrote when the gate held it: the email sends HELD instead. */
   gatedDraft?: string;
   ticketed?: boolean; fixed?: 'help' | 'busy' | 'decline'; text?: string | null; paused?: boolean; held?: string;
+  /**
+   * The ticket caps let no ticket be filed for this email (the agent's, or the busy reply's): its busy reply is recorded
+   * as `unanswered`, not as an answer, so No reply sent holds it for staff.
+   */
+  unticketed?: boolean;
   /** The model declined to answer without calling reply (stop_reason "refusal"): the fixed decline is the answer. */
   declined?: boolean;
   /**
@@ -285,7 +306,7 @@ type Notify = { ticketId: string; key: string; input: { addressId?: string; to: 
 type Alert = { key: string; input: { addressId?: string; to: string[]; subject: string; text: string } };
 type FollowUp = { addressId?: string; ctx: TicketContext; ticket: FiledTicket };
 /** The email turn running now (SupportConversation.emailTurn). */
-type EmailTurn = { reply: (text: string) => Promise<string>; verified: boolean; stop: AbortController; lost?: boolean };
+type EmailTurn = { reply: (text: string) => Promise<string>; verified: boolean; stop: AbortController; lost?: boolean; unticketed?: boolean };
 /** A staff reply to deliver, as Nightmail's outbox gave it. */
 type StaffReply = Pick<OutboxReply, 'id' | 'text' | 'staffName'>;
 
@@ -298,7 +319,8 @@ export class SupportConversation extends DurableObject<Env> {
   private pendingTurns = 0;
   private pendingBytes = 0;
   private chatTimestamps: number[] = [];
-  private closingForLimit = false;
+  /** A full transcript's message went to the ticket once since this object woke: later ones are refused alone. */
+  private fullTicketed = false;
   /** The DMARC verdict of the email being answered, for the ticket it may file. */
   private currentDmarc: string | null = null;
   /**
@@ -315,6 +337,8 @@ export class SupportConversation extends DurableObject<Env> {
   private mirroring: Promise<void> = Promise.resolve();
   /** A stamped request during the chat turn running now was refused: the turn stops and the chat ends after it. */
   private accessLost = false;
+  /** This chat turn's ticket was refused by the ticket caps (fileTicket): it ends with no answer, passed to the team. */
+  private chatUnticketed = false;
   /**
    * Panels' hints that a proposal was decided: one read at a time for the chat (queued), one queued or running per
    * proposal (a repeat while it waits is the same read; one during it, one more after), within the cooldowns and any
@@ -725,19 +749,13 @@ export class SupportConversation extends DurableObject<Env> {
         const requested = Array.isArray(message.attachments) ? message.attachments.filter((a): a is string => typeof a === 'string').slice(0, MAX_ATTACHMENTS) : [];
         if ((!text && !requested.length) || !clientId) { this.sendTo(ws, { type: 'error', code: 'BAD_MESSAGE', message: 'user.message needs text (or attachments) and clientMessageId.', retryable: false }); return; }
         if (meta.status === 'closed') { this.sendTo(ws, { type: 'closed', reason: 'ended' }); return; }
-        // Check conversation budgets, queue bounds and burst rate before persisting or queueing any work.
-        const refused = this.admit(meta);
-        if (refused) {
-          this.sendTo(ws, { type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its limit. I’ve passed it to the ${productName} team, who will follow up by email.`, retryable: false });
-          if (!this.closingForLimit) {
-            this.closingForLimit = true;
-            this.enqueueTurn({ text });
-          }
-          return;
-        }
+        // Check the transcript's bound, queue bounds and burst rate before persisting or queueing any work. A message past
+        // the conversation's own limits is still kept and queued: its turn passes it to the team (passToTeam).
         const storedUsers = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM _support_transcript WHERE role = 'user'").one().n;
-        if (storedUsers >= MAX_TRANSCRIPT_MESSAGES || meta.turns + this.pendingTurns >= TURNS_PER_CONVERSATION) {
-          this.sendTo(ws, { type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its message limit. Start a new conversation or email ${addresses.support}.`, retryable: false });
+        if (storedUsers >= MAX_TRANSCRIPT_MESSAGES) {
+          // Full: this message can't be kept in the transcript, so it goes into the conversation's ticket instead.
+          this.sendTo(ws, { type: 'error', code: 'BUDGET_EXHAUSTED', message: CHAT_FULL, retryable: false });
+          if (!this.fullTicketed) { this.fullTicketed = true; this.enqueueTurn({ text, full: true }); }
           return;
         }
         const textBytes = new TextEncoder().encode(text).length;
@@ -823,7 +841,7 @@ export class SupportConversation extends DurableObject<Env> {
       .map(r => {
         const stored = JSON.parse(r.tools) as Transcript['tools'] | { tools: Transcript['tools']; attachments: NonNullable<Transcript['attachments']> };
         const tools = Array.isArray(stored) ? stored : stored.tools, attachments = Array.isArray(stored) ? [] : stored.attachments;
-        return { id: r.id, role: r.role, ...(r.kind ? { kind: r.kind === 'waiting' || r.kind === 'status' ? 'notice' : r.kind } : {}), text: r.text, at: r.at, ...(r.role === 'assistant' ? { tools } : {}), ...(r.role === 'staff' ? { author: r.author } : {}), ...(attachments.length ? { attachments } : {}) };
+        return { id: r.id, role: r.role, ...(r.kind ? { kind: r.kind === 'waiting' || r.kind === 'status' || r.kind === 'unanswered' ? 'notice' : r.kind } : {}), text: r.text, at: r.at, ...(r.role === 'assistant' ? { tools } : {}), ...(r.role === 'staff' ? { author: r.author } : {}), ...(attachments.length ? { attachments } : {}) };
       });
   }
   private pendingConsent() {
@@ -1068,8 +1086,11 @@ export class SupportConversation extends DurableObject<Env> {
   private sendTo(ws: WebSocket, message: Outgoing) {
     try { ws.send(JSON.stringify({ v: 1, ...message, seq: ++this.seq })); } catch { /* closed */ }
   }
-  /** A chat notice; `waiting` when it asks them to do something first, `status` when it only records their choice (neither is a reply in the inbox). */
-  private notice(text: string, kind: 'notice' | 'waiting' | 'status' = 'notice') {
+  /**
+   * A chat notice; `waiting` when it asks them to do something first, `status` when it only records their choice,
+   * `unanswered` when it says their message went to the team (none of these is a reply in the inbox).
+   */
+  private notice(text: string, kind: 'notice' | 'waiting' | 'status' | 'unanswered' = 'notice') {
     const id = newId('msg');
     this.record({ id, role: 'assistant', kind, text, at: new Date().toISOString(), tools: [] });
     this.broadcast({ type: 'message.start', messageId: id, kind: 'notice' });
@@ -1195,7 +1216,7 @@ export class SupportConversation extends DurableObject<Env> {
 
   // ---------- turns ----------
 
-  private enqueueTurn(input: { text?: string; hidden?: boolean; attachments?: string[] }, bytes = 0) {
+  private enqueueTurn(input: ChatInput, bytes = 0) {
     this.pendingTurns += 1;
     this.pendingBytes += bytes;
     this.queue = this.queue.then(() => this.chatTurn(input)).catch(error => logError(error, { event: 'chat', code: 'TURN_FAILED' })).finally(() => {
@@ -1218,14 +1239,14 @@ export class SupportConversation extends DurableObject<Env> {
   }
 
   /** Guards every turn: the conversation's limits, the spend budget, and the model key. */
-  private admit(meta: Meta): string | null {
+  private admit(meta: Meta): 'closed' | 'turns' | 'budget' | null {
     if (meta.status === 'closed') return 'closed';
     if (meta.turns >= TURNS_PER_CONVERSATION) return 'turns';
     if (meta.inputTokens + meta.outputTokens + (meta.cacheReadTokens ?? 0) / 10 >= TOKEN_BUDGET) return 'budget';
     return null;
   }
 
-  private async chatTurn(input: { text?: string; hidden?: boolean; attachments?: string[] }) {
+  private async chatTurn(input: ChatInput) {
     let meta = this.meta();
     if (!meta) return;
     // A chat from before the stamp never takes another turn: it ends.
@@ -1233,14 +1254,12 @@ export class SupportConversation extends DurableObject<Env> {
       if (meta.status !== 'closed') { this.notice(LEGACY_ENDED); await this.retireLegacy(); }
       return;
     }
-    const refused = this.admit(meta);
+    const refused = input.full ? 'messages' : this.admit(meta);
     if (refused) {
       if (refused === 'closed') return;
-      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its limit. I’ve passed it to the ${productName} team, who will follow up by email.`, retryable: false });
-      await this.harnessTicket(meta, internal('Conversation limit reached', `The conversation reached its ${refused === 'turns' ? `${TURNS_PER_CONVERSATION}-turn` : 'token'} limit before it was resolved.`, input.text ?? '', 'Read the conversation and reply to the customer.'));
-      // The panel resumes this person's open chat on every open, and each message keeps it from going idle: left open, a
-      // spent conversation would answer nothing for up to 30 days. It ends here; the team follows up by email.
-      await this.close('limit');
+      // Spent: this message and every later one go to the team, in this conversation's one ticket. It stays open, so staff
+      // reply here (an ended chat takes only notes) and the person can keep writing to them.
+      await this.passToTeam(meta, refused, input);
       return;
     }
     // Staff have paused the agent (api/src/support-inbox.ts): the message is recorded and mirrored, and no turn runs. The
@@ -1255,10 +1274,7 @@ export class SupportConversation extends DurableObject<Env> {
     {
       let scope: PlatformReply<Scope> | null = null;
       try { scope = await this.stamped<Scope>('GET', '/v1/support/scope'); } catch (error) { logError(error, { event: 'chat', code: 'SCOPE_READ_FAILED' }); }
-      if (scope?.status !== 200) {
-        this.broadcast({ type: 'error', code: 'TURN_FAILED', message: 'Something went wrong on my side. Try again in a moment.', retryable: !scope || scope.status >= 500 || scope.status === 429 });
-        return;
-      }
+      if (scope?.status !== 200) { await this.passToTeam(meta, 'failed', input); return; }
       if (this.reduced(meta, scope.body)) { await this.endForAccess(); return; }
       meta = this.applyScope(scope.body);
     }
@@ -1266,16 +1282,14 @@ export class SupportConversation extends DurableObject<Env> {
     // chat here, before any model call.
     const outcomes = await this.decidedActions();
     if (outcomes === 'refused') { await this.endForAccess(); return; }
-    // Daily caps (review M5): this person's turns and everyone's, before any model call.
+    // Daily caps (review M5): this person's turns, their workspace's and everyone's, before any model call. Past one, the
+    // message goes to the team as a ticket, with no model call.
     const allowed = await this.turnAllowed(meta);
-    if (!allowed.ok) {
-      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: allowed.global ? `${productName} support is answering a lot of questions today. Email ${addresses.support} and the team will reply.` : `You’ve reached today’s limit for support answers. Email ${addresses.support} and the team will reply.`, retryable: false });
-      return;
-    }
-    // Fail closed before any model call: without the gateway key there is no agent, and the panel says so.
+    if (!allowed.ok) { await this.passToTeam(meta, allowed.global ? 'global' : allowed.workspace ? 'workspace' : 'person', input); return; }
+    // Fail closed before any model call: without the gateway key there is no agent, so the message goes to the team.
     if (!this.env.CONSOLE_GATEWAY_KEY) {
       log('error', { event: 'chat', code: 'SECRET_MISSING', secret: 'CONSOLE_GATEWAY_KEY' });
-      this.broadcast({ type: 'error', code: 'TURN_FAILED', message: `Support isn’t fully set up yet. Please email ${addresses.support}.`, retryable: false });
+      await this.passToTeam(meta, 'setup', input);
       return;
     }
     // Settled now, right before the model hears them: each told once, and the panels read their cards again.
@@ -1288,6 +1302,7 @@ export class SupportConversation extends DurableObject<Env> {
     this.broadcast({ type: 'status', busy: true });
     this.broadcast({ type: 'message.start', messageId, kind: 'reply' });
     this.abort = new AbortController();
+    this.chatUnticketed = false;
     let result: TurnResult;
     try {
       const { images, notes } = await this.turnImages(input.attachments ?? []);
@@ -1307,32 +1322,50 @@ export class SupportConversation extends DurableObject<Env> {
       if (await this.stoppedTurn(messageId)) return;
       const missing = error instanceof MissingSecret ? error.secret : null;
       logError(error, { event: 'chat', code: missing ? 'SECRET_MISSING' : 'TURN_FAILED' });
+      // The reply in progress ends empty, and the message goes to the team.
       this.broadcast({ type: 'message.end', messageId, text: '', redacted: false });
-      this.broadcast({ type: 'error', code: 'TURN_FAILED', message: missing ? `Support isn’t fully set up yet. Please email ${addresses.support}.` : 'Something went wrong on my side. Try again in a moment.', retryable: !missing });
+      await this.passToTeam(this.meta()!, missing ? 'setup' : 'failed', input);
       this.broadcast({ type: 'status', busy: false });
       return;
     }
     this.abort = null;
     meta = this.charge(result.usage, 1, failedTurn(result, !!result.text.trim()));
     if (await this.stoppedTurn(messageId)) return;
-    let final = result.text.trim(), redacted = false;
+    let final = result.text.trim(), redacted = false, unticketed = false;
+    // The model failed before it answered: the reply ends empty, and the message goes to the team.
+    if (failedTurn(result, !!final)) {
+      this.broadcast({ type: 'message.end', messageId, text: '', redacted: false });
+      await this.passToTeam(meta, 'failed', input);
+      this.broadcast({ type: 'status', busy: false });
+      await this.saveUsage(meta);
+      return;
+    }
+    // Its ticket was refused by the ticket caps: nothing it wrote goes, and the message is the team's (No reply sent).
+    if (this.chatUnticketed) {
+      this.chatUnticketed = false;
+      this.broadcast({ type: 'message.end', messageId, text: '', redacted: false });
+      this.notice(PASSED.team, 'unanswered');
+      this.broadcast({ type: 'status', busy: false });
+      await this.saveUsage(meta);
+      return;
+    }
     if (result.refused) {
       // The model declined (stop_reason "refusal"): whatever it wrote before stopping is dropped, and the customer gets the
       // fixed decline, never an error or half a sentence.
       log('warn', { event: 'chat', code: 'MODEL_REFUSAL', conversation: meta.conversationId });
       final = DECLINE;
     } else {
-      if (!final && result.error) final = 'Something went wrong on my side. Try again in a moment.';
       const checked = gate(final, this.gateScope(meta));
       if (!checked.ok) {
         // What the agent wrote is the team's: a held entry for the staff inbox only (never in the panel's history).
         this.record({ id: newId('msg'), role: 'assistant', kind: 'held', text: final, at: new Date().toISOString(), tools: [], reason: 'gate' });
         redacted = true; final = REDACTED;
         log('warn', { event: 'chat', code: 'OUTPUT_GATE_TRIPPED', conversation: meta.conversationId, reasons: checked.reasons });
-        await this.harnessTicket(meta, internal('Answer held by the output gate', `The output gate held an answer (${checked.reasons.join(', ')}).`, input.text ?? '', 'Read the held answer in the transcript and reply to the customer by email.', 'guardrail'));
+        unticketed = !!(await this.harnessTicket(meta, internal('Answer held by the output gate', `The output gate held an answer (${checked.reasons.join(', ')}).`, input.text ?? '', 'Read the held answer in the transcript and reply to the customer by email.', 'guardrail'))).refused;
       }
     }
-    this.record({ id: messageId, role: 'assistant', kind: 'reply', text: final, at: new Date().toISOString(), tools });
+    // A held answer with no ticket (the ticket caps) isn't an answer: No reply sent holds the conversation for staff.
+    this.record({ id: messageId, role: 'assistant', kind: unticketed ? 'unanswered' : 'reply', text: final, at: new Date().toISOString(), tools });
     // Only now does any of the answer reach the panel: the checked text as one delta (the panel reveals it), then its end.
     if (final) this.broadcast({ type: 'text.delta', messageId, delta: final });
     this.broadcast({ type: 'message.end', messageId, text: final, redacted });
@@ -1525,8 +1558,13 @@ export class SupportConversation extends DurableObject<Env> {
       },
       fileTicket: async (input: TicketInput) => {
         const meta = this.meta()!, filed = await this.harnessTicket(meta, input, this.currentDmarc);
-        if (filed.refused === 'person') throw new ToolFailure(`This customer already filed today’s maximum of tickets, so this couldn’t be filed. Tell them the ${productName} team already has their earlier tickets today and can be reached by replying to one of those emails; answer what you can yourself.`);
-        if (filed.refused) throw new ToolFailure(`${productName} support has reached its ticket limit for today (for everyone, not this customer), so this couldn’t be filed. Tell them the team has been alerted and they can email ${addresses.support}; answer what you can yourself.`);
+        // Past the ticket caps (this person's 3 a day, or everyone's 60): no ticket, and no answer from this turn either. The
+        // customer is told the team has it, recorded as unanswered, so No reply sent puts the conversation under Needs you
+        // and a person answers. Never a pointer to email instead.
+        if (filed.refused) {
+          if (this.emailTurn) this.emailTurn.unticketed = true; else this.chatUnticketed = true;
+          throw new ToolFailure('This couldn’t be filed as a ticket today, but the team still sees this conversation and will answer it. End your turn now and write nothing more: the customer is told the team has it.');
+        }
         return filed.created
           ? `Filed ${filed.id}. Tell the customer: you've passed it to the ${productName} team as ${filed.id}; someone will reply by email to ${filed.replyTo ? fenced(filed.replyTo) : 'their account address'}, usually within one business day; you can't promise an outcome, but you've included what you found.`
           : `Added to the existing ticket ${filed.id}. Tell the customer you've added this to ${filed.id}.`;
@@ -1597,10 +1635,10 @@ export class SupportConversation extends DurableObject<Env> {
 
   /**
    * The daily turn caps, before any model call. Signed-in chats and verified customer emails draw from the customer
-   * reserve (`global:turns`). General (non-member) emails draw from their own per-domain and daily budget so they can
-   * never exhaust the customer reserve.
+   * reserve (`global:turns`), within their person's cap and their workspace's. General (non-member) emails draw from their
+   * own per-domain and daily budget so they can never exhaust the customer reserve.
    */
-  private async turnAllowed(meta: Meta, count = countToday, verifiedEmail = false): Promise<{ ok: boolean; global: boolean }> {
+  private async turnAllowed(meta: Meta, count = countToday, verifiedEmail = false): Promise<{ ok: boolean; global: boolean; workspace?: true }> {
     const cap = limits(this.env), email = meta.channel === 'email';
     if (!(await count(this.env, `${await this.person(meta)}:${email ? 'email_turns' : 'turns'}`, email ? cap.turnsPerEmailSender : cap.turnsPerPerson)).ok) return { ok: false, global: false };
     if (email && !verifiedEmail) {
@@ -1610,6 +1648,8 @@ export class SupportConversation extends DurableObject<Env> {
       return { ok: true, global: false };
     }
     if (email && verifiedEmail && meta.userId && !(await count(this.env, `user:${meta.userId}:turns`, cap.turnsPerPerson)).ok) return { ok: false, global: false };
+    // The workspace the conversation is about (a chat's, or the one a verified email chose): all its people together.
+    if (meta.workspace && !(await count(this.env, `workspace:${meta.workspace.id}:turns`, cap.turnsPerWorkspace)).ok) return { ok: false, global: false, workspace: true };
     if (!(await count(this.env, 'global:turns', cap.turnsPerDay)).ok) { await alertOnce(this.env, 'turns', cap.turnsPerDay); return { ok: false, global: true }; }
     return { ok: true, global: false };
   }
@@ -1623,12 +1663,48 @@ export class SupportConversation extends DurableObject<Env> {
       .map(r => ({ who: r.role === 'user' ? 'customer' as const : r.role === 'staff' ? 'staff' as const : 'agent' as const, at: r.at, text: r.text }));
   }
 
-  private async harnessTicket(meta: Meta, input: TicketInput, dmarc: string | null = null): Promise<ReturnType<typeof fileTicket> extends Promise<infer T> ? T & { refused?: 'person' | 'global' } : never> {
+  /**
+   * A chat message the agent can't answer: a daily cap (the person's, their workspace's, everyone's), the conversation's
+   * own limits, or the model failing. No model call. The message (kept in the transcript when it arrived; past the
+   * transcript's bound, only here) goes to the team in the conversation's one ticket, filed now with why in its brief (the
+   * inbox lists it under Needs you), or added to the ticket it already has; outside the ticket caps (harnessTicket 'passed').
+   * The person gets one plain reply saying so, recorded as `unanswered`: it isn't an answer, so No reply sent holds the
+   * conversation for staff as well. Staff reply as to any ticket: in this chat, or by email when it isn't open.
+   */
+  private async passToTeam(meta: Meta, why: Unanswered, input: ChatInput) {
+    const cap = limits(this.env), words = input.hidden || !input.text ? this.lastWords() : input.text;
+    const [title, summary] = ({
+      person: ['Daily answer limit reached', `They reached today’s limit of ${cap.turnsPerPerson} support answers for one person, so the agent didn’t answer.`],
+      workspace: ['Workspace’s daily answer limit reached', `Their workspace reached today’s limit of ${cap.turnsPerWorkspace} support answers, so the agent didn’t answer.`],
+      global: ['Support’s daily answer total reached', `Support reached today’s total of ${cap.turnsPerDay} answers for everyone, so the agent didn’t answer.`],
+      turns: ['Conversation limit reached', `The conversation reached its ${TURNS_PER_CONVERSATION}-turn limit, so the agent answers nothing more in it.`],
+      budget: ['Conversation limit reached', 'The conversation reached its token budget, so the agent answers nothing more in it.'],
+      messages: ['Conversation is full', `The conversation holds its maximum of ${MAX_TRANSCRIPT_MESSAGES} messages; this one is kept only here.`],
+      failed: ['The AI failed to answer', 'The agent’s turn failed (the model or its platform), so the customer got no answer.'],
+      setup: ['The AI isn’t set up', 'The support agent has no model key here (CONSOLE_GATEWAY_KEY), so no chat is answered.'],
+    } satisfies Record<Unanswered, [string, string]>)[why];
+    log('warn', { event: 'chat', code: 'CHAT_PASSED_TO_TEAM', reason: why, conversation: meta.conversationId });
+    const filed = await this.harnessTicket(meta, internal(title, summary, (words || '(no text)').slice(0, 600), 'Reply to them in the inbox: it reaches their chat, or their email when the chat isn’t open.'), null, 'passed');
+    if (why === 'messages') return;
+    this.notice(filed.refused ? PASSED.team : filed.created ? PASSED.ticket : PASSED.added, 'unanswered');
+  }
+  /** The customer's latest message in the transcript (a hidden turn's ticket quotes it). */
+  private lastWords() {
+    return this.sql.exec<{ text: string }>("SELECT text FROM _support_transcript WHERE role = 'user' ORDER BY seq DESC LIMIT 1").toArray()[0]?.text ?? '';
+  }
+
+  /**
+   * `pool`: 'caps' counts a new ticket against the ticket caps (the person's 3 a day, everyone's 60); 'passed' is a chat
+   * message the agent couldn't answer (passToTeam), which counts against neither, so a model outage never uses up the
+   * tickets the agent's own escalations and verified emails need. Those stay bounded by one ticket per conversation, the
+   * person's open conversations and the staff email throttle.
+   */
+  private async harnessTicket(meta: Meta, input: TicketInput, dmarc: string | null = null, pool: 'caps' | 'passed' = 'caps'): Promise<ReturnType<typeof fileTicket> extends Promise<infer T> ? T & { refused?: 'person' | 'global' } : never> {
     const ctx = await this.ticketCtx(meta, dmarc);
     // A new ticket counts against the person's cap and its budget (verified customers have their own reserve: R1);
     // adding to an existing one doesn't.
     const exists = await this.env.DB.prepare('SELECT id FROM tickets WHERE conversation_id = ?').bind(meta.conversationId).first();
-    if (!exists) {
+    if (!exists && pool === 'caps') {
       // A chat's person, or the person Nightmail bound an email conversation to; any other email ticket counts against its
       // sender's address.
       const verifiedUserId = ticketPerson(meta);
@@ -1942,7 +2018,8 @@ export class SupportConversation extends DurableObject<Env> {
     await external(nightmailApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: progress.text, to: progress.mode === 'verified' ? progress.recipient! : answer.sender, addressId: answer.route.addressId, ...(progress.fixed ? { subject: FIXED_SUBJECT } : {}) }, answer.route.key));
     const at = new Date().toISOString();
     // The earlier build's sign-in-and-Help reply asks them to act first: no reply to what they asked.
-    if (progress.fixed) this.record({ id: newId('msg'), role: 'assistant', kind: progress.fixed === 'help' ? 'waiting' : 'notice', text: FIXED_LABEL[progress.fixed]!, at, tools: [], channel: 'email' });
+    // The busy reply of an email no ticket could be filed for isn't an answer: No reply sent holds it for staff.
+    if (progress.fixed) this.record({ id: newId('msg'), role: 'assistant', kind: progress.fixed === 'help' ? 'waiting' : progress.fixed === 'busy' && progress.unticketed ? 'unanswered' : 'notice', text: FIXED_LABEL[progress.fixed]!, at, tools: [], channel: 'email' });
     else this.record({ id: newId('msg'), role: 'assistant', kind: 'reply', text: progress.text, at, tools: [], channel: 'email' });
     // A general answer that offered one from the account: it follows once they claim the email (parked for that, checked
     // now and then as any sign-in is). Unless a ticket took the thread since: then the team answers.
@@ -2103,9 +2180,10 @@ export class SupportConversation extends DurableObject<Env> {
         // An unclaimed email's general answer is only for mail within the answering limits: over one, no ticket and no
         // fixed reply (answer() records it and parks it for its claim).
         if (progress.unclaimed) { progress.capped = true; save(); return; }
-        // L1: a refused turn still reaches the team (within the ticket caps), and the customer gets the fixed reply.
+        // L1: a refused turn still reaches the team (a ticket within the ticket caps; past them, No reply sent), and the
+        // customer gets the fixed reply.
         if (!progress.ticketed) {
-          await this.harnessTicket(meta, internal(progress.refused ? 'Conversation limit reached' : 'Daily answer limit reached', progress.refused ? `The email conversation reached its ${progress.refused} limit.` : 'The daily cap on model answers was reached; this email was not answered by the agent.', body.slice(0, 600), 'Read the thread and reply to the customer.', 'other', [answer.messageId]), dmarc);
+          progress.unticketed = !!(await this.harnessTicket(meta, internal(progress.refused ? 'Conversation limit reached' : 'Daily answer limit reached', progress.refused ? `The email conversation reached its ${progress.refused} limit.` : 'The daily cap on model answers was reached; this email was not answered by the agent.', body.slice(0, 600), 'Read the thread and reply to the customer.', 'other', [answer.messageId]), dmarc)).refused;
           progress.ticketed = true; save();
         }
         progress.fixed = 'busy'; progress.text = FIXED.busy(); progress.mode = 'general'; save();
@@ -2165,7 +2243,7 @@ export class SupportConversation extends DurableObject<Env> {
         // The email, then (no reply yet) one nudge, in the same session; neither is shown or sent. A refusal gets no nudge:
         // the model declined, and asking again would only be declined again.
         for (const prompt of [input, { ...input, text: NUDGE, images: [] }]) {
-          if (prompt !== input && (progress.model !== undefined || refused || stop.signal.aborted)) break;
+          if (prompt !== input && (progress.model !== undefined || refused || turn.unticketed || stop.signal.aborted)) break;
           const turns = prompt === input ? 1 : 0;
           const result: TurnResult = await external(agent.turn(prompt, this.toolHost(), () => {}, stop.signal).catch(error => { this.chargeLost(error, turns); throw error; }));
           this.charge(result.usage, turns, failedTurn(result, progress.model !== undefined));
@@ -2174,6 +2252,7 @@ export class SupportConversation extends DurableObject<Env> {
       } finally { this.emailTurn = null; }
       // Less access than the turn started with (a narrowed scope that gave less, or a refused read): nothing it wrote goes.
       if (turn.lost) { progress.withheld = 'reduced'; progress.noticed = false; save(); return; }
+      if (turn.unticketed && progress.model === undefined) { progress.unticketed = true; save(); }
       if (progress.model === undefined) {
         // A reply already frozen stands, whatever happened after it. Without one, a refusal gets the fixed decline.
         if (refused) { log('warn', { event: 'email', code: 'MODEL_REFUSAL', conversation: meta.conversationId }); progress.declined = true; }
@@ -2187,8 +2266,8 @@ export class SupportConversation extends DurableObject<Env> {
     if (progress.model === null && progress.declined) { progress.fixed = 'decline'; progress.text = FIXED.decline(origin); progress.mode = 'general'; save(); return; }
     // No reply, even after the nudge: the fixed busy reply, and the team gets the email in a ticket.
     if (progress.model === null) {
-      if (!progress.ticketed) {
-        await this.harnessTicket(updated, internal('Email not answered by the agent', 'The agent ended its turn without a reply, twice; the customer got the busy reply.', body.slice(0, 600), 'Read the thread and reply to the customer.', 'other', [answer.messageId]), dmarc);
+      if (!progress.ticketed && !progress.unticketed) {
+        progress.unticketed = !!(await this.harnessTicket(updated, internal('Email not answered by the agent', 'The agent ended its turn without a reply, twice; the customer got the busy reply.', body.slice(0, 600), 'Read the thread and reply to the customer.', 'other', [answer.messageId]), dmarc)).refused;
         progress.ticketed = true; save();
       }
       progress.fixed = 'busy'; progress.text = FIXED.busy(); progress.mode = 'general'; save();

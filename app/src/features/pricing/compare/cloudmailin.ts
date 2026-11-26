@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, readOn, tierSizes, type Entry, type Offer } from '../prices.ts'
+import { fact, readOn, tierSizes, type Entry, type Offer } from '../prices.ts'
 
 // Nightmail vs CloudMailin (/compare/cloudmailin): a comparison's whole entry (prices.ts, Entry), on received email,
 // which CloudMailin is for. Every figure was read on CloudMailin's own pages on CHECKED.
@@ -47,5 +47,4 @@ export const cloudMailin: Entry = {
   ],
   // CloudMailin's readers first see receiving, routing and the allowances.
   panels: ['receive', 'route', 'free', 'agent', 'domain', 'send', 'campaign'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} received emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

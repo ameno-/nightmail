@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Mailgun (/compare/mailgun): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailgun's own pages on CHECKED: the plans on its pricing page (pricing.md is its text), and each plan's overage in its
@@ -56,5 +56,4 @@ export const mailgun: Entry = {
   ],
   // Mailgun's readers first see the API, the allowances and routing.
   panels: ['send', 'free', 'route', 'receive', 'agent', 'domain', 'campaign'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }
