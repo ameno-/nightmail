@@ -49,6 +49,9 @@ const oneLine = (value: string | null | undefined, max = 80) => {
   const text = (value ?? '').normalize('NFC').replace(/[\p{C}\u2028\u2029]+/gu, ' ').replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 };
+/** Such words in an email's body, kept from turning into something to tap: a zero-width space after every dot between
+ *  letters and after a scheme's colon (as notices.ts quotes them), so a name like "pay-now.example" is never a link. */
+const inert = (value: string) => value.replace(/([\p{L}\p{N}])\.(?=[\p{L}\p{N}])/gu, '$1.\u200b').replace(/:\/\//g, ':\u200b//');
 const moment = (iso: string) => { const d = new Date(iso); return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })} at ${d.toISOString().slice(11, 16)} UTC`; };
 const ago = (iso: string, now: number) => {
   const minutes = Math.max(1, Math.round((now - Date.parse(iso)) / 60_000));
@@ -61,13 +64,13 @@ export const needOf = (row: StaffRow, reasons: string[]): Need => row.channel ==
 
 /** Who wrote, and where: how sure Nightmail is of them is said with them, so nobody acts on an account because of an unverified email. */
 export function whoOf(row: StaffRow) {
-  const workspace = row.workspace_name ? oneLine(row.workspace_name, 60) : null;
+  const workspace = row.workspace_name ? inert(oneLine(row.workspace_name, 60)) : null;
   if (row.channel === 'agent_feedback') {
-    const by = row.evidence?.filedBy ? `, filed with ${oneLine(row.evidence.filedBy, 120)}` : '';
+    const by = row.evidence?.filedBy ? `, filed with ${inert(oneLine(row.evidence.filedBy, 120))}` : '';
     return { line: `Agent feedback from ${workspace ?? 'a workspace'}${row.workspace_id ? ` (${row.workspace_id})` : ''}${by}`, short: workspace ?? 'a workspace' };
   }
   if (row.user_id) {
-    const name = oneLine(row.user_name) || row.user_email || 'A customer', email = row.user_email && row.user_name ? ` (${row.user_email})` : '';
+    const name = inert(oneLine(row.user_name)) || row.user_email || 'A customer', email = row.user_email && row.user_name ? ` (${row.user_email})` : '';
     const where = workspace ? row.role ? `, ${row.role} of ${workspace}` : `, ${workspace}` : '';
     const how = row.channel === 'chat' ? 'chat, signed in' : `email, ${row.verification === 'signin' ? 'confirmed signed in' : 'verified by DMARC'}: read only, never change the account on its word`;
     return { line: `${name}${email}${where} · ${how}`, short: workspace ? `${name} at ${workspace}` : name };
@@ -112,26 +115,26 @@ const shortQuote = (value: string) => {
 };
 /** What an agent wrote, on one line: its whole sentences that fit in about 220 characters (at least the first). */
 const sentences = (value: string) => {
-  const text = value.replace(/\s+/g, ' ').trim(), parts = text.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g) ?? [text];
+  const text = value.replace(/\s+/g, ' ').trim(), parts = text.match(/.+?[.!?]+(?=\s|$)|.+$/g) ?? [text];
   let kept = '';
   for (const part of parts) { if (kept && (kept + part).length > 220) break; kept += part; }
   return oneLine(kept.trim(), 220);
 };
 
-/** One sentence: what the agent found (its summary), or, without one, why this needs a person now. */
-function foundOf(need: Need, row: StaffRow, now: number): string | null {
-  if (row.brief?.summary) return sentences(row.brief.summary);
+/** One sentence: what the agent found (its summary, its own words and so untrusted), or, without one, why this needs a person now. */
+function foundOf(need: Need, row: StaffRow, now: number): Line | null {
+  if (row.brief?.summary) return { untrusted: sentences(row.brief.summary) };
   switch (need) {
     case 'failed': return row.failed_by === 'staff' ? 'A staff reply to them failed to send.' : 'The agent’s answer to them failed to send.';
     case 'no_reply': return row.since ? `Nothing has reached them for ${ago(row.since, now)}.` : null;
     case 'blocked': return `The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work.`;
-    case 'waiting': return row.paused_by === 'ticket' ? 'The agent stopped at its ticket, and they’re waiting.' : `${oneLine(row.paused_by_name) || 'Staff'} paused the agent, and they’re waiting.`;
+    case 'waiting': return row.paused_by === 'ticket' ? 'The agent stopped at its ticket, and they’re waiting.' : `${inert(oneLine(row.paused_by_name)) || 'Staff'} paused the agent, and they’re waiting.`;
     default: return null;
   }
 }
-/** The one decision (set in bold) and the agent's recommendation (one plain line). */
-function decisionOf(need: Need, row: StaffRow): { decision: string; recommendation: string | null } {
-  const recommended = row.brief?.recommendation ? `It recommends: ${oneLine(row.brief.recommendation, 220)}` : null;
+/** The one decision (set in bold) and the recommendation: one plain line, the agent's own words kept untrusted. */
+function decisionOf(need: Need, row: StaffRow): { decision: string; recommendation: Line | null } {
+  const recommended = row.brief?.recommendation ? { untrusted: `It recommends: ${oneLine(row.brief.recommendation, 220)}` } : null;
   switch (need) {
     case 'failed': return { decision: 'Send the reply again, or write a new one.', recommendation: null };
     case 'held': return sendable(row)
@@ -182,7 +185,7 @@ export function conversationEmail(origin: string, row: StaffRow, reasons: string
 /** One workspace's agent feedback: each report's facts and words, the decision, and the tickets. */
 export function feedbackEmail(origin: string, rows: StaffRow[], first: boolean, subject: string): Notice {
   const lead = rows[0]!, workspace = whoOf(lead).line.replace(/, filed with .*$/, ''), lines: Line[] = [];
-  const facts = (row: StaffRow) => [row.evidence?.filedBy ? oneLine(row.evidence.filedBy, 120) : null, row.operation, row.request_id ?? 'no request ID', moment(row.filed_at ?? row.created_at)].filter(Boolean).join(' · ');
+  const facts = (row: StaffRow) => [row.evidence?.filedBy ? inert(oneLine(row.evidence.filedBy, 120)) : null, row.operation ? inert(oneLine(row.operation, 60)) : null, row.request_id ?? 'no request ID', moment(row.filed_at ?? row.created_at)].filter(Boolean).join(' · ');
   if (rows.length === 1) lines.push({ text: `${workspace} · ${facts(lead)}`, tone: 'muted' });
   else lines.push({ text: first ? workspace : `${workspace} · ${plural(rows.length, 'more report')}`, tone: 'muted' });
   for (const row of rows.slice(0, 5)) {
