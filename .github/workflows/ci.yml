@@ -511,11 +511,13 @@ jobs:
     needs: [audit, required, required-cls, required-acceptance]
     if: failure() && github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/dev'
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    continue-on-error: true
     permissions:
       actions: read
       pull-requests: write
     steps:
-      - name: Comment on the queue entry's pull request
+      - name: Comment only on a confirmed queue ejection
         env:
           GH_TOKEN: ${{ github.token }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
@@ -524,6 +526,26 @@ jobs:
           [[ $QUEUE_REF =~ ^refs/heads/gh-readonly-queue/dev/pr-([0-9]+)-[0-9a-f]+$ ]]
           pr=${BASH_REMATCH[1]}
           run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
-          failed=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
-            --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name] | join(", ")')
-          gh pr comment "$pr" -R "$GITHUB_REPOSITORY" --body "Merge-queue CI failed on \`$GITHUB_SHA\`: ${failed:-see the failed checks}. [Queue run]($run)"
+          failed=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name]
+                  | select(any(.[]; IN("build", "acceptance", "cls", "preview", "gateway", "support"))) | join(", ")')
+          [[ -n $failed ]] || exit 0
+
+          # A failed follower can be rebuilt without being ejected. Match its PR, reason and exact group SHA.
+          query='query($owner: String!, $repo: String!, $pr: Int!) {
+            repository(owner: $owner, name: $repo) { pullRequest(number: $pr) {
+              timelineItems(last: 100, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+                nodes { ... on RemovedFromMergeQueueEvent { reason beforeCommit { oid } } }
+              }
+            } }
+          }'
+          for poll in {0..12}; do
+            if (( poll > 0 )); then sleep 15; fi
+            if removed=$(gh api graphql -f query="$query" -f owner="$GITHUB_REPOSITORY_OWNER" \
+                -f repo="${GITHUB_REPOSITORY#*/}" -F pr="$pr" \
+                --jq '.data.repository.pullRequest.timelineItems.nodes[] | select(.reason == "failed_checks") | .beforeCommit.oid') \
+                && grep -Fxq "$GITHUB_SHA" <<< "$removed"; then
+              gh pr comment "$pr" -R "$GITHUB_REPOSITORY" --body "Removed from the merge queue after CI failed: $failed. [Queue run]($run)"
+              exit 0
+            fi
+          done

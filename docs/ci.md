@@ -11,7 +11,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 - **Full CI before queueing:** add the `full-ci` label to run every suite on the PR, even for docs-only changes.
   Remove it to return to the default; either label change starts a new PR run.
 - **Path-gated checks:** the six required check names always report a result. A check passes only if its selected suite succeeded, or path detection succeeded and deliberately skipped it. Detection uses the PR merge checkout's first parent, or the **live dev tip** on a queue entry's first-parent chain (including pending PRs ahead of it). If dev has already advanced past the group, run everything.
-- **Failures:** queue CI comments on the entry's PR with the failing checks and a link to the run. After an ejection, entries behind it are rebuilt without it. Fix and re-add.
+- **Failures:** when a required check fails, CI waits up to three minutes for GitHub to record a failed-check ejection of that PR at that exact queue commit. It then comments with the failed checks and run link. Fix and re-add the ejected PR. Rebuilt followers and audit-only failures get no comment.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
 - **Breaking API changes:** each queue entry is compared with its first parent, which already includes the PRs ahead of it. Only the `api-breaking` label on the PR supplying this entry's head can waive its breaks. An unlabelled entry must still pass, even if it undoes an earlier entry's change.
 
