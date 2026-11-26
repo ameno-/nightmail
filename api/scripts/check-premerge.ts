@@ -478,6 +478,23 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`Job handlers: all ${types.size} enqueued and registered job types resolve through dispatch.ts.`);
 }
 
+// 12. An operation's summary is a name. It is the docs page's title in the browser tab and in search results
+// (docsTitle, app/src/features/docs/meta.ts), the docs sidebar's entry and the SDK's comment, and the MCP tool leads
+// with it: a sentence there runs past the 60 characters a search result shows. Sentences go in the description.
+{
+  // The app's own title rule, by URL: the API's type check doesn't take in the app's sources.
+  const { docsTitle, operationTitle } = await import(new URL('../../app/src/features/docs/meta.ts', import.meta.url).href) as { docsTitle: (page: string) => string; operationTitle: (id: string) => string };
+  const before = failed;
+  const spec = JSON.parse(readFileSync(new URL('openapi.json', api), 'utf8')) as { paths: Record<string, Record<string, { operationId?: string; summary?: string }>> };
+  const operations = Object.values(spec.paths).flatMap(item => Object.values(item)).filter(op => op.operationId);
+  const most = 60 - docsTitle('').length;
+  for (const op of operations) {
+    const name = op.summary ?? operationTitle(op.operationId!), title = docsTitle(name);
+    if (title.length > 60 || /[.;:!?](\s|$)/.test(name)) fail('Operation summaries', `${op.operationId}'s summary “${name}” is ${title.length > 60 ? `${name.length} characters` : 'a sentence'}. A summary is a name of at most ${most} characters with no full stop, because it is the docs page's title (“${title}”, ${title.length} of 60 characters) and the SDK's comment. Keep a short name (“Create an inbox app password”), move the sentence word for word into the operation's description, warnings first, and run bun run sdk in api/.`);
+  }
+  if (failed === before) console.log(`Operation summaries: all ${operations.length} operations are named in at most ${most} characters, so every docs title fits in 60.`);
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;

@@ -44,9 +44,9 @@ export const bindMcpConnection = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
- * List connected agents and their agent tokens
+ * List agents
  *
- * Agent tokens are how agents use Nightmail: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.
+ * List connected agents and their agent tokens. Agent tokens are how agents use Nightmail: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.
  */
 export const listAgents = <ThrowOnError extends boolean = false>(options?: Options<ListAgentsData, ThrowOnError>): RequestResult<ListAgentsResponses, ListAgentsErrors, ThrowOnError> => (options?.client ?? client).get<ListAgentsResponses, ListAgentsErrors, ThrowOnError>({
     security: [
@@ -67,7 +67,7 @@ export const listAgents = <ThrowOnError extends boolean = false>(options?: Optio
 });
 
 /**
- * Revoke a connected agent and its agent tokens
+ * Revoke an agent
  *
  * Your own agent: its sign-in, every agent token it made and everything it created stop working at once (it can sign in again as a new connection). Another member's agent (owners and admins): the agent tokens it made in this workspace are revoked; the sign-in belongs to that person. Dashboard session only.
  */
@@ -320,7 +320,7 @@ export const getAgentSetupToken = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Exchange a setup token for the agent's API key
+ * Exchange a setup token for an API key
  *
  * For a coding agent: the setup token in the prompt a person copied from the dashboard (nm_setup_…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within 15 minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED with a device code in error.details[0] (startAgentDeviceAuthorization's answer) for the person who copied it to approve: show them its link and poll it. The key is shown once.
  */
@@ -334,7 +334,7 @@ export const exchangeAgentSetupToken = <ThrowOnError extends boolean = false>(op
 });
 
 /**
- * Start the device flow for a coding agent
+ * Start the device flow for an agent
  *
  * For a coding agent without a setup token (RFC 8628): returns a device code to keep and a user code to show. Show the person verification_uri_complete as a link on its own line and ask them to open it, sign in, check the code and approve; nextStep says so in words. Then poll pollAgentDeviceToken every interval seconds until it returns the key. Codes work once, for 15 minutes. With setup_token (one from the person's prompt that expired or was replaced before it was used), their dashboard shows you waiting.
  */
@@ -362,7 +362,7 @@ export const pollAgentDeviceToken = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Look up an agent waiting with a user code
+ * Look up an agent by user code
  *
  * The /connect page: the agent behind a user code, before you approve or deny it. Each attempt counts against 10 a minute per person. Dashboard session only.
  */
@@ -404,7 +404,7 @@ export const listWaitingAgentDevices = <ThrowOnError extends boolean = false>(op
 });
 
 /**
- * Approve an agent waiting with a user code
+ * Approve an agent by user code
  *
  * Gives the agent behind the user code its own API key in the workspace this request acts in (X-Nightmail-Workspace), which you must own or administer. It receives the key on its next poll. Dashboard session only.
  */
@@ -3373,7 +3373,9 @@ export const listRuleVersions = <ThrowOnError extends boolean = false>(options?:
 });
 
 /**
- * Recompile a retained version and restore it as a new version
+ * Restore a rules version
+ *
+ * Recompile a retained version and restore it as a new version.
  */
 export const restoreRuleVersion = <ThrowOnError extends boolean = false>(options: Options<RestoreRuleVersionData, ThrowOnError>): RequestResult<RestoreRuleVersionResponses, RestoreRuleVersionErrors, ThrowOnError> => (options.client ?? client).post<RestoreRuleVersionResponses, RestoreRuleVersionErrors, ThrowOnError>({
     security: [
@@ -3398,7 +3400,9 @@ export const restoreRuleVersion = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Set the domains and routes whose mail the AI may read for decisions
+ * Set the AI decision opt-ins
+ *
+ * Set the domains and routes whose mail the AI may read for decisions.
  */
 export const setDecisionOptIns = <ThrowOnError extends boolean = false>(options: Options<SetDecisionOptInsData, ThrowOnError>): RequestResult<SetDecisionOptInsResponses, SetDecisionOptInsErrors, ThrowOnError> => (options.client ?? client).put<SetDecisionOptInsResponses, SetDecisionOptInsErrors, ThrowOnError>({
     security: [
@@ -3444,9 +3448,9 @@ export const listEndpoints = <ThrowOnError extends boolean = false>(options?: Op
 });
 
 /**
- * Create a named Slack, Discord, webhook or forward endpoint
+ * Create an endpoint
  *
- * Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.
+ * Create a named Slack, Discord, webhook or forward endpoint. Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.
  */
 export const createEndpoint = <ThrowOnError extends boolean = false>(options: Options<CreateEndpointData, ThrowOnError>): RequestResult<CreateEndpointResponses, CreateEndpointErrors, ThrowOnError> => (options.client ?? client).post<CreateEndpointResponses, CreateEndpointErrors, ThrowOnError>({
     security: [
@@ -3471,7 +3475,9 @@ export const createEndpoint = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Delete an endpoint no rule or route uses
+ * Delete an endpoint
+ *
+ * Delete an endpoint no rule or route uses.
  */
 export const deleteEndpoint = <ThrowOnError extends boolean = false>(options: Options<DeleteEndpointData, ThrowOnError>): RequestResult<DeleteEndpointResponses, DeleteEndpointErrors, ThrowOnError> => (options.client ?? client).delete<DeleteEndpointResponses, DeleteEndpointErrors, ThrowOnError>({
     security: [
@@ -3492,7 +3498,9 @@ export const deleteEndpoint = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Read one endpoint, its status and the next step
+ * Read an endpoint
+ *
+ * Read one endpoint, its status and the next step.
  */
 export const getEndpoint = <ThrowOnError extends boolean = false>(options: Options<GetEndpointData, ThrowOnError>): RequestResult<GetEndpointResponses, GetEndpointErrors, ThrowOnError> => (options.client ?? client).get<GetEndpointResponses, GetEndpointErrors, ThrowOnError>({
     security: [
@@ -3513,9 +3521,9 @@ export const getEndpoint = <ThrowOnError extends boolean = false>(options: Optio
 });
 
 /**
- * Edit an endpoint: its name, type, URL, pause state, rate or retry policy
+ * Edit an endpoint
  *
- * Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.
+ * Edit an endpoint: its name, type, URL, pause state, rate or retry policy. Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.
  */
 export const updateEndpoint = <ThrowOnError extends boolean = false>(options: Options<UpdateEndpointData, ThrowOnError>): RequestResult<UpdateEndpointResponses, UpdateEndpointErrors, ThrowOnError> => (options.client ?? client).patch<UpdateEndpointResponses, UpdateEndpointErrors, ThrowOnError>({
     security: [
@@ -3540,9 +3548,9 @@ export const updateEndpoint = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Email a forward recipient a new confirmation link
+ * Resend a forward confirmation link
  *
- * For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.
+ * Email a forward recipient a new confirmation link. For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.
  */
 export const sendEndpointVerification = <ThrowOnError extends boolean = false>(options: Options<SendEndpointVerificationData, ThrowOnError>): RequestResult<SendEndpointVerificationResponses, SendEndpointVerificationErrors, ThrowOnError> => (options.client ?? client).post<SendEndpointVerificationResponses, SendEndpointVerificationErrors, ThrowOnError>({
     security: [
@@ -3567,9 +3575,9 @@ export const sendEndpointVerification = <ThrowOnError extends boolean = false>(o
 });
 
 /**
- * Post a fixed test message to a Slack, Discord or webhook endpoint now
+ * Test an endpoint
  *
- * Bypasses rules and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRules for a dry run.
+ * Post a fixed test message to a Slack, Discord or webhook endpoint now. Bypasses rules and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRules for a dry run.
  */
 export const testEndpoint = <ThrowOnError extends boolean = false>(options: Options<TestEndpointData, ThrowOnError>): RequestResult<TestEndpointResponses, TestEndpointErrors, ThrowOnError> => (options.client ?? client).post<TestEndpointResponses, TestEndpointErrors, ThrowOnError>({
     security: [
@@ -3590,6 +3598,8 @@ export const testEndpoint = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 /**
+ * Create an inbox connection
+ *
  * Generate client config with a key limited to selected inboxes. Key shown once.
  */
 export const createInboxConnection = <ThrowOnError extends boolean = false>(options: Options<CreateInboxConnectionData, ThrowOnError>): RequestResult<CreateInboxConnectionResponses, CreateInboxConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateInboxConnectionResponses, CreateInboxConnectionErrors, ThrowOnError>({
@@ -3615,9 +3625,9 @@ export const createInboxConnection = <ThrowOnError extends boolean = false>(opti
 });
 
 /**
- * Read the rules and routes version, or wait for it to change
+ * Read or wait for the rules version
  *
- * Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a rule, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rules so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.
+ * Read the rules and routes version, or wait for it to change. Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a rule, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rules so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.
  */
 export const getRuleVersion = <ThrowOnError extends boolean = false>(options?: Options<GetRuleVersionData, ThrowOnError>): RequestResult<GetRuleVersionResponses, GetRuleVersionErrors, ThrowOnError> => (options?.client ?? client).get<GetRuleVersionResponses, GetRuleVersionErrors, ThrowOnError>({
     security: [
@@ -3638,9 +3648,9 @@ export const getRuleVersion = <ThrowOnError extends boolean = false>(options?: O
 });
 
 /**
- * Compile one rule source against this workspace without saving
+ * Check a rule without saving it
  *
- * Returns every problem with its line, column and a hint, and what the rule calls. Use it while editing; nothing is saved, delivered or sent to the AI.
+ * Compile one rule source against this workspace without saving. Returns every problem with its line, column and a hint, and what the rule calls. Use it while editing; nothing is saved, delivered or sent to the AI.
  */
 export const checkRule = <ThrowOnError extends boolean = false>(options: Options<CheckRuleData, ThrowOnError>): RequestResult<CheckRuleResponses, CheckRuleErrors, ThrowOnError> => (options.client ?? client).post<CheckRuleResponses, CheckRuleErrors, ThrowOnError>({
     security: [
@@ -3665,9 +3675,9 @@ export const checkRule = <ThrowOnError extends boolean = false>(options: Options
 });
 
 /**
- * TypeScript declarations and editor completions for this workspace
+ * Read the rules’ TypeScript declarations
  *
- * Generated from the workspace’s endpoints, inbox keys and sender lists. Load typescript into an editor as a .d.ts, or read it to learn exactly what a rule can call.
+ * TypeScript declarations and editor completions for this workspace. Generated from the workspace’s endpoints, inbox keys and sender lists. Load typescript into an editor as a .d.ts, or read it to learn exactly what a rule can call.
  */
 export const getRuleTypings = <ThrowOnError extends boolean = false>(options?: Options<GetRuleTypingsData, ThrowOnError>): RequestResult<GetRuleTypingsResponses, GetRuleTypingsErrors, ThrowOnError> => (options?.client ?? client).get<GetRuleTypingsResponses, GetRuleTypingsErrors, ThrowOnError>({
     security: [
@@ -3688,9 +3698,9 @@ export const getRuleTypings = <ThrowOnError extends boolean = false>(options?: O
 });
 
 /**
- * Starting points for common rules, filled in with this workspace’s endpoints
+ * List rule templates
  *
- * Each template compiles. An endpoint template uses the first endpoint of the type it needs; endpoint is null when there is none yet, and source then uses a placeholder name to replace.
+ * Starting points for common rules, filled in with this workspace’s endpoints. Each template compiles. An endpoint template uses the first endpoint of the type it needs; endpoint is null when there is none yet, and source then uses a placeholder name to replace.
  */
 export const listRuleTemplates = <ThrowOnError extends boolean = false>(options?: Options<ListRuleTemplatesData, ThrowOnError>): RequestResult<ListRuleTemplatesResponses, ListRuleTemplatesErrors, ThrowOnError> => (options?.client ?? client).get<ListRuleTemplatesResponses, ListRuleTemplatesErrors, ThrowOnError>({
     security: [
@@ -3711,9 +3721,9 @@ export const listRuleTemplates = <ThrowOnError extends boolean = false>(options?
 });
 
 /**
- * Ready-made rules and the fields each one takes
+ * List rule recipes
  *
- * Each recipe writes an ordinary rule from one or two fields. Create one with createRuleFromRecipe; endpoint fields name an endpoint of the right type, created first with createEndpoint.
+ * Ready-made rules and the fields each one takes. Each recipe writes an ordinary rule from one or two fields. Create one with createRuleFromRecipe; endpoint fields name an endpoint of the right type, created first with createEndpoint.
  */
 export const listRuleRecipes = <ThrowOnError extends boolean = false>(options?: Options<ListRuleRecipesData, ThrowOnError>): RequestResult<ListRuleRecipesResponses, ListRuleRecipesErrors, ThrowOnError> => (options?.client ?? client).get<ListRuleRecipesResponses, ListRuleRecipesErrors, ThrowOnError>({
     security: [
@@ -3734,7 +3744,7 @@ export const listRuleRecipes = <ThrowOnError extends boolean = false>(options?: 
 });
 
 /**
- * Create a rule from a recipe and attach it to addresses
+ * Create a rule from a recipe
  *
  * Writes the recipe’s script, saves it as a new rule (key from the recipe and address unless given) and attaches it to each address, after their other recipes and before their own scripts. An AI recipe lets the AI read mail at those addresses’ domains. Returns the new version and key. Besides listRuleRecipes, it takes the two-way rules the dashboard builds: split ({ test: always, from, subject, text or attachment; value: words, or senders for from; then; otherwise }) and split-by-meaning ({ meaning, then, otherwise }), where then and otherwise are inbox:<key>, an endpoint name, store or drop. Give the address the route [] (createRoute) so each side gets exactly its destination.
  */
@@ -3761,7 +3771,7 @@ export const createRuleFromRecipe = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Change a rule’s recipe fields and addresses
+ * Update a rule from its recipe
  *
  * Rewrites the rule from its recipe with these fields. addresses, when given, replaces where it runs (kept addresses keep their place). Passing recipe turns a script into that recipe.
  */
@@ -3882,7 +3892,9 @@ export const saveRule = <ThrowOnError extends boolean = false>(options: Options<
 });
 
 /**
- * Attach, reorder and detach rules by replacing the ordered attachment list
+ * Attach rules
+ *
+ * Attach, reorder and detach rules by replacing the ordered attachment list.
  */
 export const attachRules = <ThrowOnError extends boolean = false>(options: Options<AttachRulesData, ThrowOnError>): RequestResult<AttachRulesResponses, AttachRulesErrors, ThrowOnError> => (options.client ?? client).put<AttachRulesResponses, AttachRulesErrors, ThrowOnError>({
     security: [
@@ -3907,7 +3919,9 @@ export const attachRules = <ThrowOnError extends boolean = false>(options: Optio
 });
 
 /**
- * Read rules, ordered attachments, and sender lists
+ * Read rules
+ *
+ * Read rules, ordered attachments, and sender lists.
  */
 export const getRules = <ThrowOnError extends boolean = false>(options?: Options<GetRulesData, ThrowOnError>): RequestResult<GetRulesResponses, GetRulesErrors, ThrowOnError> => (options?.client ?? client).get<GetRulesResponses, GetRulesErrors, ThrowOnError>({
     security: [
@@ -3928,7 +3942,9 @@ export const getRules = <ThrowOnError extends boolean = false>(options?: Options
 });
 
 /**
- * Create, replace or remove rules and ordered attachments in one version
+ * Apply rules
+ *
+ * Create, replace or remove rules and ordered attachments in one version.
  */
 export const applyRules = <ThrowOnError extends boolean = false>(options: Options<ApplyRulesData, ThrowOnError>): RequestResult<ApplyRulesResponses, ApplyRulesErrors, ThrowOnError> => (options.client ?? client).put<ApplyRulesResponses, ApplyRulesErrors, ThrowOnError>({
     security: [
@@ -3953,7 +3969,9 @@ export const applyRules = <ThrowOnError extends boolean = false>(options: Option
 });
 
 /**
- * Trace saved or proposed rules on a stored message or pasted MIME; never asks the AI or delivers mail
+ * Test rules on a message
+ *
+ * Trace saved or proposed rules on a stored message or pasted MIME; never asks the AI or delivers mail.
  */
 export const testRules = <ThrowOnError extends boolean = false>(options: Options<TestRulesData, ThrowOnError>): RequestResult<TestRulesResponses, TestRulesErrors, ThrowOnError> => (options.client ?? client).post<TestRulesResponses, TestRulesErrors, ThrowOnError>({
     security: [
@@ -3978,7 +3996,9 @@ export const testRules = <ThrowOnError extends boolean = false>(options: Options
 });
 
 /**
- * List folders, stable UID namespaces and counts
+ * List inbox folders
+ *
+ * List folders, stable UID namespaces and counts.
  */
 export const listInboxFolders = <ThrowOnError extends boolean = false>(options: Options<ListInboxFoldersData, ThrowOnError>): RequestResult<ListInboxFoldersResponses, ListInboxFoldersErrors, ThrowOnError> => (options.client ?? client).get<ListInboxFoldersResponses, ListInboxFoldersErrors, ThrowOnError>({
     security: [
@@ -4024,7 +4044,9 @@ export const createInboxFolder = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
- * Remove a custom folder; preserve otherwise orphaned mail in Trash
+ * Delete an inbox folder
+ *
+ * Remove a custom folder; preserve otherwise orphaned mail in Trash.
  */
 export const deleteInboxFolder = <ThrowOnError extends boolean = false>(options: Options<DeleteInboxFolderData, ThrowOnError>): RequestResult<DeleteInboxFolderResponses, DeleteInboxFolderErrors, ThrowOnError> => (options.client ?? client).delete<DeleteInboxFolderResponses, DeleteInboxFolderErrors, ThrowOnError>({
     security: [
@@ -4045,7 +4067,9 @@ export const deleteInboxFolder = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
- * Rename a folder tree or change its subscription
+ * Update an inbox folder
+ *
+ * Rename a folder tree or change its subscription.
  */
 export const updateInboxFolder = <ThrowOnError extends boolean = false>(options: Options<UpdateInboxFolderData, ThrowOnError>): RequestResult<UpdateInboxFolderResponses, UpdateInboxFolderErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboxFolderResponses, UpdateInboxFolderErrors, ThrowOnError>({
     security: [
@@ -4070,7 +4094,9 @@ export const updateInboxFolder = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
- * Move one entry to Trash, or expunge it permanently
+ * Delete an inbox message
+ *
+ * Move one entry to Trash, or expunge it permanently.
  */
 export const deleteInboxMessage = <ThrowOnError extends boolean = false>(options: Options<DeleteInboxMessageData, ThrowOnError>): RequestResult<DeleteInboxMessageResponses, DeleteInboxMessageErrors, ThrowOnError> => (options.client ?? client).delete<DeleteInboxMessageResponses, DeleteInboxMessageErrors, ThrowOnError>({
     security: [
@@ -4114,7 +4140,9 @@ export const getInboxMessage = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * Set read state or flags; deleted applies to one folder entry
+ * Update an inbox message
+ *
+ * Set read state or flags; deleted applies to one folder entry.
  */
 export const updateInboxMessage = <ThrowOnError extends boolean = false>(options: Options<UpdateInboxMessageData, ThrowOnError>): RequestResult<UpdateInboxMessageResponses, UpdateInboxMessageErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboxMessageResponses, UpdateInboxMessageErrors, ThrowOnError>({
     security: [
@@ -4139,7 +4167,9 @@ export const updateInboxMessage = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Move one entry and allocate a new destination UID
+ * Move an inbox message
+ *
+ * Move one entry and allocate a new destination UID.
  */
 export const moveInboxMessage = <ThrowOnError extends boolean = false>(options: Options<MoveInboxMessageData, ThrowOnError>): RequestResult<MoveInboxMessageResponses, MoveInboxMessageErrors, ThrowOnError> => (options.client ?? client).post<MoveInboxMessageResponses, MoveInboxMessageErrors, ThrowOnError>({
     security: [
@@ -4164,7 +4194,9 @@ export const moveInboxMessage = <ThrowOnError extends boolean = false>(options: 
 });
 
 /**
- * Copy one entry with a fresh destination UID
+ * Copy an inbox message
+ *
+ * Copy one entry with a fresh destination UID.
  */
 export const copyInboxMessage = <ThrowOnError extends boolean = false>(options: Options<CopyInboxMessageData, ThrowOnError>): RequestResult<CopyInboxMessageResponses, CopyInboxMessageErrors, ThrowOnError> => (options.client ?? client).post<CopyInboxMessageResponses, CopyInboxMessageErrors, ThrowOnError>({
     security: [
@@ -4189,7 +4221,9 @@ export const copyInboxMessage = <ThrowOnError extends boolean = false>(options: 
 });
 
 /**
- * Remove entries marked deleted; repeat while hasMore is true
+ * Expunge an inbox folder
+ *
+ * Remove entries marked deleted; repeat while hasMore is true.
  */
 export const expungeInboxFolder = <ThrowOnError extends boolean = false>(options: Options<ExpungeInboxFolderData, ThrowOnError>): RequestResult<ExpungeInboxFolderResponses, ExpungeInboxFolderErrors, ThrowOnError> => (options.client ?? client).post<ExpungeInboxFolderResponses, ExpungeInboxFolderErrors, ThrowOnError>({
     security: [
@@ -4214,7 +4248,9 @@ export const expungeInboxFolder = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Sync changed and removed message IDs since an inbox MODSEQ
+ * Read an inbox’s changes
+ *
+ * Sync changed and removed message IDs since an inbox MODSEQ.
  */
 export const getInboxChanges = <ThrowOnError extends boolean = false>(options: Options<GetInboxChangesData, ThrowOnError>): RequestResult<GetInboxChangesResponses, GetInboxChangesErrors, ThrowOnError> => (options.client ?? client).get<GetInboxChangesResponses, GetInboxChangesErrors, ThrowOnError>({
     security: [
@@ -4235,7 +4271,9 @@ export const getInboxChanges = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * List active app passwords without their secrets
+ * List an inbox’s app passwords
+ *
+ * List active app passwords without their secrets.
  */
 export const listInboxAppPasswords = <ThrowOnError extends boolean = false>(options: Options<ListInboxAppPasswordsData, ThrowOnError>): RequestResult<ListInboxAppPasswordsResponses, ListInboxAppPasswordsErrors, ThrowOnError> => (options.client ?? client).get<ListInboxAppPasswordsResponses, ListInboxAppPasswordsErrors, ThrowOnError>({
     security: [
@@ -4256,7 +4294,9 @@ export const listInboxAppPasswords = <ThrowOnError extends boolean = false>(opti
 });
 
 /**
- * Grant mail client access to a persistent inbox. Password shown once; a billable day starts immediately.
+ * Create an inbox app password
+ *
+ * Password shown once; a billable day starts immediately. Grant mail client access to a persistent inbox.
  */
 export const createInboxAppPassword = <ThrowOnError extends boolean = false>(options: Options<CreateInboxAppPasswordData, ThrowOnError>): RequestResult<CreateInboxAppPasswordResponses, CreateInboxAppPasswordErrors, ThrowOnError> => (options.client ?? client).post<CreateInboxAppPasswordResponses, CreateInboxAppPasswordErrors, ThrowOnError>({
     security: [
@@ -4281,7 +4321,9 @@ export const createInboxAppPassword = <ThrowOnError extends boolean = false>(opt
 });
 
 /**
- * List the active app passwords of every inbox, without their secrets
+ * List every inbox’s app passwords
+ *
+ * List the active app passwords of every inbox, without their secrets.
  */
 export const listAppPasswords = <ThrowOnError extends boolean = false>(options?: Options<ListAppPasswordsData, ThrowOnError>): RequestResult<ListAppPasswordsResponses, ListAppPasswordsErrors, ThrowOnError> => (options?.client ?? client).get<ListAppPasswordsResponses, ListAppPasswordsErrors, ThrowOnError>({
     security: [
@@ -4302,7 +4344,9 @@ export const listAppPasswords = <ThrowOnError extends boolean = false>(options?:
 });
 
 /**
- * Revoke a mail client password and invalidate sessions
+ * Revoke an inbox app password
+ *
+ * Revoke a mail client password and invalidate sessions.
  */
 export const revokeInboxAppPassword = <ThrowOnError extends boolean = false>(options: Options<RevokeInboxAppPasswordData, ThrowOnError>): RequestResult<RevokeInboxAppPasswordResponses, RevokeInboxAppPasswordErrors, ThrowOnError> => (options.client ?? client).delete<RevokeInboxAppPasswordResponses, RevokeInboxAppPasswordErrors, ThrowOnError>({
     security: [
@@ -4519,7 +4563,9 @@ export const getInboxAttachment = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Release a retired address for reuse (workspace admin)
+ * Release a retired address
+ *
+ * Release a retired address for reuse (workspace admin).
  */
 export const releaseRetiredAddress = <ThrowOnError extends boolean = false>(options: Options<ReleaseRetiredAddressData, ThrowOnError>): RequestResult<ReleaseRetiredAddressResponses, ReleaseRetiredAddressErrors, ThrowOnError> => (options.client ?? client).delete<ReleaseRetiredAddressResponses, ReleaseRetiredAddressErrors, ThrowOnError>({
     security: [
@@ -5055,9 +5101,9 @@ export const updateInboundAddress = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Change where one address’s mail goes, in one version
+ * Set where an address’s mail goes
  *
- * Changes the route for the address’s own address and its two-way rule together: one transaction and one routing version, so all of it is saved or none of it. Omitted fields stay as they are, a field equal to what is saved writes nothing, and when nothing changes the version stays. deliver replaces only the route’s destinations (a paused route stays paused). Send the version from getInboundOverview or getRouting as If-Match; a stale one is refused with 409 and nothing changes.
+ * Change where one address’s mail goes, in one version. Changes the route for the address’s own address and its two-way rule together: one transaction and one routing version, so all of it is saved or none of it. Omitted fields stay as they are, a field equal to what is saved writes nothing, and when nothing changes the version stays. deliver replaces only the route’s destinations (a paused route stays paused). Send the version from getInboundOverview or getRouting as If-Match; a stale one is refused with 409 and nothing changes.
  */
 export const setInboundAddressFlow = <ThrowOnError extends boolean = false>(options: Options<SetInboundAddressFlowData, ThrowOnError>): RequestResult<SetInboundAddressFlowResponses, SetInboundAddressFlowErrors, ThrowOnError> => (options.client ?? client).patch<SetInboundAddressFlowResponses, SetInboundAddressFlowErrors, ThrowOnError>({
     security: [
@@ -5105,7 +5151,9 @@ export const listInboundThreads = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Start a conversation from an inbound address
+ * Start a conversation
+ *
+ * Start a conversation from an inbound address.
  */
 export const createInboundThread = <ThrowOnError extends boolean = false>(options: Options<CreateInboundThreadData, ThrowOnError>): RequestResult<CreateInboundThreadResponses, CreateInboundThreadErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundThreadResponses, CreateInboundThreadErrors, ThrowOnError>({
     security: [
@@ -5153,7 +5201,9 @@ export const getInboundThread = <ThrowOnError extends boolean = false>(options: 
 });
 
 /**
- * Mark a conversation read, star, archive or label it for one address
+ * Update a conversation
+ *
+ * Mark a conversation read, star, archive or label it for one address.
  */
 export const updateInboundThread = <ThrowOnError extends boolean = false>(options: Options<UpdateInboundThreadData, ThrowOnError>): RequestResult<UpdateInboundThreadResponses, UpdateInboundThreadErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboundThreadResponses, UpdateInboundThreadErrors, ThrowOnError>({
     security: [
@@ -5224,7 +5274,9 @@ export const getInboundMessage = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
- * Download an attachment from a visible message
+ * Download an inbound attachment
+ *
+ * Download an attachment from a visible message.
  */
 export const getInboundAttachment = <ThrowOnError extends boolean = false>(options: Options<GetInboundAttachmentData, ThrowOnError>): RequestResult<GetInboundAttachmentResponses, GetInboundAttachmentErrors, ThrowOnError> => (options.client ?? client).get<GetInboundAttachmentResponses, GetInboundAttachmentErrors, ThrowOnError>({
     security: [
@@ -5245,7 +5297,7 @@ export const getInboundAttachment = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Follow an attachment link from a webhook
+ * Follow a webhook attachment link
  *
  * The downloadUrl (inbound format) or url (message attachments) in webhook payloads. Answers 307 to a download link that works for five minutes, also returned as url in the body. Any credential that can read the message can follow it, exactly as with getInboundAttachment: an inbound key for the address it reached, a member, an agent token.
  */
@@ -5291,9 +5343,9 @@ export const listLogs = <ThrowOnError extends boolean = false>(options?: Options
 });
 
 /**
- * Every route mail can take, with its rules and endpoints, in one read
+ * Read the receiving overview
  *
- * One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. With an MCP sign-in (approval), it requires an owner or admin, like the other receiving reads.
+ * Every route mail can take, with its rules and endpoints, in one read. One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. With an MCP sign-in (approval), it requires an owner or admin, like the other receiving reads.
  */
 export const getInboundOverview = <ThrowOnError extends boolean = false>(options?: Options<GetInboundOverviewData, ThrowOnError>): RequestResult<GetInboundOverviewResponses, GetInboundOverviewErrors, ThrowOnError> => (options?.client ?? client).get<GetInboundOverviewResponses, GetInboundOverviewErrors, ThrowOnError>({
     security: [
@@ -5314,9 +5366,9 @@ export const getInboundOverview = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * List every endpoint a page at a time, with the routes and rules that use it
+ * List every endpoint
  *
- * Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address's received mail (subscribed to it or to every address), the full list a route's toMore points to.
+ * List every endpoint a page at a time, with the routes and rules that use it. Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address's received mail (subscribed to it or to every address), the full list a route's toMore points to.
  */
 export const listInboundEndpoints = <ThrowOnError extends boolean = false>(options?: Options<ListInboundEndpointsData, ThrowOnError>): RequestResult<ListInboundEndpointsResponses, ListInboundEndpointsErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundEndpointsResponses, ListInboundEndpointsErrors, ThrowOnError>({
     security: [
@@ -5364,9 +5416,9 @@ export const replyToInboundThread = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Poll events for the receiving addresses this key can read
+ * List inbound events
  *
- * Use the returned cursor as after to continue polling. Workspace-wide message.stored events require admin access, no address filter, and an explicit message.stored type filter.
+ * Poll events for the receiving addresses this key can read. Use the returned cursor as after to continue polling. Workspace-wide message.stored events require admin access, no address filter, and an explicit message.stored type filter.
  */
 export const listInboundEvents = <ThrowOnError extends boolean = false>(options?: Options<ListInboundEventsData, ThrowOnError>): RequestResult<ListInboundEventsResponses, ListInboundEventsErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundEventsResponses, ListInboundEventsErrors, ThrowOnError>({
     security: [
@@ -5387,9 +5439,9 @@ export const listInboundEvents = <ThrowOnError extends boolean = false>(options?
 });
 
 /**
- * List inbound webhooks a page at a time, in a stable ID order
+ * List inbound webhooks
  *
- * Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.
+ * List inbound webhooks a page at a time, in a stable ID order. Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.
  */
 export const listInboundWebhooks = <ThrowOnError extends boolean = false>(options?: Options<ListInboundWebhooksData, ThrowOnError>): RequestResult<ListInboundWebhooksResponses, ListInboundWebhooksErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundWebhooksResponses, ListInboundWebhooksErrors, ThrowOnError>({
     security: [
@@ -5525,7 +5577,7 @@ export const testInboundWebhook = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Redeliver a message to its route webhooks
+ * Redeliver an inbound message
  *
  * Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 1,000 manual posts per hour. Receivers deduplicate by Webhook-Id.
  */
@@ -5995,9 +6047,9 @@ export const verifyConnection = <ThrowOnError extends boolean = false>(options: 
 export const getPublicStats = <ThrowOnError extends boolean = false>(options?: Options<GetPublicStatsData, ThrowOnError>): RequestResult<GetPublicStatsResponses, GetPublicStatsErrors, ThrowOnError> => (options?.client ?? client).get<GetPublicStatsResponses, GetPublicStatsErrors, ThrowOnError>({ url: '/v1/public/stats', ...options });
 
 /**
- * What this workspace has set up, in one read
+ * Read the workspace setup
  *
- * The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, each focus's first steps and whether an agent is connected. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.
+ * What this workspace has set up, in one read. The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, each focus's first steps and whether an agent is connected. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.
  */
 export const getOverviewSetup = <ThrowOnError extends boolean = false>(options?: Options<GetOverviewSetupData, ThrowOnError>): RequestResult<GetOverviewSetupResponses, GetOverviewSetupErrors, ThrowOnError> => (options?.client ?? client).get<GetOverviewSetupResponses, GetOverviewSetupErrors, ThrowOnError>({
     security: [
@@ -6056,7 +6108,7 @@ export const contactSupport = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Balance, free allowance and billing state
+ * Read the balance and billing state
  *
  * Hosted only. The prepaid balance, this month’s free allowances (sent and received, counted separately) and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.
  */

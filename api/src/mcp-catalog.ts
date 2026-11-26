@@ -293,10 +293,12 @@ const PATH_IDS: Record<string, string> = {
 function descriptionFor(name: string, operation: ObjectValue): string {
   if (DESCRIPTIONS[name]) return DESCRIPTIONS[name];
   const summary = operation.summary ?? name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c: string) => c.toUpperCase());
-  let text = summary.replace(/\.?$/, '.');
-  if (EMAIL_SEND_TOOLS.has(name)) return `${text} Confirm the recipients or audience, content and time before sending. Use campaigns for shared outreach to more than 50 people.`;
-  for (const sentence of (operation.description ?? '').split(/(?<=\.)\s+/)) {
-    if (!sentence || text.length + sentence.length >= 400) break;
+  if (EMAIL_SEND_TOOLS.has(name)) return `${summary.replace(/\.?$/, '.')} Confirm the recipients or audience, content and time before sending. Use campaigns for shared outreach to more than 50 people.`;
+  const sentences = (operation.description ?? '').split(/(?<=\.)\s+/).filter(Boolean);
+  // A summary is a name (scripts/check-premerge.ts). A description that opens with the same words says them once.
+  let text = sentences[0]?.startsWith(summary) ? sentences.shift()! : summary.replace(/\.?$/, '.');
+  for (const sentence of sentences) {
+    if (text.length + sentence.length >= 400) break;
     text += ` ${sentence}`;
   }
   return text;

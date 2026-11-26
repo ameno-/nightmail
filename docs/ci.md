@@ -122,6 +122,12 @@ Every operation states what it needs: `x-nightmail-permission` in `api/openapi.j
 
 **Fix:** add or update the row in the same change as the route or guard, run `bun run sdk` in `api/`, then run the `permission table` acceptance test.
 
+### Operation summaries
+
+An operation's `summary` is its name: the docs page's title in the browser tab and in search results (`<summary> · Nightmail API docs`), the docs sidebar's entry and the SDK's comment, and an MCP tool's description leads with it. **Fails when** a summary has a full stop, colon or semicolon followed by more words, or makes a docs title longer than the 60 characters a search result shows (a summary of at most 39 characters).
+
+**Fix:** keep a short name ("Create an inbox app password") and move the sentence, word for word, to the start of the operation's `description`, a warning ("Password shown once") first. Then run `bun run sdk` in `api/`.
+
 ### BYO role templates
 
 Connected AWS accounts run a published role template (`api/byo-templates/<major>.<minor>.yaml`, served from S3 as `byo/<version>.yaml`), and Nightmail must keep working with every supported version. **Fails when** a published file was edited, renamed or deleted, a new file isn't named `<major>.<minor>.yaml`, or a new version isn't newer than the newest published one.

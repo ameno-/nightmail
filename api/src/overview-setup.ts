@@ -44,8 +44,8 @@ const LAUNCHED = sql`('preparing','scheduled','sending','paused','done')`;
 
 export function registerOverviewSetup(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/overview/setup', operationId: 'getOverviewSetup', tags: ['Settings'], security,
-    summary: 'What this workspace has set up, in one read',
-    description: 'The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, each focus\'s first steps and whether an agent is connected. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.',
+    summary: 'Read the workspace setup',
+    description: 'What this workspace has set up, in one read. The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, each focus\'s first steps and whether an agent is connected. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.',
     responses: { 200: response(Setup), ...errors } }), async c => {
     const a = actor(c), w = a.workspaceId;
     const readable = (path: string, guard: () => unknown) => !memberRefused(a, 'GET', path) && admits(guard);

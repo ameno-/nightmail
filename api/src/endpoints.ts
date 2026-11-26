@@ -417,13 +417,13 @@ export function registerEndpoints(app: App) {
     const w = receivingAdmin(c).workspaceId, q = c.req.valid('query'), rows = await endpointRows(c.env.db, w, q);
     return c.json({ data: await Promise.all(rows.slice(0, q.limit).map(r => endpointView(c.env, w, r))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.key : null }, 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'get', path: `${base}/{name}`, operationId: 'getEndpoint', summary: 'Read one endpoint, its status and the next step', request: { params: NameParam }, responses: { 200: response(Endpoint), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'get', path: `${base}/{name}`, operationId: 'getEndpoint', summary: 'Read an endpoint', description: 'Read one endpoint, its status and the next step.', request: { params: NameParam }, responses: { 200: response(Endpoint), ...errors } }), async c => {
     const w = receivingAdmin(c).workspaceId;
     return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, c.req.valid('param').name)), 200);
   });
   app.openapi(createRoute({
-    ...meta, method: 'post', path: base, operationId: 'createEndpoint', summary: 'Create a named Slack, Discord, webhook or forward endpoint',
-    description: 'Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.',
+    ...meta, method: 'post', path: base, operationId: 'createEndpoint', summary: 'Create an endpoint',
+    description: 'Create a named Slack, Discord, webhook or forward endpoint. Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.',
     request: { body: json(CreateEndpoint) }, responses: { 201: response(Endpoint.extend({ secret: z.string().optional().describe('Webhook signing secret, shown once.') }).openapi('CreatedEndpoint')), ...errors },
   }), async c => {
     const q = c.req.valid('json'), w = receivingAdmin(c, manage).workspaceId;
@@ -442,8 +442,8 @@ export function registerEndpoints(app: App) {
     if (created.status === 'pending') c.get('actor').wakeJobs = 1;
     return c.json({ ...created, ...(secret ? { secret } : {}) }, 201);
   });
-  app.openapi(createRoute({ ...meta, method: 'patch', path: `${base}/{name}`, operationId: 'updateEndpoint', summary: 'Edit an endpoint: its name, type, URL, pause state, rate or retry policy',
-    description: 'Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.',
+  app.openapi(createRoute({ ...meta, method: 'patch', path: `${base}/{name}`, operationId: 'updateEndpoint', summary: 'Edit an endpoint',
+    description: 'Edit an endpoint: its name, type, URL, pause state, rate or retry policy. Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.',
     request: { params: NameParam, body: json(UpdateEndpoint) }, responses: { 200: response(Endpoint), ...errors } }), async c => {
     const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name, { name: rename, ...q } = c.req.valid('json');
     const updated = await c.env.db.transaction(async tx => {
@@ -458,7 +458,7 @@ export function registerEndpoints(app: App) {
     });
     return c.json(await endpointView(c.env, w, rowOf(updated)), 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint no rule or route uses', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint', description: 'Delete an endpoint no rule or route uses.', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
     const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name;
     await c.env.db.transaction(async tx => {
       const row = await lockEndpoint(tx, c, w, { name }, false);
@@ -468,13 +468,13 @@ export function registerEndpoints(app: App) {
     });
     return c.json({ name, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/verification`, operationId: 'sendEndpointVerification', summary: 'Email a forward recipient a new confirmation link', description: 'For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.', request: { params: NameParam, body: json(z.object({ from: z.string().max(254).optional() }).strict()) }, responses: { 202: response(Endpoint), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/verification`, operationId: 'sendEndpointVerification', summary: 'Resend a forward confirmation link', description: 'Email a forward recipient a new confirmation link. For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.', request: { params: NameParam, body: json(z.object({ from: z.string().max(254).optional() }).strict()) }, responses: { 202: response(Endpoint), ...errors } }), async c => {
     const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name, q = c.req.valid('json');
     await c.env.db.transaction(async tx => { if (!await resendForwardConfirmation(c, tx, w, { name }, q.from)) throw missingEndpoint(name); });
     c.get('actor').wakeJobs = 1;
     return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, name)), 202);
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/test`, operationId: 'testEndpoint', summary: 'Post a fixed test message to a Slack, Discord or webhook endpoint now', description: 'Bypasses rules and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRules for a dry run.', request: { params: NameParam }, responses: { 200: response(z.object({ ok: z.boolean(), status: z.number().int().nullable(), error: z.string().nullable() }).openapi('EndpointTest')), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/test`, operationId: 'testEndpoint', summary: 'Test an endpoint', description: 'Post a fixed test message to a Slack, Discord or webhook endpoint now. Bypasses rules and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRules for a dry run.', request: { params: NameParam }, responses: { 200: response(z.object({ ok: z.boolean(), status: z.number().int().nullable(), error: z.string().nullable() }).openapi('EndpointTest')), ...errors } }), async c => {
     const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name;
     const [row] = await c.env.db.select().from(endpoints).where(and(eq(endpoints.workspaceId, w), eq(endpoints.key, name)));
     if (!row) throw missingEndpoint(name);
@@ -593,8 +593,8 @@ export function registerInboundWebhooks(app: App, deps: Access) {
     return c.json({ ...view, ...view.approval ? { nextStep: tiedNextStep('webhook', view.approval) } : {}, secret: secret!, ...await inboundToken(format, secret!) }, 201);
   });
   app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags,
-    summary: 'List inbound webhooks a page at a time, in a stable ID order',
-    description: 'Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address\'s events (subscribed to it or to every address); getInboundOverview links a route\'s full list of subscribers this way.',
+    summary: 'List inbound webhooks',
+    description: 'List inbound webhooks a page at a time, in a stable ID order. Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address\'s events (subscribed to it or to every address); getInboundOverview links a route\'s full list of subscribers this way.',
     request: { query: z.object({
       cursor: z.string().max(200).optional().describe('nextCursor from the previous page.'),
       limit: z.coerce.number().int().min(1).max(100).default(100),
@@ -643,7 +643,7 @@ export function registerInboundWebhooks(app: App, deps: Access) {
     const w = deps.admin(c).workspaceId;
     return c.json(await testInboundWebhook(c.env, w, c.req.valid('param').id, c.req.valid('json')), 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/inbound/messages/{messageId}/redeliver', operationId: 'redeliverInboundMessage', security, tags, summary: 'Redeliver a message to its route webhooks',
+  app.openapi(createRoute({ method: 'post', path: '/v1/inbound/messages/{messageId}/redeliver', operationId: 'redeliverInboundMessage', security, tags, summary: 'Redeliver an inbound message',
     description: `Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets ${MANUAL_DELIVERY_BUDGET.toLocaleString('en-US')} manual posts per hour. Receivers deduplicate by Webhook-Id.`,
     request: { params: z.object({ messageId: z.string().max(120) }), body: json(z.object({ destination: z.string().max(128).optional().describe('A webhook ID: redeliver to that webhook only.') }).strict().openapi('RedeliverInboundMessage')) }, responses: { 202: response(z.object({ queued: z.number().int() }).openapi('InboundRedelivery')), ...errors } }), async c => {
     const { workspaceId: w } = deps.admin(c), { messageId } = c.req.valid('param'), { destination } = c.req.valid('json');

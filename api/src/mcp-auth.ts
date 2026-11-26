@@ -88,8 +88,8 @@ export function registerMcpAuth(app:App) {
     tokens:z.array(AgentTokenRecord).describe('Short-lived agent tokens it made in this workspace, newest first (at most 20). Revoking the agent revokes them.')}).openapi('Agent');
   const time=(value:string|null)=>value?new Date(value).toISOString():null;
   app.openapi(createRoute({method:'get',path:'/v1/agents',operationId:'listAgents',tags:['Auth'],security,
-    summary:'List connected agents and their agent tokens',
-    description:`Agent tokens are how agents use ${productName}: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.`,
+    summary:'List agents',
+    description:`List connected agents and their agent tokens. Agent tokens are how agents use ${productName}: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.`,
     request:{query:z.object({includeInactive:z.enum(['true','false']).default('false').describe('Also list revoked and expired sign-ins and tokens.')})},responses:{200:response(z.object({data:z.array(Agent)}).openapi('AgentList')),...errors}}),async c=>{
     const user=owner(c),a=c.get('actor'),w=a.workspaceId,all=c.req.valid('query').includeInactive==='true';
     const admin=a.role==='owner'||a.role==='admin',live=all?sql``:sql`AND t.revoked_at IS NULL AND t.expires_at>now()`;
@@ -112,7 +112,7 @@ export function registerMcpAuth(app:App) {
       tokens:r.tokens.map(t=>({id:t.id,grantId:t.grant_id,permissions:t.permissions,domains:t.domains,purpose:t.purpose,expiresAt:time(t.expires_at)!,createdAt:time(t.created_at)!,lastUsedAt:time(t.last_used_at),revokedAt:time(t.revoked_at)}))}))},200);
   });
   app.openapi(createRoute({method:'post',path:'/v1/agents/{id}/revoke',operationId:'revokeAgent',tags:['Auth'],security,
-    summary:'Revoke a connected agent and its agent tokens',
+    summary:'Revoke an agent',
     description:'Your own agent: its sign-in, every agent token it made and everything it created stop working at once (it can sign in again as a new connection). Another member\'s agent (owners and admins): the agent tokens it made in this workspace are revoked; the sign-in belongs to that person. Dashboard session only.',
     request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true),scope:z.enum(['agent','tokens']).describe('agent: the sign-in and everything it made. tokens: its agent tokens in this workspace.')})),...errors}}),async c=>{
     const user=owner(c),a=c.get('actor'),{id}=c.req.valid('param');
