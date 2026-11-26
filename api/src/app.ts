@@ -140,8 +140,10 @@ const ROUTE_HINTS: [RegExp, RegExp, string][] = [
 ];
 const routeHint = (method: string, path: string) => { const hint = ROUTE_HINTS.find(([m, p]) => m.test(method) && p.test(path)); return hint ? ` ${hint[2]}` : ''; };
 export function unmatchedTemplate(path: string) {
-  const segments = path.split('?')[0]!.split('/').filter(Boolean);
+  // Empty segments stay (a trailing or doubled slash is often the whole mistake: POST /v1/domains/ matches nothing).
+  const segments = path.split(/[?#]/)[0]!.split('/').slice(1);
   const shown = segments.slice(0, 12).map(raw => {
+    if (!raw) return '';
     let s: string; try { s = decodeURIComponent(raw); } catch { return '{value}'; }
     if (s.includes('@')) return '{email}';
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '{uuid}';
@@ -153,7 +155,44 @@ export function unmatchedTemplate(path: string) {
     if (s.length > 32 || (/\d/.test(s) && /[a-z]/i.test(s) && s.length >= 16)) return '{token}';
     return /^[a-z][a-z0-9_-]{0,31}$/i.test(s) ? s.toLowerCase() : '{value}';
   });
-  return `/${shown.join('/')}${segments.length > 12 ? '/…' : ''}`;
+  const template = `/${shown.join('/')}${segments.length > 12 ? '/…' : ''}`;
+  return template.length > UNMATCHED_MAX ? `${template.slice(0, UNMATCHED_MAX)}…` : template;
+}
+const UNMATCHED_MAX = 200;
+type RouteRow = { method: string; template: string; segments: (string | null)[] };
+const routeTables = new WeakMap<object, RouteRow[]>();
+/** The app's own routes as public templates (/v1/domains/{id}), from its route table; never from a request. */
+function routeTable(app: { routes: { method: string; path: string }[] }) {
+  let rows = routeTables.get(app);
+  if (!rows) {
+    rows = app.routes.filter(r => r.method !== 'ALL' && !r.path.includes('*') && r.path.startsWith('/v1/')).map(r => {
+      const segments = r.path.split('/').slice(1).map(s => s.startsWith(':') ? null : s);
+      return { method: r.method, template: '/' + r.path.split('/').slice(1).map(s => s.startsWith(':') ? `{${s.slice(1).replace(/\{.*$/, '')}}` : s).join('/'), segments };
+    });
+    rows = [...new Map(rows.map(r => [r.method + ' ' + r.template, r])).values()];
+    routeTables.set(app, rows);
+  }
+  return rows;
+}
+/**
+ * What an unmatched request most likely meant, from the routes this app answers: the same route without a trailing or
+ * doubled slash, the methods a path that exists does take, or the closest route for this method (the most leading
+ * segments in common, at least the resource after /v1). Only templates from the route table go back, never the path sent.
+ */
+export function unmatchedAdvice(routes: RouteRow[], method: string, path: string): { message: string; details: Record<string, unknown> } | null {
+  const sent = path.split(/[?#]/)[0]!.split('/').slice(1), tidy = sent.filter(Boolean);
+  const fits = (r: RouteRow, parts: string[]) => r.segments.length === parts.length && r.segments.every((s, i) => s === null ? !!parts[i] : s === parts[i]);
+  const here = routes.filter(r => fits(r, tidy));
+  const same = here.find(r => r.method === method);
+  if (same && tidy.length !== sent.length) return { message: `${method} ${same.template} exists: send it without the extra slash.`, details: { closest: { method, path: same.template } } };
+  if (here.length && !same) {
+    const allowed = [...new Set(here.map(r => r.method))].sort();
+    return { message: `${here[0]!.template} doesn’t take ${method}; it takes ${allowed.join(', ')}.`, details: { path: here[0]!.template, allowedMethods: allowed } };
+  }
+  const score = (r: RouteRow) => { let n = 0; while (n < r.segments.length && n < tidy.length && (r.segments[n] === null || r.segments[n] === tidy[n])) n++; return n; };
+  const best = routes.filter(r => r.method === method).map(r => ({ r, n: score(r) })).filter(x => x.n >= 2)
+    .sort((a, b) => b.n - a.n || Math.abs(a.r.segments.length - tidy.length) - Math.abs(b.r.segments.length - tidy.length) || a.r.template.localeCompare(b.r.template))[0];
+  return best ? { message: `The closest is ${method} ${best.r.template}.`, details: { closest: { method, path: best.r.template } } } : null;
 }
 // At most UNMATCHED_PER_WINDOW unmatched paths per workspace (or per anonymous caller) every 10 minutes per isolate: a
 // burst of guesses shows its shape, a crawler doesn't fill the log. The request line itself is written either way.
@@ -408,7 +447,14 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
     return c.json({ error: apiFailureBody(responseError, requestId) }, responseError.status as ContentfulStatusCode);
   });
-  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: `Route not found.${routeHint(c.req.method, c.req.path)} Every endpoint is listed in /llms.txt and /docs.md.`, requestId: c.get('requestId'), retryable: false } }, 404); });
+  // An agent's guess gets what it needs to try again once, not again and again: that no route answers this, the closest
+  // one or the methods this path takes (from this app's route table), and where every operation is listed. Not retryable.
+  app.notFound(c => {
+    c.set('failure', { code: 'NOT_FOUND', unmatched: true });
+    const advice = /^\/v1\//.test(c.req.path) ? unmatchedAdvice(routeTable(app), c.req.method, c.req.path) : null;
+    if (advice?.details.allowedMethods) c.header('Allow', (advice.details.allowedMethods as string[]).join(', '));
+    return c.json({ error: { code: 'NOT_FOUND', message: `Route not found: no endpoint answers ${c.req.method} on this path.${routeHint(c.req.method, c.req.path)}${advice ? ` ${advice.message}` : ''} Every operation is listed in /openapi.json, /llms.txt and /docs.md.`, requestId: c.get('requestId'), retryable: false, ...(advice ? { details: [advice.details] } : {}) } }, 404);
+  });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
   // analytics: whether a signed-out dashboard page records its use (DASHBOARD_ANALYTICS); signed in, /v1/me says so.
   // security.txt (RFC 9116) for the hosted service; a self-hosted installation has its own contact, so it has none.
