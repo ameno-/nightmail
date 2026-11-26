@@ -53,6 +53,7 @@
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
 // no request is in flight, fonts are loaded and the page has rendered and gone idle twice in a row; there are no
 // fixed sleeps, and polling pages settle between polls.
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -66,9 +67,12 @@ const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resol
 const only = process.env.CLS_ONLY ? new RegExp(process.env.CLS_ONLY, 'i') : null;
 // Each in-flight page owns a renderer. Leave room for the fixture API, other shards and their databases.
 const workers = Number(process.env.CLS_WORKERS) || Math.min(8, availableParallelism() * 2);
-const shard = Number(process.env.CLS_SHARD_INDEX ?? 0), shards = Number(process.env.CLS_SHARD_COUNT ?? 1);
-if (!Number.isSafeInteger(shards) || shards < 1 || !Number.isSafeInteger(shard) || shard < 0 || shard >= shards)
-  throw new Error('CLS_SHARD_INDEX must be a zero-based integer below CLS_SHARD_COUNT.');
+// In CI one fixture owns the exclusive measurements and the TV build. The other fixtures hash shared
+// measurements by page, viewport/theme and navigation mode. With no shard arguments, run both lanes.
+const exclusive = process.env.CLS_SHARD_INDEX === 'alone';
+const shards = Number(process.env.CLS_SHARD_COUNT ?? 1), shard = Number(process.env.CLS_SHARD_INDEX ?? 0);
+if (!Number.isSafeInteger(shards) || shards < 1 || (exclusive ? shards < 2 : !Number.isSafeInteger(shard) || shard < 0 || shard >= Math.max(1, shards - 1)))
+  throw new Error('CLS_SHARD_INDEX must be a shared shard index or "alone" (the last of CLS_SHARD_COUNT fixtures).');
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
@@ -1097,15 +1101,9 @@ try {
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
   jobs.forEach((job, index) => { job.index = index; });
   const queue = [...jobs].sort((a, b) => weight(b) - weight(a));
-  // Deal each lane round-robin within each origin. A stride of four over alternating origins aimed up to
-  // 20 simultaneous pages at one fixture API and hit READ_CONCURRENCY_LIMIT. Keep global IDs for the
-  // origin and throttle bucket; the two buckets are fixed even on local runs with a single API.
-  const lane = alone => {
-    const next = [0, Math.floor(shards / 2)];
-    return queue.filter(job => Boolean(job.alone) === alone && next[job.index % 2]++ % shards === shard);
-  };
-  const shared = lane(false), alone = lane(true);
-  console.log(`${elapsed()} shard ${shard + 1}/${shards}: measuring ${shared.length + alone.length} of ${queue.length} page loads, ${workers} at a time`);
+  const shared = queue.filter(job => !job.alone && !exclusive && (shards === 1 || createHash('sha256').update(job.slug).digest().readUInt32BE(0) % (shards - 1) === shard));
+  const alone = queue.filter(job => job.alone && (exclusive || shards === 1));
+  console.log(`${elapsed()} shard ${exclusive ? 'alone' : shard}/${shards}: measuring ${shared.length + alone.length} of ${queue.length} page loads, ${workers} at a time`);
   const run = async job => {
     const r = await measure(browser, job, fx);
     results[job.index] = r;

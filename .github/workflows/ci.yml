@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
           persist-credentials: false
       - id: scope
         env:
@@ -209,8 +209,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        fixture: [integration, simulated, simulated-heavy]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+        fixture: [integration-contract, integration-rest, simulated-a-h, simulated-rest]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
       postgres:
@@ -288,7 +288,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, alone]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
@@ -325,7 +325,7 @@ jobs:
       # The television homepage, the dev stage's "/" (VITE_HOME=tv: deploy.yml), built beside the production one and
       # measured on its own (scripts/cls.mjs, CLS_HOME=tv), in one shard.
       - name: Measure layout shift on the television homepage
-        if: matrix.shard == 1
+        if: matrix.shard == 'alone'
         working-directory: app
         env:
           VITE_HOME: tv
@@ -346,7 +346,11 @@ jobs:
   support-work:
     needs: changes
     if: needs.changes.outputs.support == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [chat, queues]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -364,10 +368,18 @@ jobs:
           key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('support/bun.lock') }}
       - run: bun install --frozen-lockfile
         working-directory: support
-      - run: bun run check
+      - if: matrix.fixture == 'chat'
+        run: bun run check
         working-directory: support
-      - run: bun run test
+      - name: Bundle and test the support Worker
         working-directory: support
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+        run: |
+          queues='support Worker (intake work queue|conversation work queue|work ledger and sweep|replay and readiness) '
+          pattern=$queues
+          if [[ $FIXTURE == chat ]]; then pattern="^(?!.*$queues)"; fi
+          bun run test --testNamePattern "$pattern"
 
   # Don't publish all six protected checks at once after the slowest shard. The dev queue saw
   # them go green together while branch protection still saw build in progress on the batch tip.

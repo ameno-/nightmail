@@ -82,43 +82,53 @@ shard() (
   if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then reporters+=(--test-reporter=junit "--test-reporter-destination=$ACCEPTANCE_JUNIT/$1.xml"); fi
   timeout 8m node --import tsx --test "${reporters[@]}" "${@:5}" api.acceptance.test.ts
 )
-# Complementary filters: new suites run in the HTTP shard by default.
-pattern='^(SIMULATED SES:|Hosted account re-home:)'
-# The 500-copy campaign screen and full-ledger upgrade dominate simulated wall time. One positive filter and
-# its exact complement partition the original simulated selection; new tests still run by default.
+# Partition whole registered tests, leaving their nested subtests on the same fixture. Keep the original
+# three selectors for nightly and both whole fixtures for local runs. New names fall in a rest shard.
+sim='^(SIMULATED SES:|Hosted account re-home:)'
 heavy='^(Hosted account re-home:|SIMULATED SES: .* (campaign screen:|hosted campaigns? |cold isolates ))'
-# Flake quarantine (docs/ci.md): a test whose name carries [flaky #N], N its open issue, never blocks a merge.
-# ACCEPTANCE_QUARANTINE: unset skips those tests (the required job), "only" runs just them (the non-blocking
-# quarantine job), "all" runs everything (nightly).
+contract='^(Hosted MCP OAuth and tools|Dashboard API capabilities|Public contract and authentication)( |$)'
+a_h='^SIMULATED SES: real SDK transport and direct event fanout [a-hA-H]'
 flaky='\[flaky #[0-9]+\]'
-case ${ACCEPTANCE_QUARANTINE:-} in
-  only) integration_filter=(--test-skip-pattern="$pattern" --test-name-pattern="$flaky"); simulated_filter=(--test-name-pattern="$pattern.*$flaky") ;;
-  all) integration_filter=(--test-skip-pattern="$pattern"); simulated_filter=(--test-name-pattern="$pattern") ;;
-  '') integration_filter=(--test-skip-pattern="$pattern" --test-skip-pattern="$flaky"); simulated_filter=(--test-name-pattern="$pattern" --test-skip-pattern="$flaky") ;;
-  *) echo "ACCEPTANCE_QUARANTINE must be unset, only or all" >&2; exit 2 ;;
-esac
 if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then mkdir -p "$ACCEPTANCE_JUNIT"; fi
 # Two API ports, then two object-storage ports. Override them when another checkout's suite is running on this machine.
 read -r api_port sim_port storage_port sim_storage_port <<< "${ACCEPTANCE_PORTS:-8787 8788 4569 4570}"
+run_fixture() (
+  local group=$1 suffix=$2 include='^' fixture port storage
+  local filters=()
+  case $group in
+    integration|integration-contract|integration-rest)
+      fixture=integration; port=$api_port; storage=$storage_port
+      filters+=(--test-skip-pattern="$sim")
+      case $group in integration-contract) include=$contract ;; integration-rest) filters+=(--test-skip-pattern="$contract") ;; esac ;;
+    simulated|simulated-heavy|simulated-all|simulated-a-h|simulated-rest)
+      fixture=simulated; port=$sim_port; storage=$sim_storage_port; include=$sim
+      case $group in
+        simulated) filters+=(--test-skip-pattern="$heavy") ;;
+        simulated-heavy) include=$heavy ;;
+        simulated-a-h) include=$a_h ;;
+        simulated-rest) filters+=(--test-skip-pattern="$a_h") ;;
+      esac ;;
+    *) echo "Unknown acceptance shard: $group" >&2; exit 2 ;;
+  esac
+  case ${ACCEPTANCE_QUARANTINE:-} in
+    '') filters+=(--test-skip-pattern="$flaky") ;;
+    only) include="^(?=.*$flaky)$include" ;;
+    all) ;;
+    *) echo "ACCEPTANCE_QUARANTINE must be unset, only or all" >&2; exit 2 ;;
+  esac
+  filters+=(--test-name-pattern="$include")
+  shard "$fixture" "$port" "$suffix" "$storage" "${filters[@]}"
+)
 rc=0
-case ${ACCEPTANCE_SHARD:-both} in
-  integration) shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & wait "$!" || rc=$? ;;
-  simulated) shard simulated "$sim_port" '' "$sim_storage_port" "${simulated_filter[@]}" --test-skip-pattern="$heavy" & wait "$!" || rc=$? ;;
-  simulated-heavy)
-    case ${ACCEPTANCE_QUARANTINE:-} in
-      all) filters=(--test-name-pattern="$heavy") ;;
-      only) filters=(--test-name-pattern="$heavy.*$flaky") ;;
-      '') filters=(--test-name-pattern="$heavy" --test-skip-pattern="$flaky") ;;
-    esac
-    shard simulated "$sim_port" '' "$sim_storage_port" "${filters[@]}" & wait "$!" || rc=$? ;;
-  both)
-    admin -c 'CREATE DATABASE fixture_sim OWNER fixture TEMPLATE fixture'
-    shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & integration=$!
-    shard simulated "$sim_port" _sim "$sim_storage_port" "${simulated_filter[@]}" & simulated=$!
-    wait "$integration" || rc=$?
-    wait "$simulated" || rc=$? ;;
-  *) echo 'ACCEPTANCE_SHARD must be integration, simulated, simulated-heavy or both' >&2; exit 2 ;;
-esac
+if [[ ${ACCEPTANCE_SHARD:-both} == both ]]; then
+  admin -c 'CREATE DATABASE fixture_sim OWNER fixture TEMPLATE fixture'
+  run_fixture integration '' & integration=$!
+  run_fixture simulated-all _sim & simulated=$!
+  wait "$integration" || rc=$?
+  wait "$simulated" || rc=$?
+else
+  run_fixture "$ACCEPTANCE_SHARD" '' & wait "$!" || rc=$?
+fi
 
 # Deadlock guard: fail on any deadlock Postgres detected during the suite, including one a retry absorbed or a test
 # never asserted on. A backend reports its counters when it exits, so wait for the shards' connections to close.
