@@ -1912,8 +1912,10 @@ export class SupportConversation extends DurableObject<Env> {
     else this.record({ id: newId('msg'), role: 'assistant', kind: 'reply', text: progress.text, at, tools: [], channel: 'email' });
     // A general answer that offered one from the account: it follows once they claim the email (parked for that, checked
     // now and then as any sign-in is). Unless a ticket took the thread since: then the team answers.
-    // A message that joined a follow-up already waiting has it answer this one too.
-    if (progress.unclaimed && progress.offered && !progress.joinedTo && this.meta()!.status !== 'ticketed')
+    // A message that joined a follow-up already waiting has it answer this one too. So does one released by "Answer me by
+    // email instead" (it offers no sign-in, but the Continue page still does): whoever later claims the email, with the
+    // account for its address, gets the answer from the account the page promises, not nothing.
+    if (progress.unclaimed && (progress.offered || progress.released) && !progress.joinedTo && this.meta()!.status !== 'ticketed')
       return { result: progress, children: [{ kind: 'answer', id: `answer:${answer.messageId}:claimed`, state: 'parked', dueAt: Date.now(),
         payload: { messageId: answer.messageId, threadId: answer.threadId, sender: answer.sender, dmarc: answer.dmarc, route: { addressId: answer.route.addressId, key: `${answer.route.key}:claimed` },
           signin: true, general: true, followup: true, earlier: progress.text.slice(0, 4000), ...answer.linkedTicket ? { linkedTicket: answer.linkedTicket } : {} } satisfies Answer }] };

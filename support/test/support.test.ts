@@ -2603,7 +2603,9 @@ describe('support Worker', () => {
       const reached = recorded.slice(from).flatMap(r => (r.body?.messages ?? []).flatMap(blocksOf)).filter((b: any) => b.type === 'tool_use').map((b: any) => b.name as string);
       assert.ok(['account_context', 'list_domains', 'get_billing', 'bounce_reasons'].every(name => reached.includes(name)), reached.join());
       assert.deepEqual((await stampedCalls(id, calls, instance)).map(c => c[1]).filter(path => path !== '/v1/support/scope'), [], 'No account read reached Nightmail (only whether it was claimed: refused, nobody is bound).');
-      assert.ok(!run.rows.some(r => r.id.endsWith(':claimed')), 'No follow-up: they asked to be answered by email.');
+      // Nothing more is sent now; a follow-up waits for a claim, so someone who later signs in with the account for this
+      // address and confirms it gets the answer from the account the Continue page promises (only what needed it).
+      assert.equal(states(run)['answer:msg_rel_1:claimed'], 'parked', 'A follow-up waits for a claim.');
       // Pressed again, woken again: nothing new.
       await fakeHook('/__release', { conversationId: id, messageId: 'msg_rel_2' }, instance);
       await wake(id);
