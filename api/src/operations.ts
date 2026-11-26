@@ -1836,15 +1836,16 @@ const button = (label: string, secondary = false) => `<button type="submit"${sec
  * workspace as a checkbox with Save, then everything. Each is its own POST form; a GET changes nothing. A person
  * unsubscribed from everything sees that and no choices: only fresh consent, recorded by the sender, lifts it.
  */
-function preferencesBody(prefs: { consent: string | null; topics: { id: string; name: string; description: string; subscribed: boolean; chosen: boolean }[]; linked: { name: string; subscribed: boolean } | null }, destination: string) {
+function preferencesBody(prefs: { consent: string | null; topics: { id: string; name: string; description: string; subscribed: boolean; chosen: boolean }[]; linked: { id: string; name: string; subscribed: boolean } | null }, destination: string) {
   if (prefs.consent === 'unsubscribed') return '<p>You’re unsubscribed from all marketing emails from this sender, so you don’t get any of these. To get them again, ask the sender.</p>';
-  const linked = prefs.linked && (prefs.linked.subscribed
-    ? `<form method="post"><input type="hidden" name="confirm" value="footer"><p>Stop receiving ${escapeText(prefs.linked.name)} emails from this sender. Their other emails don’t change.${destination}</p>${button(`Unsubscribe from ${escapeText(prefs.linked.name)}`)}</form>`
-    : `<p>You’ve unsubscribed from ${escapeText(prefs.linked.name)} emails. To get them again, ask the sender.</p>`);
   // The page only removes. A topic the person still gets is a checkbox they can clear; one they left shows as off, with no
   // control (no name, so nothing is posted for it, script or not); an opt-in topic they never joined isn't offered at all.
   // Only a subscriber has choices: anyone else gets no marketing at all.
   const listed = prefs.consent === 'subscribed' ? prefs.topics.filter(topic => topic.subscribed || topic.chosen) : [], current = listed.some(topic => topic.subscribed);
+  // The link's topic first: its button while they get it; once left, a line, unless its own row below already says so.
+  const linked = prefs.linked && (prefs.linked.subscribed
+    ? `<form method="post"><input type="hidden" name="confirm" value="footer"><p>Stop receiving ${escapeText(prefs.linked.name)} emails from this sender. Their other emails don’t change.${destination}</p>${button(`Unsubscribe from ${escapeText(prefs.linked.name)}`)}</form>`
+    : listed.some(topic => topic.id === prefs.linked!.id) ? '' : `<p>You’ve unsubscribed from ${escapeText(prefs.linked.name)} emails. To get them again, ask the sender.</p>`);
   const text = (topic: { name: string; description: string }, note?: string) => `<span><span class="name">${escapeText(topic.name)}</span>${topic.description ? `<span class="muted">${escapeText(topic.description)}</span>` : ''}${note ? `<span class="muted">${note}</span>` : ''}</span>`;
   // With nothing left to clear there is nothing to save: the topics show without a form.
   const choices = listed.length ? `${current ? '<form method="post"><input type="hidden" name="preferences" value="save">' : '<div class="topics">'}

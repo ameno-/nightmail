@@ -20457,7 +20457,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     // The topic's button turns that topic off, as the one-click does.
     assert.match(await post(anas, 'confirm=footer'), /You’re unsubscribed[\s\S]*Back to your email preferences/);
     const after = ok(await http('GET', anas));
-    assert.ok(after.includes(`You’ve unsubscribed from ${escaped(news.name)} emails. To get them again, ask the sender.`) && !after.includes('name="confirm"'));
+    assert.ok(!after.includes(`Unsubscribe from ${escaped(news.name)}`) && !after.includes('name="confirm"'), 'Left, the topic has no button; its own row says so.');
     // The topic she left is shown as off with no control: a disabled box with no name, so nothing is posted for it.
     assert.ok(after.includes('You’ve unsubscribed from this. To get it again, ask the sender.') && !checked(after, news.id) && !offered(after, news.id) && /<input type="checkbox" disabled/.test(after) && !after.includes('name="preferences" value="save"'));
     const left = await recorded(ana);
