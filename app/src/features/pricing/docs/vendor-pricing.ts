@@ -1,6 +1,5 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { productName } from '../../../../../api/src/brand.ts'
-import { usd } from '../../../../../api/src/billing/rates.ts'
 import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, nightmailBill, quote, sourcesOf, ucOf, type Comparison, type Plan, type Source, type Tier, type Usage } from '../prices.ts'
 import { comparisonQuestions } from '../questions.ts'
 import { plain, type Doc, type Question, type Section, type Text } from './doc.ts'
@@ -132,11 +131,11 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
     blocks: [
       { kind: 'table',
         caption: [`${c.assume} Monthly billing, no promotions. ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${productName} costs less than ${vendor} at every size in this table. `, ...readAt(tableRead)],
-        head: [contacts ? 'Contacts' : 'Emails a month', ...contacts ? ['Emails a month'] : [], productName, vendor, ...contacts ? [] : [`${vendor} per 1,000`], `${vendor} plan`],
-        numeric: contacts ? [0, 1, 2, 3] : [0, 1, 2, 3],
+        // The comparisons' four columns (page/comparison.ts), which the renderer folds on a phone: the size, both bills, the plan.
+        head: [contacts ? 'Contacts' : 'Emails a month', productName, vendor, `${vendor} plan`],
+        numeric: [1, 2],
         rows: rows.map(row => ({ mark: row === verdictAt, cells: [
-          [formatCount(row.n)], ...contacts ? [[formatCount(row.u.sent)]] : [], [{ ours: row.ours.text, sent: row.u.sent, received: row.u.received }], [money(row.cents)],
-          ...contacts ? [] : [[usd(ucOf(row.cents) * 1000n / BigInt(row.u.sent + row.u.received))]], [row.how],
+          [formatCount(row.n)], [{ ours: row.ours.text, sent: row.u.sent, received: row.u.received }], [money(row.cents)], [row.how],
         ] })) },
     ],
   }
