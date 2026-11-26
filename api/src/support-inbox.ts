@@ -30,7 +30,8 @@ import { EXPIRES_MS, isKind, KINDS, validToken } from './support-approvals.js';
 // The conversation page is one timeline: every message (the customer's, each with the stored email it came from when it
 // was mailed; the agent's, sent or held and why; staff replies and staff notes) and what happened besides
 // (support_events: a ticket filed, its priority, the agent paused and handed back, resolved, done), with the agent's
-// ticket brief above it. A staff note (kind 'note') is never delivered and changes no triage.
+// ticket brief above it. A staff note (kind 'note') is never delivered and changes no triage; one that came by email (a
+// staff member's reply to a staff email, src/support-staff-mail.ts staffReply) keeps the address it came from.
 //
 // Needs you, the inbox's default view, is what only a person can move forward. A conversation needs staff when nobody
 // marked it done since anything new happened (a message, a failed delivery, more blocked work, a ticket, a pause) and at
@@ -85,7 +86,8 @@ const Message = z.object({
   id: z.string(), seq: z.number().int(), author: Author, kind: z.string().nullable(), text: z.string(),
   tools: z.array(z.object({ label: z.string(), ok: z.boolean() })).describe('The agent’s tool calls by label and outcome; never their content.'),
   attachments: z.array(z.string()).describe('Attachment IDs, held by the support platform.'),
-  staff: z.object({ userId: z.string(), name: z.string().nullable() }).nullable().describe('Who wrote a staff reply or note.'),
+  staff: z.object({ userId: z.string(), name: z.string().nullable() }).nullable().describe('Who wrote a staff reply or note (null for a note by the team address alone).'),
+  emailFrom: z.string().nullable().describe('A note that came by email (a reply to a staff email): the verified address it came from. Null otherwise.'),
   delivery: Delivery.nullable().describe('A staff reply: queued until the support platform delivers it, then sent (or failed). An agent answer: sent, or held (frozen before a staff reply, never sent). A note: null.'),
   heldReason: z.enum(HELD_REASONS).nullable().describe('A held agent answer: paused (staff took over after it was written), gate (the output check held it), access (the customer’s access shrank), closed (the conversation ended first), earlier (written by an earlier build).'),
   files: z.array(z.object({ id: z.string(), name: z.string().nullable(), type: z.string().nullable(), size: z.number().int().nullable() })).describe('The attachments (screenshots held by the support platform), with their names when it sent them.'),
@@ -265,10 +267,10 @@ type EmailRow = { id: string; subject: string; from_address: string; from_name: 
   received_at: string; text: string | null; html_text: string | null; text_length: number; body_truncated: boolean; has_html: boolean;
   attachments: { id: string; filename: string; contentType: string; size: number; disposition: string; contentId: string | null }[]; clean: boolean };
 type MessageRow = { id: string; seq: number; author: z.infer<typeof Author>; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[];
-  staff_user_id: string | null; staff_name: string | null; delivery: z.infer<typeof Delivery> | null; held_reason: z.infer<typeof Message>['heldReason']; files: StoredFile[] | null;
+  staff_user_id: string | null; staff_name: string | null; email_from: string | null; delivery: z.infer<typeof Delivery> | null; held_reason: z.infer<typeof Message>['heldReason']; files: StoredFile[] | null;
   email?: EmailRow | null; draft_outcome: 'sent' | 'edited' | 'replaced' | 'discarded' | null; draft_by: string | null; draft_by_name: string | null; draft_at: string | null; draft_reply: string | null;
   delivered_at: string | null; created_at: string };
-const messageColumns = sql`id, seq, author, kind, text, tools, attachments, staff_user_id, (SELECT name FROM nightmail_users WHERE id = staff_user_id) AS staff_name, delivery,
+const messageColumns = sql`id, seq, author, kind, text, tools, attachments, staff_user_id, (SELECT name FROM nightmail_users WHERE id = staff_user_id) AS staff_name, email_from, delivery,
   held_reason, files, draft_outcome, draft_by, (SELECT name FROM nightmail_users WHERE id = draft_by) AS draft_by_name, draft_at::text AS draft_at, draft_reply,
   delivered_at::text AS delivered_at, created_at::text AS created_at`;
 /** The stored email behind a customer message (`m`), for the conversation page: its text up to EMAIL_TEXT_LIMIT and its attachments' metadata. */
@@ -289,7 +291,7 @@ function email(row: EmailRow): z.infer<typeof EmailSource> {
 const message = (m: MessageRow): z.infer<typeof Message> => {
   const named = new Map((m.files ?? []).map(f => [f.id, f]));
   return { id: m.id, seq: m.seq, author: m.author, kind: m.kind, text: m.text, tools: m.tools, attachments: m.attachments,
-    staff: m.staff_user_id ? { userId: m.staff_user_id, name: m.staff_name } : null, delivery: m.delivery, heldReason: m.held_reason ?? null,
+    staff: m.staff_user_id ? { userId: m.staff_user_id, name: m.staff_name } : null, emailFrom: m.email_from ?? null, delivery: m.delivery, heldReason: m.held_reason ?? null,
     files: m.attachments.map(id => { const f = named.get(id); return { id, name: f?.name ?? null, type: f?.type ?? null, size: f?.size ?? null }; }),
     email: m.email ? email(m.email) : null, deliveredAt: isoTime(m.delivered_at), at: isoTime(m.created_at)!,
     draft: m.draft_outcome && m.draft_by ? { outcome: m.draft_outcome, by: { userId: m.draft_by, name: m.draft_by_name }, at: isoTime(m.draft_at)!, replyId: m.draft_reply } : null };
@@ -548,7 +550,7 @@ export function registerSupportInbox(app: App) {
       reply_address: string | null; reply_verified: boolean }>(sql`WITH conv AS (SELECT * FROM support_conversations WHERE id = ${id}), logged AS (${viewed})
       SELECT (SELECT row_to_json(i) FROM (SELECT ${itemColumns} FROM ${itemFrom(operator.userId)} WHERE c.id = conv.id) i) AS item,
         conv.evidence, conv.thread_id, conv.content_workspace_id, (SELECT page FROM support_handoffs WHERE conversation_id = conv.id) AS page,
-        (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.delivery,
+        (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.email_from, m.delivery,
           m.held_reason, m.files, CASE WHEN m.source_message_id IS NOT NULL THEN ${emailOf} END AS email,
           m.draft_outcome, m.draft_by, (SELECT name FROM nightmail_users WHERE id = m.draft_by) AS draft_by_name, m.draft_at::text AS draft_at, m.draft_reply,
           m.delivered_at::text AS delivered_at, m.created_at::text AS created_at FROM support_messages m LEFT JOIN nightmail_users su ON su.id = m.staff_user_id

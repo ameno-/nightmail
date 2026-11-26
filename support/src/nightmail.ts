@@ -85,7 +85,16 @@ export interface SupportPlatform {
   // One path to a human (api/src/support-staff-mail.ts): the staff emails Nightmail wrote, and each one sent.
   staffMail(): Promise<PlatformReply<{ data: StaffEmail[] }>>;
   staffMailSent(key: string, sent: { threadId: string; messageId: string }): Promise<PlatformReply<{ key: string; sentAt: string }>>;
+  /** A staff email failed to send this time, with its error's code: after three tries Glass shows it until it goes. */
+  staffMailFailed(key: string, failed: { code: string }): Promise<PlatformReply<{ key: string; attempts: number; failed: boolean; sent: boolean }>>;
+  /**
+   * Before an email to a support address is a customer's: whether it replies to a staff email. reply true: Nightmail made
+   * it a note on its conversation (a verified staff sender) or ignored it, and it is never a conversation here.
+   */
+  staffMailReply(messageId: string, team: string | null): Promise<PlatformReply<StaffReply>>;
 }
+/** What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply). */
+export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | null };
 /** A staff email to send from the support address to the team: a new thread, or a reply in threadId to replyToMessageId. */
 export type StaffEmail = { key: string; threadId: string | null; replyToMessageId: string | null; subject: string; text: string; html: string };
 /** A platform reply's body, or (any other status than `ok`) a NightmailError the work queue can classify. */

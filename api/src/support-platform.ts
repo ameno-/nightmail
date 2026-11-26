@@ -34,6 +34,9 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   // One path to a human (src/support-staff-mail.ts): the staff emails due, and each one sent.
   ['POST', /^\/v1\/operator\/support\/staff-mail$/],
   ['POST', /^\/v1\/operator\/support\/staff-mail\/staff-[0-9a-f]{24}-[0-9]{1,6}\/sent$/],
+  // A staff email that failed to send, and a reply to one (a note on its conversation, or nothing).
+  ['POST', /^\/v1\/operator\/support\/staff-mail\/staff-[0-9a-f]{24}-[0-9]{1,6}\/failed$/],
+  ['POST', /^\/v1\/operator\/support\/staff-mail\/replies$/],
 ];
 const SUPPORT_READ = /^\/v1\/support\/[A-Za-z0-9_./-]{1,200}$/;
 /** The writes a conversation makes: narrowing its scope to one workspace, and keeping a note about its person. */
@@ -211,6 +214,15 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     /** A staff email went out: its thread and message, so the next one in the thread replies to it. */
     staffMailSent: (key: string, sent: { threadId: string; messageId: string }) =>
       call<{ key: string; sentAt: string }>('POST', `/v1/operator/support/staff-mail/${encodeURIComponent(String(key))}/sent`, sent),
+    /** A staff email failed to send this time (its error's code): after three tries it shows on Glass until it goes. */
+    staffMailFailed: (key: string, failed: { code: string }) =>
+      call<{ key: string; attempts: number; failed: boolean; sent: boolean }>('POST', `/v1/operator/support/staff-mail/${encodeURIComponent(String(key))}/failed`, failed),
+    /**
+     * Before an email to a support address is a customer's: whether it replies to a staff email (reply false: it doesn't,
+     * handle it as any support email), and if so the note it became on its conversation, or why none (ignored).
+     */
+    staffMailReply: (messageId: string, team: string | null) =>
+      call<{ reply: boolean; notes?: number; ignored?: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | null }>('POST', '/v1/operator/support/staff-mail/replies', { messageId, team }),
     /**
      * A /v1/support request for one registered conversation: a GET, or a write (POST /v1/support/scope or notes). The
      * conversation rides on the runtime, never in the request; Nightmail derives the customer from its row and answers

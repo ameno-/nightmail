@@ -25,6 +25,9 @@ const inbox = new Map();
 let inboxDown = false;
 // Staff emails a test queued: { key, group, thread (the group to reply in, for a later one), subject, text, html }, and each group's thread once sent.
 const staffMail = [], staffThreads = new Map();
+// What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply), as a test sets it (/__staffreply):
+// any other message is no such reply. An answer with a status is Nightmail failing to say.
+const staffReplies = new Map();
 const missing = () => ok({ error: { code: 'NOT_FOUND' } }, 404), unavailable = () => ok({ error: { code: 'UNAVAILABLE' } }, 503);
 const inboxState = (id, c) => ({ id, status: c.status, agentState: c.paused ? 'paused' : 'active', pausedBy: c.paused || null, pausedAt: c.paused ? new Date().toISOString() : null, queuedReplies: c.outbox.filter(r => !r.delivery).length });
 const ok = (body, status = 200) => ({ status, body, requestId: 'req_' + '0'.repeat(32), retryAfter: null });
@@ -271,6 +274,18 @@ export class SupportPlatform extends WorkerEntrypoint {
     return ok({ data: staffMail.filter(m => !m.sent && (!m.thread || staffThreads.has(m.thread))).map(m => ({ key: m.key, subject: m.subject, text: m.text, html: m.html,
       threadId: m.thread ? staffThreads.get(m.thread).threadId : null, replyToMessageId: m.thread ? staffThreads.get(m.thread).messageId : null })) });
   }
+  async staffMailReply(messageId, team) {
+    calls.push(['staffMailReply', messageId, team]);
+    const answer = staffReplies.get(messageId);
+    return answer?.status ? refuse(answer.status, 'UNAVAILABLE') : ok(answer ?? { reply: false });
+  }
+  async staffMailFailed(key, failed) {
+    calls.push(['staffMailFailed', key, failed]);
+    const mail = staffMail.find(m => m.key === key);
+    if (!mail) return missing();
+    if (!mail.sent) mail.attempts = (mail.attempts ?? 0) + 1;
+    return ok({ key, attempts: mail.attempts ?? 0, failed: !mail.sent && (mail.attempts ?? 0) >= 3, sent: !!mail.sent });
+  }
   async staffMailSent(key, sent) {
     calls.push(['staffMailSent', key, sent]);
     const mail = staffMail.find(m => m.key === key);
@@ -304,6 +319,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/__calls') return Response.json(calls);
     // The staff inbox: register a conversation, pause or resume its agent, queue a staff reply, take Nightmail down; and read it.
+    if (url.pathname === '/__staffreply') { const { messageId, answer } = await request.json(); staffReplies.set(messageId, answer); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__staffmail') { const { group, update, ...mail } = await request.json(); staffMail.push({ ...mail, group, thread: update ? group : null, sent: false }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__inbox') {
       if (request.method === 'GET') { const c = inbox.get(url.searchParams.get('id')); return Response.json(c ?? null); }

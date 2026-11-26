@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { errors, json, log, notFound, response, type App, type Config, type Database } from './core.js';
+import { errors, json, log, notFound, response, type App, type Config, type Database, type DbExecutor } from './core.js';
 import { productName } from './brand.js';
-import { htmlToPlain } from './mailbox-store.js';
+import { htmlToPlain, replyText } from './mailbox-store.js';
 import { renderNotice, type Line, type Notice } from './notices.js';
 import { approvalLink, KINDS, propose } from './support-approvals.js';
-import { supportPlatformOnly } from './support-conversations.js';
+import { emailEvidence, supportPlatformOnly } from './support-conversations.js';
 import { event, itemColumns, itemFrom, triageCandidates, TRIAGE_REASONS, type ItemRow } from './support-inbox.js';
 
 // One path to a human. Whatever needs a person in support has a ticket and one email thread to staff: every conversation
@@ -26,10 +26,25 @@ import { event, itemColumns, itemFrom, triageCandidates, TRIAGE_REASONS, type It
 // words (quoted as untrusted text: escaped, links shown with their real host and never made clickable); what the agent
 // checked and found; the one decision, with the agent's recommendation; one link to the conversation. Where the
 // decision is a yes or no on something proposed (src/support-approvals.ts), the button opens the conversation with it
-// ready to confirm, and only a signed-in operator's confirm runs it.
+// ready to confirm, and only a signed-in operator's confirm runs it. The footer names the ticket, and that replying adds
+// a note.
+//
+// A reply to a staff email becomes an internal note on its conversation (staffReply below), and nothing else: the support
+// platform asks before it treats any email to a support address as a customer's (POST
+// /v1/operator/support/staff-mail/replies). It is a reply to a staff email when ingest filed it in a staff email's thread,
+// the thread its own In-Reply-To and References lead to, never because of anything in its subject or words. It becomes a
+// note only from a verified staff sender: the proof a customer's email needs to count as verified (its one literal From,
+// DMARC pass vouched for at the support address, not sent through Nightmail itself), from the team address (TICKET_TO,
+// which the support platform passes) or an operator's verified account email. Any other reply to a staff email is
+// ignored: never a conversation, never answered.
+//
+// A staff email the support platform can't send is reported each time it fails (POST …/{key}/failed); after three tries
+// it counts as not sent on Glass's support tile (src/glass.ts) until it goes.
 
 const UPDATE_EVERY = 30, FEEDBACK_WINDOW = 60, FEEDBACK_SETTLE = 5, FEEDBACK_WAIT = 30, UNROUTED_AFTER = 30, UNROUTED_DAYS = 30;
-export const STAFF_MAIL_LIMITS = { perHour: 20, batch: 20 } as const;
+export const STAFF_MAIL_LIMITS = { perHour: 20, batch: 20, attempts: 3 } as const;
+/** The longest note a reply to a staff email becomes, in characters: its own words, without the quoted email. */
+export const STAFF_NOTE_MAX = 4000;
 
 type Words = { text: string; at: string };
 type Brief = { title: string; summary: string; ask: string; recommendation: string; tried?: { tool: string; finding: string }[] };
@@ -162,7 +177,11 @@ function changesOf(row: StaffRow, reasons: string[], now: number) {
   }
   return parts.length ? `Since the last email, ${parts.join(', ')}.` : 'It still needs you.';
 }
-const ticketLine = (ids: (string | null)[]) => { const shown = ids.filter((id): id is string => !!id); return shown.length ? `${shown.length === 1 ? 'Ticket' : 'Tickets'} ${shown.slice(0, 3).join(', ')}${shown.length > 3 ? '…' : ''}` : 'No ticket'; };
+/** The footer: the ticket (or tickets), and, for a conversation's thread, that replying adds a note to it (staffReply). */
+const ticketLine = (ids: (string | null)[], replies = false) => {
+  const shown = ids.filter((id): id is string => !!id), tickets = shown.length ? `${shown.length === 1 ? 'Ticket' : 'Tickets'} ${shown.slice(0, 3).join(', ')}${shown.length > 3 ? '…' : ''}` : 'No ticket';
+  return replies ? `${tickets} · Reply to add a note.` : tickets;
+};
 
 /**
  * A conversation's email: who and where (with when they wrote), their words (three lines at most), one sentence of what
@@ -179,7 +198,7 @@ export function conversationEmail(origin: string, row: StaffRow, reasons: string
   lines.push({ text: decision, tone: 'strong' });
   if (recommendation) lines.push(recommendation);
   const conversation = { label: 'Open the conversation', url: `${origin}/support/${row.id}` };
-  return renderNotice({ subject, lines, action: approval ?? conversation, ...approval ? { secondary: conversation } : {}, why: ticketLine([row.ticket_id]) }, origin);
+  return renderNotice({ subject, lines, action: approval ?? conversation, ...approval ? { secondary: conversation } : {}, why: ticketLine([row.ticket_id], true) }, origin);
 }
 
 /** One workspace's agent feedback: each report's facts and words, the decision, and the tickets. */
@@ -197,7 +216,7 @@ export function feedbackEmail(origin: string, rows: StaffRow[], first: boolean, 
   lines.push({ text: decision, tone: 'strong' });
   if (recommendation && rows.length === 1) lines.push(recommendation);
   const action = rows.length === 1 ? { label: 'Open the report', url: `${origin}/support/${lead.id}` } : { label: 'Open the reports', url: `${origin}/support?view=needs_you&channel=agent_feedback` };
-  return renderNotice({ subject, lines, action, why: ticketLine(rows.map(r => r.ticket_id)) }, origin);
+  return renderNotice({ subject, lines, action, why: ticketLine(rows.map(r => r.ticket_id), true) }, origin);
 }
 
 export type Unrouted = { thread_id: string; id: string; subject: string | null; from_address: string; dmarc: string; text: string | null; html: string | null; received_at: string; address: string };
@@ -319,6 +338,75 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
   });
 }
 
+
+// ---------- replies to staff emails ----------
+
+/** Why a reply to a staff email became no note. */
+export type StaffReplyIgnored = 'unverified' | 'not_staff' | 'no_conversation' | 'empty';
+export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: StaffReplyIgnored | null };
+/** A note's own ID, the same for one email in one conversation, so a retried reply is noted once. */
+const noteId = (conversationId: string, messageId: string) => `msg_${Array.from(createHash('sha256').update(`staff-reply:${conversationId}:${messageId}`).digest().subarray(0, 16), b => BASE32[b & 31]).join('')}`;
+/** A reply's own words as plain text: no quoted email, no control characters other than line breaks and tabs, bounded. */
+export function staffNoteText(text: string | null, html: string | null) {
+  const words = replyText(text ?? (html ? htmlToPlain(html) : '')).normalize('NFC')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, '').replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+  return words.length > STAFF_NOTE_MAX ? `${words.slice(0, STAFF_NOTE_MAX - 1).trimEnd()}…` : words;
+}
+
+/**
+ * An email to a support address that replies to a staff email: an internal note on each conversation of its staff thread
+ * (one; a workspace's agent feedback, each of its reports), by its verified staff sender, once. `reply: false`: it is no
+ * such reply (the support platform handles it as any support email). `ignored`: it is one, and nothing was noted.
+ */
+export async function staffReply(db: Database, config: Pick<Config, 'support'>, messageId: string, team: string | null): Promise<StaffReply> {
+  const addressIds = config.support?.addressIds ?? [];
+  if (!addressIds.length) return { reply: false };
+  // The staff thread ingest filed it in (by its own In-Reply-To and References), at a support address. Nothing else names it.
+  const { rows: [found] } = await db.execute<{ key: string; text: string | null; html: string | null }>(sql`SELECT t.key, m.text, CASE WHEN m.text IS NULL THEN left(m.html, 200000) END AS html
+    FROM mail_messages m JOIN support_staff_threads t ON t.thread_id = m.thread_id
+    WHERE m.id = ${messageId} AND m.direction = 'inbound' AND EXISTS (SELECT FROM mailbox_messages mm WHERE mm.message_id = m.id AND mm.workspace_id = m.workspace_id
+      AND mm.direction = 'inbound' AND mm.mailbox_id = ANY(${sql.param(addressIds)}::text[]))
+    LIMIT 1`);
+  if (!found) return { reply: false };
+  const ignored = (why: StaffReplyIgnored): StaffReply => { log('warn', { code: 'SUPPORT_STAFF_REPLY_IGNORED', reason: why }); return { reply: true, notes: 0, ignored: why }; };
+  // The sender: verified as a customer's email would be, and the team address or an operator's own.
+  const evidence = await emailEvidence(db, addressIds, messageId);
+  if (!evidence || evidence.verification !== 'dmarc' || evidence.evidence.selfSent) return ignored('unverified');
+  const { rows: [operator] } = await db.execute<{ user_id: string }>(sql`SELECT p.user_id FROM platform_operators p JOIN nightmail_users u ON u.id = p.user_id
+    WHERE p.role = 'operator' AND u.email_verified AND lower(u.email) = ${evidence.from} ORDER BY p.user_id LIMIT 1`);
+  if (!operator && evidence.from !== team?.trim().toLowerCase()) return ignored('not_staff');
+  const text = staffNoteText(found.text, found.html);
+  if (!text) return ignored('empty');
+  const { rows: conversations } = await db.execute<{ id: string }>(sql`SELECT id FROM support_conversations WHERE staff_thread = ${found.key} ORDER BY created_at, id LIMIT 20`);
+  if (!conversations.length) return ignored('no_conversation');
+  let notes = 0;
+  for (const { id } of conversations) {
+    const note = noteId(id, messageId);
+    notes += await db.transaction(async tx => {
+      // The conversation's row lock numbers its messages; the note's own ID makes a retried reply a no-op.
+      await tx.execute(sql`SELECT 1 FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
+      if ((await tx.execute(sql`SELECT 1 FROM support_messages WHERE id = ${note}`)).rows.length) return 0;
+      await tx.execute(sql`WITH c AS (UPDATE support_conversations SET messages = messages + 1 WHERE id = ${id} RETURNING messages)
+        INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id, email_from) SELECT ${note}, ${id}, c.messages, 'staff', 'note', ${text}, ${operator?.user_id ?? null}, ${evidence.from} FROM c`);
+      return 1;
+    });
+  }
+  log('info', { code: 'SUPPORT_STAFF_REPLY_NOTED', notes, by: operator ? 'operator' : 'team' });
+  return { reply: true, notes, ignored: null };
+}
+
+/**
+ * One failed try to send a staff email: its count and the error's code. After STAFF_MAIL_LIMITS.attempts it counts as
+ * not sent (failed_at) until it goes. One already sent changes nothing.
+ */
+export async function staffMailFailed(db: DbExecutor, key: string, code: string) {
+  const { rows: [row] } = await db.execute<{ attempts: number; failed: boolean; sent: boolean }>(sql`UPDATE support_staff_emails SET
+      attempts = attempts + CASE WHEN sent_at IS NULL THEN 1 ELSE 0 END, last_error = CASE WHEN sent_at IS NULL THEN ${code} ELSE last_error END,
+      failed_at = CASE WHEN sent_at IS NULL AND attempts + 1 >= ${STAFF_MAIL_LIMITS.attempts} THEN coalesce(failed_at, now()) ELSE failed_at END
+    WHERE key = ${key} RETURNING attempts, failed_at IS NOT NULL AS failed, sent_at IS NOT NULL AS sent`);
+  return row ?? notFound('Staff email');
+}
+
 const StaffEmail = z.object({
   key: z.string().describe('The send\u2019s Idempotency-Key: the same email under the same key on every try.'),
   threadId: z.string().nullable().describe('The thread to reply in (an update), or null to start one.'), replyToMessageId: z.string().nullable(),
@@ -345,12 +433,29 @@ export function registerSupportStaffMail(app: App) {
     await supportPlatformOnly(c);
     const { key } = c.req.valid('param'), body = c.req.valid('json');
     const sentAt = await c.env.db.transaction(async tx => {
-      const { rows: [email] } = await tx.execute<{ thread_key: string; sent_at: string; fresh: boolean }>(sql`UPDATE support_staff_emails SET sent_at = coalesce(sent_at, now()), message_id = coalesce(message_id, ${body.messageId})
+      const { rows: [email] } = await tx.execute<{ thread_key: string; sent_at: string; fresh: boolean }>(sql`UPDATE support_staff_emails SET sent_at = coalesce(sent_at, now()), failed_at = NULL, message_id = coalesce(message_id, ${body.messageId})
         WHERE key = ${key} RETURNING thread_key, sent_at::text AS sent_at, message_id = ${body.messageId} AS fresh`);
       if (!email) notFound('Staff email');
       if (email!.fresh) await tx.execute(sql`UPDATE support_staff_threads SET thread_id = coalesce(thread_id, ${body.threadId}), last_message_id = ${body.messageId}, last_sent_at = ${email!.sent_at}::timestamptz WHERE key = ${email!.thread_key}`);
       return email!.sent_at;
     });
     return c.json({ key, sentAt: new Date(sentAt).toISOString() }, 200);
+  });
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/support/staff-mail/{key}/failed', operationId: 'operatorSupportStaffMailFailed',
+    description: `The support platform could not send this staff email (the binding only): one failed try, and the error's code. After ${STAFF_MAIL_LIMITS.attempts} it counts as not sent on Glass until it goes; one already sent changes nothing.`,
+    request: { params: Key, body: json(z.object({ code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/) }).strict()) },
+    responses: { 200: response(z.object({ key: z.string(), attempts: z.number().int(), failed: z.boolean(), sent: z.boolean() })), ...errors } }), async c => {
+    await supportPlatformOnly(c);
+    const { key } = c.req.valid('param'), row = await staffMailFailed(c.env.db, key, c.req.valid('json').code);
+    if (row.failed && !row.sent) log('warn', { code: 'SUPPORT_STAFF_MAIL_NOT_SENT', attempts: row.attempts });
+    return c.json({ key, ...row }, 200);
+  });
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/support/staff-mail/replies', operationId: 'operatorSupportStaffMailReply',
+    description: 'Before the support platform treats an email to a support address as a customer\u2019s (the binding only): whether it replies to a staff email, and if so the internal note it became, or why it became none. reply false: handle it as any support email. reply true: never a conversation, never answered.',
+    request: { body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/), team: z.string().trim().max(320).nullable().describe('The team address the support platform sends staff email to (TICKET_TO).') }).strict()) },
+    responses: { 200: response(z.object({ reply: z.boolean(), notes: z.number().int().optional(), ignored: z.enum(['unverified', 'not_staff', 'no_conversation', 'empty']).nullable().optional() })), ...errors } }), async c => {
+    await supportPlatformOnly(c);
+    const body = c.req.valid('json');
+    return c.json(await staffReply(c.env.db, c.env.config, body.messageId, body.team), 200);
   });
 }
