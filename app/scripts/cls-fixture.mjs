@@ -994,6 +994,11 @@ export async function seed(fx) {
   const wildcardDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenwild.example', { wildcard: true });
   const parkedDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenpark.example', { parking: true });
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
+  // Ona emailed support too, but her session's sign-in (GitHub, say) proves no mailbox: the reply's link offers to email a
+  // sign-in link to the address the email came from (Support · continue email · sign-in link).
+  const linkConversation = supportId('conv', 'onacontinue', 26), linkMessage = `msg_${'d'.repeat(32)}`;
+  await db.query("INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', 'ona@fieldnotes.example', 'none', 'pending_signin')", [linkConversation]);
+  await db.query("INSERT INTO support_email_signins(conversation_id, message_id, address) VALUES ($1, $2, 'ona@fieldnotes.example')", [linkConversation, linkMessage]);
   // Sending is ready but no domain was added: onboarding's domain step was skipped (cls.mjs `skipped`), so Overview asks for one.
   await fx.signIn('pia', 'pia@pinestudio.example', 'Pia Lund', { id: 'ws_skipped', name: 'Pine Studio' });
   // Its built-in domain sends meanwhile: Overview's card asks for a domain of its own, and Domains lists the built-in one.
@@ -1110,6 +1115,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, imageEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, continueConversation, continueMessage,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, continueConversation, continueMessage, linkConversation, linkMessage,
   };
 }

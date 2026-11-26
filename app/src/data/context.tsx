@@ -32,10 +32,10 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   switchAccount: (id: string, path?: string, workspace?: string) => Promise<void>; addAccount: (path?: string) => void; signOutAccount: (id?: string) => Promise<void>; signOutAll: () => Promise<void>
   /** Staff tools need this account's Google sign-in (Identity.staffSignIn): signs in again with Google, back to this page. */
   signInForStaff: () => void
-  /** Sign in (with Google: a sign-in that proves the account's mailbox), back to this page: for the public pages that need one.
-   *  From the price pages, as from the homepage, it opens Overview; focus (a comparison's) rides along as ?focus=, which
-   *  onboarding reads. */
-  signIn: (method?: 'google', focus?: WorkspaceFocus) => void
+  /** Sign in, back to this page: for the public pages that need one. From the price pages, as from the homepage, it opens
+   *  Overview; focus (a comparison's) rides along as ?focus=, which onboarding reads. select: the account service shows its
+   *  chooser first (a support email's sign-in link, which may be for another account than this browser's). */
+  signIn: (focus?: WorkspaceFocus, select?: boolean) => void
   /** A press starting on a sign-in button (pointer down): the sign-in request starts then, as the homepage's button does. */
   signInIntent: (event: { button: number }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
@@ -515,7 +515,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   const allowToast = useMemo(() => () => isCurrentScope(scope), [scope])
-  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (method, focus) => void startLogin(false, method, focus), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (focus, select) => void startLogin(select === true, undefined, focus), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />

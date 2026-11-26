@@ -293,7 +293,9 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // Reviewing that invitation before joining authenticates the same way and changes nothing.
     if (c.req.method === 'GET' && /^\/v1\/workspaces\/invitations\/[^/]+$/.test(c.req.path)) return next();
     // Reading and confirming an emailed support message authenticate the same way: its sender may have no workspace yet.
+    // So does asking for a sign-in link to its address, the way through when the session's sign-in proves no mailbox.
     if ((c.req.method === 'GET' || c.req.method === 'POST') && /^\/v1\/support-conversations\/[^/]+\/claim$/.test(c.req.path)) return next();
+    if (c.req.method === 'POST' && /^\/v1\/support-conversations\/[^/]+\/sign-in-link$/.test(c.req.path)) return next();
     // A support action is confirmed by the person it was proposed to, in its own workspace (src/support-actions.ts).
     if (c.req.method === 'GET' ? /^\/v1\/support-actions\/[^/]+$/.test(c.req.path) : c.req.method === 'POST' && /^\/v1\/support-actions\/[^/]+\/(?:confirm|decline)$/.test(c.req.path)) return next();
     // Provider redirects cannot carry a workspace header. This route authenticates the OIDC

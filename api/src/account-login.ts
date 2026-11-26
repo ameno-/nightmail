@@ -9,11 +9,12 @@ import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
-import { placeReady, readPlaces, recordSignup, sendSigninLink, spendSigninLink, takePlace, waitlistPosition } from './signups.js';
+import { placeReady, readPlaces, recordSignup, sendSigninLink, spendSigninLink, spendSupportLink, takePlace, waitlistPosition } from './signups.js';
 
 const verifiedEmail = z.email().max(320);
-/** How long POST /api/auth/sign-in/link takes to answer, whatever the address (far above the time a link takes to make). */
-const LINK_ANSWER_MS = 500;
+/** How long POST /api/auth/sign-in/link (and a support email's, support-conversations.ts) takes to answer, whatever the
+ * address (far above the time a link takes to make). */
+export const LINK_ANSWER_MS = 500;
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
 class AuthenticationMethodRequired extends Error {}
 /** place: one held for its address or open, which a sign-in proving the mailbox could take (signups.ts placeReady).
@@ -235,7 +236,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   // and the dashboard signs in with the page it is on as the return URL. It names an ID only; pendingInvitation checks
   // that it is for the address this sign-in proves.
   const invitation = returnUrl.searchParams.get('invitation');
-  // A sign-in link (signups.ts sendSigninLink) rides in the return URL the same way: /overview?link=….
+  // A sign-in link (signups.ts sendSigninLink) rides in the return URL the same way: /overview?link=…, or a support email's
+  // Continue page (/support/continue/…?link=…).
   const link = returnUrl.searchParams.get('link');
   // Identity is (issuer, subject). An email address is display and contact data only: it never links a subject to an
   // existing user. The account service gives an account one subject whichever of its linked methods (GitHub, Google)
@@ -299,9 +301,14 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
       ) UPDATE nightmail_users u SET email=o.email,email_verified=o.verified,updated_at=now() FROM observed o
         WHERE u.id=${userId} AND (u.email,u.email_verified) IS DISTINCT FROM (o.email,o.verified) RETURNING u.id`);
       if(updated.rowCount) await db.execute(sql`DELETE FROM nightmail_sessions WHERE user_id=${userId}`);
+      // A support email's sign-in link (support-conversations.ts) it followed proves the mailbox it went to when that is the
+      // account's verified address, as an emailed link of the account service's does: spent here, so a sign-in refused
+      // after all, or another account's, leaves it unspent. It admits nobody: only an account already here gets it.
+      const proven = existing.rows.length && link && emailAtLogin && runtime.config.multiTenant && mailbox !== emailAtLogin.toLowerCase()
+        ? await spendSupportLink(db, runtime.config, link, emailAtLogin) ?? mailbox : mailbox;
       // This sign-in proves the account's address is a mailbox its person reads now: recorded for email support, which
       // speaks for the account only within MAILBOX_PROOF_DAYS of such a proof (account-policy.ts mailboxProven).
-      if (mailbox) await db.execute(sql`UPDATE nightmail_users SET mailbox_proved=${mailbox},mailbox_proved_at=now() WHERE id=${userId} AND email_verified AND lower(email)=lower(${mailbox})`);
+      if (proven) await db.execute(sql`UPDATE nightmail_users SET mailbox_proved=${proven},mailbox_proved_at=now() WHERE id=${userId} AND email_verified AND lower(email)=lower(${proven})`);
       // The account's own slot when this browser already has it (signing in again replaces that session), else the
       // first slot without a live session. A sixth account is refused before anything is written.
       const { accounts } = await connectedAccounts(runtime, jar, db);
@@ -311,7 +318,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
       slot = same[0]?.slot ?? free!;
       if (same.length) await db.execute(sql`DELETE FROM nightmail_sessions WHERE token_hash=ANY(${sql.param(same.map(account => account.hash))}::text[])`);
       await db.execute(sql`INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,staff,expires_at) VALUES
-        (${await digest(session)},${userId},${claims.iss},${claims.sub},${mailbox ?? null},${staff},now()+interval '7 days')`);
+        (${await digest(session)},${userId},${claims.iss},${claims.sub},${proven ?? null},${staff},now()+interval '7 days')`);
     }));
   } catch (error) {
     if (!(error instanceof NotAdmitted)) throw error;
@@ -392,6 +399,14 @@ export async function accountSessionUser(runtime: Runtime, headers: Headers, req
   const {rows:[user]} = await runtime.db.execute<{id:string;email:string}>(sql`SELECT u.id,u.email FROM (${activeSession(runtime, jar)}) s
     JOIN nightmail_users u ON u.id=s.user_id ${requireCurrentEmail ? sql`WHERE u.email_verified AND lower(u.email)=lower(s.verified_email)` : sql``}`);
   return user ?? null;
+}
+
+/** The address the current dashboard session's sign-in proved a mailbox (account-policy.ts provenMailbox), or null. */
+export async function accountSessionMailbox(runtime: Runtime, headers: Headers) {
+  const jar = await sessionJar(runtime, headers);
+  if (!jar.slots.length) return null;
+  const { rows: [row] } = await runtime.db.execute<{ verified_email: string | null }>(sql`SELECT s.verified_email FROM (${activeSession(runtime, jar)}) s`);
+  return row?.verified_email ?? null;
 }
 
 /** The current dashboard session's subject and hosted staff status (decided at sign-in from the provider identity). */

@@ -2271,6 +2271,187 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
 
 // MCP profiles: one MCP connection is one account. Two entries of one client signed in as two accounts get two
 // approvals, each acting only in its own account's workspaces; `?profile=` is a label and never selects anything.
+// Production (Nov 2026): a member of a new workspace opened a support email's Continue link while signed in with GitHub
+// and got a bare 403 MAILBOX_SIGN_IN_REQUIRED five times. Claiming needs a sign-in that proves the mailbox; the refusal now
+// says the way through, an emailed sign-in link to the address the email came from (support-conversations.ts).
+test('Support email Continue: a sign-in that proves no mailbox gets 403 with the way through, a sign-in link to the email’s own address only, limited per conversation, address and network, with one answer whether or not it went out; following it proves the mailbox, keeps another account signed in, and the email is confirmed', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
+  const {supportLinkUrl} = await import('./src/signups.js');
+  const {SUPPORT_LINKS} = await import('./src/support-conversations.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  const origin = 'https://dashboard.example.org', issuer = 'https://support-link.example.org';
+  const googleAcr = 'urn:anomaly:acr:google', githubAcr = 'urn:anomaly:acr:github', emailAcr = 'urn:anomaly:acr:email';
+  const keys = generateKeyPairSync('ec',{namedCurve:'P-256'}), rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true',
+    ACCOUNT_REQUIRED_ACR:`${googleAcr} ${githubAcr} ${emailAcr}`, AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
+    db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+  // Account emails go out as the platform workspace's (account-notices.ts): a sign-in link is a notice row and its job.
+  const platform = `support-link-platform-${randomUUID()}`;
+  runtime.config.platformDomainWorkspace = platform;
+  // Existing accounts (signing in admits nobody new here): each signs in with GitHub, which proves no mailbox, or Google.
+  type Person = { subject: string; id: string; email: string; acr: string; provider: 'google' | 'github'; upstream?: { email: string; email_verified: boolean } };
+  const people: Person[] = [], conversations: string[] = [];
+  const account = async (email: string, acr = githubAcr, provider: Person['provider'] = 'github') => {
+    const p: Person = {subject:randomUUID(), id:randomUUID(), email, acr, provider};
+    await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[p.id,email.split('@')[0],email]);
+    await db.query('INSERT INTO nightmail_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)',[issuer,p.subject,p.id]);
+    people.push(p); return p;
+  };
+  cleanup(t,async()=>{
+    await db.query('DELETE FROM nightmail_signin_links WHERE conversation_id=ANY($1)',[conversations]);
+    await db.query('DELETE FROM support_conversations WHERE id=ANY($1)',[conversations]);
+    await db.query('DELETE FROM account_notices WHERE workspace_id=$1',[platform]);
+    await db.query('DELETE FROM jobs WHERE workspace_id=$1',[platform]);
+    await db.query('DELETE FROM nightmail_users WHERE id=ANY($1)',[people.map(p=>p.id)]);
+  });
+  const flows = new Map<string, { person: Person; nonce: string }>();
+  let pushed: URLSearchParams | undefined;
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    assert.equal(new URL(url).origin,issuer);
+    switch(new URL(url).pathname) {
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',pushed_authorization_request_endpoint:issuer+'/par',response_modes_supported:['query']});
+      case '/par': pushed = new URLSearchParams(String(init?.body)); return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
+      case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
+      case '/token': {
+        const flow = flows.get(new URLSearchParams(String(init?.body)).get('code')!)!, p = flow.person, now = Math.floor(Date.now()/1000);
+        const upstream = {[PROVIDER_IDENTITY_CLAIM]:{provider:p.provider,sub:`${p.provider}-${p.subject}`,...p.upstream ?? {email:p.email,email_verified:true}}};
+        const body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:p.subject,nonce:flow.nonce,acr:p.acr,email:p.email,email_verified:true,...upstream}].map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+        return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
+      }
+      default: throw Error('unexpected issuer endpoint');
+    }
+  });
+  // One browser: its cookie jar, as Set-Cookie leaves it. Each request comes from its own network (this run's own) unless one is named.
+  const jar = new Map<string,string>();
+  const store = (response: Response) => { for (const line of response.headers.getSetCookie()) { const [pair] = line.split(';'), name = pair!.slice(0,pair!.indexOf('=')), value = pair!.slice(name.length+1); if (!value || /max-age=0/i.test(line)) jar.delete(name); else jar.set(name,value); } return response; };
+  const cookie = () => [...jar].map(([name,value])=>`${name}=${value}`).join('; ');
+  const net = randomUUID().slice(0,4);
+  let peer = 0;
+  const request = (path: string, method = 'GET', body?: object, headers: Record<string,string> = {}) => Promise.resolve(app.fetch(new Request(origin+path,{method,
+    headers:{origin,cookie:cookie(),'content-type':'application/json','x-nightmail-client-ip':`2001:db8:${net}::${++peer}`,...headers},body:body?JSON.stringify(body):undefined}),runtime)).then(store);
+  const answer = async (response: Response) => [response.status, await response.json() as Json] as const;
+  // A sign-in from the page at callbackURL, the account service's chooser asked for as the emailed link's page does.
+  async function signIn(p: Person, callbackURL = origin+'/overview', select = false) {
+    const start = await request('/api/auth/sign-in/account','POST',{callbackURL,...select ? {prompt:'select_account'} : {}});
+    assert.equal(start.status,200);
+    assert.equal(pushed!.get('prompt'), select ? 'select_account' : null);
+    const code = randomUUID();
+    flows.set(code,{person:p,nonce:pushed!.get('nonce')!});
+    const done = store(await app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code,state:pushed!.get('state')!,iss:issuer}),{headers:{cookie:cookie(),'sec-fetch-site':'cross-site'}}),runtime));
+    const landed = new URL(done.headers.get('location')!);
+    return { landed: landed.pathname + landed.search, account: landed.searchParams.get('account') };
+  }
+  const as = (p: Person) => ({'x-nightmail-account':p.id});
+  const proof = async (p: Person) => (await db.query('SELECT u.mailbox_proved,s.verified_email FROM nightmail_users u LEFT JOIN nightmail_sessions s ON s.user_id=u.id AND s.expires_at>now() WHERE u.id=$1 ORDER BY s.expires_at DESC LIMIT 1',[p.id])).rows[0];
+  // An email support couldn't verify, waiting for its sender's sign-in (support-conversations.ts registers it so).
+  const hex = () => randomUUID().replaceAll('-',''), base32 = 'abcdefghijklmnopqrstuvwxyz234567';
+  async function waiting(address: string) {
+    const id = `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`, message = `msg_${hex()}`;
+    await db.query("INSERT INTO support_conversations(id,channel,pending_address,verification,mode) VALUES($1,'email',$2,'none','pending_signin')",[id,address.toLowerCase()]);
+    await db.query('INSERT INTO support_email_signins(conversation_id,message_id,address) VALUES($1,$2,$3)',[id,message,address.toLowerCase()]);
+    conversations.push(id); return { id, message };
+  }
+  const claim = (c: { id: string; message: string }, headers: Record<string,string>) => request(`/v1/support-conversations/${c.id}/claim`,'POST',{messageId:c.message},headers);
+  const pending = (c: { id: string; message: string }, headers: Record<string,string>) => request(`/v1/support-conversations/${c.id}/claim?messageId=${c.message}`,'GET',undefined,headers);
+  const ask = (c: { id: string; message: string }, body: object = {}, headers: Record<string,string> = {}) => request(`/v1/support-conversations/${c.id}/sign-in-link`,'POST',{messageId:c.message,...body},headers);
+  const links = async (c: { id: string }) => (await db.query(`SELECT l.id,l.email,l.message_id,EXISTS (SELECT FROM account_notices n WHERE n.workspace_id=$2 AND n.kind='signin_link' AND n.data->>'linkId'=l.id) AS emailed
+    FROM nightmail_signin_links l WHERE l.conversation_id=$1 ORDER BY l.created_at,l.id`,[c.id,platform])).rows as { id: string; email: string; message_id: string; emailed: boolean }[];
+
+  // Ada signed in with GitHub: her account's address is verified, but GitHub doesn't show she reads that mailbox now.
+  const ada = await account(`ada-${hex().slice(0,8)}@example.net`), bob = await account(`bob-${hex().slice(0,8)}@example.org`);
+  assert.equal((await signIn(ada)).account,ada.id);
+  assert.deepEqual(await proof(ada),{mailbox_proved:null,verified_email:null});
+  const mine = await waiting(ada.email), masked = 'a•••@e•••.net';
+  // The refusal keeps its code, is not retryable as it is, and names the way through: the address the email came from,
+  // masked, and the request that emails a sign-in link there.
+  const way = {address:masked,nextStep:{operationId:'sendSupportSignInLink',method:'POST',path:`/v1/support-conversations/${mine.id}/sign-in-link`,body:{messageId:mine.message}}};
+  for (const refused of [await pending(mine,as(ada)), await claim(mine,as(ada))]) {
+    const [status, body] = await answer(refused);
+    assert.deepEqual([status,body.error.code,body.error.retryable,body.error.details],[403,'MAILBOX_SIGN_IN_REQUIRED',false,[way]]);
+  }
+  // An email that waits for nobody (unknown, closed or older than its sign-in's 7 days) is the plain 403, with no way through.
+  const [, unknown] = await answer(await pending({id:`conv_${'a'.repeat(26)}`,message:mine.message},as(ada)));
+  assert.deepEqual([unknown.error.code,unknown.error.details],['MAILBOX_SIGN_IN_REQUIRED',undefined]);
+
+  // Only a signed-in session from the dashboard asks, and only for an email that waits: nothing is written otherwise.
+  assert.equal((await request(`/v1/support-conversations/${mine.id}/sign-in-link`,'POST',{messageId:mine.message},{...as(ada),origin:'https://evil.example'})).status,403);
+  assert.equal((await app.fetch(new Request(origin+`/v1/support-conversations/${mine.id}/sign-in-link`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({messageId:mine.message})}),runtime)).status,401);
+  assert.deepEqual(await answer(await ask(mine,{},{authorization:`Bearer nm_${hex()}`})).then(([s,b])=>[s,b.error.code]),[403,'DASHBOARD_AUTH_REQUIRED']);
+  assert.equal((await ask({id:`conv_${'b'.repeat(26)}`,message:mine.message},{},as(ada))).status,404);
+  assert.deepEqual(await links(mine),[]);
+
+  // The button: one link, to the email's own address, whatever else the body says.
+  const started = Date.now(), [status, sent] = await answer(await ask(mine,{email:'mallory@evil.example',address:'mallory@evil.example',to:['mallory@evil.example']},as(ada)));
+  assert.ok(Date.now() - started >= 450,'The answer waits for its fixed time.');
+  assert.deepEqual([status,sent],[202,{requested:true,address:masked}]);
+  const [first] = await links(mine);
+  assert.deepEqual(await links(mine),[{id:first!.id,email:ada.email,message_id:mine.message,emailed:true}]);
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM nightmail_signin_links WHERE email LIKE 'mallory%'")).rows[0].n,0);
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1",[platform])).rows[0].n,1,'One email, for that one link.');
+  // An address no account has: the same answer, and the request counts the same, but nothing is emailed.
+  const nobody = await waiting(`ann-${hex().slice(0,8)}@elsewhere.net`);
+  assert.deepEqual(await answer(await ask(nobody,{},as(ada))),[202,{requested:true,address:masked}]);
+  assert.deepEqual((await links(nobody)).map(l=>l.emailed),[false]);
+
+  // Limits on top of each network's: a day, three per conversation, then five per address over its conversations, each
+  // refusal a plain 429. Requests count whether or not mail went out, so the address without an account is refused
+  // exactly as Ada's is.
+  for (const c of [mine, nobody]) {
+    while ((await links(c)).length < SUPPORT_LINKS.perConversation) assert.equal((await ask(c,{},as(ada))).status,202);
+    const [over, refusal] = await answer(await ask(c,{},as(ada)));
+    assert.deepEqual([over,refusal.error.code,refusal.error.retryable],[429,'SIGN_IN_LINK_LIMIT',false]);
+  }
+  const again = await waiting(ada.email);
+  for (let i = SUPPORT_LINKS.perConversation; i < SUPPORT_LINKS.perAddress; i++) assert.equal((await ask(again,{},as(ada))).status,202);
+  assert.deepEqual(await answer(await ask(again,{},as(ada))).then(([s,b])=>[s,b.error.code]),[429,'SIGN_IN_LINK_LIMIT']);
+  assert.equal((await links(again)).length,SUPPORT_LINKS.perAddress-SUPPORT_LINKS.perConversation);
+  // Per network: its pending sign-ins (eight), whatever the conversation, before anything is looked up.
+  const network = {'x-nightmail-client-ip':`2001:db8:${net}:77::1`}, lost = {id:`conv_${'c'.repeat(26)}`,message:mine.message};
+  for (let i = 0; i < 8; i++) assert.equal((await ask(lost,{},{...as(ada),...network})).status,404);
+  assert.deepEqual(await answer(await ask(again,{},{...as(ada),...network})).then(([s,b])=>[s,b.error.code]),[429,'AUTH_STATE_LIMIT']);
+
+  // Bob is signed in too, in the same browser. The emailed link opens the page, which signs in with the account
+  // service's chooser, the link in its return URL. Signed in as Bob (another account), it proves nothing and stays unspent.
+  assert.equal((await signIn(bob)).account,bob.id);
+  const url = new URL(supportLinkUrl(runtime.config,first!.id,mine.id,mine.message));
+  assert.equal(url.pathname,`/support/continue/${mine.id}/${mine.message}`);
+  assert.deepEqual(await signIn(bob,url.href,true),{landed:`/support/continue/${mine.id}/${mine.message}?account=${bob.id}`,account:bob.id},'The page opens without the link.');
+  assert.deepEqual([await proof(bob),(await links(mine)).length],[{mailbox_proved:null,verified_email:null},SUPPORT_LINKS.perConversation]);
+  // As Ada, still with GitHub: the link proves her mailbox, her session in this browser is replaced by one that says so,
+  // and Bob's stays.
+  assert.deepEqual(await signIn(ada,url.href,true),{landed:`/support/continue/${mine.id}/${mine.message}?account=${ada.id}`,account:ada.id});
+  assert.deepEqual(await proof(ada),{mailbox_proved:ada.email,verified_email:ada.email});
+  assert.ok(!(await links(mine)).some(l=>l.id===first!.id),'Spent.');
+  const connected = await (await request('/api/auth/accounts')).json() as { accounts: { id: string }[] };
+  assert.deepEqual(connected.accounts.map(a=>a.id).sort(),[ada.id,bob.id].sort());
+  assert.equal(((await (await request('/api/auth/get-session','GET',undefined,as(bob))).json()) as { id: string }).id,bob.id);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM nightmail_sessions WHERE user_id=$1 AND expires_at>now()',[ada.id])).rows[0].n,1);
+  // The page, back as Ada, shows the email and confirms it: nothing is lost.
+  assert.deepEqual((await answer(await pending(mine,as(ada))))[0],200);
+  assert.deepEqual(await answer(await claim(mine,as(ada))),[200,{id:mine.id,messageId:mine.message,mode:'non_member'}]);
+  assert.deepEqual((await db.query('SELECT s.user_id,s.verification,si.user_id AS signed_by FROM support_conversations s JOIN support_email_signins si ON si.conversation_id=s.id WHERE s.id=$1',[mine.id])).rows,
+    [{user_id:ada.id,verification:'signin',signed_by:ada.id}]);
+  // A link works once: signing in again with GitHub and following it again proves nothing.
+  await signIn(ada);
+  assert.equal((await signIn(ada,url.href,true)).account,ada.id);
+  assert.equal((await proof(ada)).verified_email,null);
+
+  // A session whose sign-in proved that very mailbox, for another account (Google proved a Gmail address that isn't the
+  // account's): the address is shown whole.
+  const gmail = `cara-${hex().slice(0,8)}@gmail.com`, cara = await account(`cara-${hex().slice(0,8)}@example.com`, googleAcr, 'google');
+  cara.upstream = {email:gmail,email_verified:true};
+  assert.equal((await signIn(cara)).account,cara.id);
+  const hers = await waiting(gmail);
+  const [, whole] = await answer(await pending(hers,as(cara)));
+  assert.deepEqual([whole.error.code,whole.error.details[0].address],['MAILBOX_SIGN_IN_REQUIRED',gmail]);
+  assert.deepEqual(await answer(await ask(hers,{},as(cara))),[202,{requested:true,address:gmail}]);
+  assert.deepEqual((await links(hers)).map(l=>l.emailed),[false],'No account has that address: nothing is emailed.');
+});
+
 test('MCP profiles: one client signed in as two accounts gets two approvals that stay apart', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
