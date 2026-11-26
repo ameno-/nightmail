@@ -4,7 +4,7 @@ import { dayOf, fitWords, formatCount, money, nightmail, quote, shownSources, ty
 import { billAt, ORDERED } from '../page/comparison.ts'
 import { factsSection } from '../page/facts.ts'
 import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
-import { month, spelled } from './alternatives.ts'
+import { DASH, month, spelled } from './alternatives.ts'
 
 // /email-for-ai-agents: what a month of email costs for agents, on Nightmail and on every agent-inbox service the
 // comparisons price (compare/<slug>.ts, the agents group), in the shape of the other price pages (Ryan: "headline, button,
@@ -46,9 +46,9 @@ export function emailForAgents(): Doc {
   const head = ['Agent inboxes', ...AGENT_SIZES.map(formatCount)]
   const nightmailRow = { cells: [[productName], ...ours.map(b => [{ ours: b.ours, sent: b.u.sent, received: b.u.received }])] as Text[] }
   const row = ({ c, bills }: (typeof group)[number]) => ({ cells: [[{ text: c.offer.vendor, href: c.path }], ...bills.map(b => [b.theirs ?? '—'])] as Text[] })
-  const dash = (rows: (typeof group)[number][]) => rows.some(r => r.bills.some(b => b.theirsCents === null)) ? ' A dash: no plan priced at that size.' : ''
+  const dash = (rows: (typeof group)[number][]) => rows.some(r => r.bills.some(b => b.theirsCents === null)) ? DASH : ''
   const claim = `${productName} costs less than each service here at every size shown.`
-  const terms = `${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month${allFree ? `, so up to ${formatCount(freeInboxes)} inboxes with this mail cost nothing` : ''}.`
+  const terms = `${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month${allFree ? `, so up to ${formatCount(freeInboxes)} inboxes with this mail cost nothing on a domain of your own (the built-in domain sends only to your workspace’s members)` : ''}.`
   const table = (rows: (typeof group)[number][], note: string): Table => ({ kind: 'table', numeric: [1, 2, 3], caption: [note], head, rows: [nightmailRow, ...rows.map(row)] })
   const sections: Section[] = [
     { id: 'agents', title: `Email for AI agents: a month at ${AGENT_SIZES.join(', ')} inboxes`, quiet: true, blocks: [table(shown, `${claim} Each inbox receives ${m.receivedPerInbox} and sends ${m.sentPerInbox} emails a month. ${terms} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash(shown)}`)] },
