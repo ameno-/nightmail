@@ -75,17 +75,19 @@ export function linksPaused(domain: string) {
 
 const linkDay = sql`(now() AT TIME ZONE 'UTC')::date`;
 // The first positive day and today's use come from the same ledger that release writes at commit.
+// Without a valid warm-up policy (NIGHTMAIL_LINK_WARMUP unset, or invalid and so disabled with OPTIONAL_FEATURE_DISABLED)
+// there is no allowance to keep: nothing is paced, as before the policy existed.
 export async function linkBudget(db: DbExecutor, config: Config, workspaceId?: string) {
-  const host = config.linkHost;
-  if (!host) return null;
+  const host = config.linkHost, p = config.linkWarmup;
+  if (!host || !p) return null;
   const [r] = (await db.execute<{ age: number; used: number; mine: number; until: string }>(sql`SELECT
     coalesce(${linkDay}-(SELECT min(day) FROM link_fallback_days WHERE host=${host} AND recipients>0),0) AS age,
     coalesce(sum(recipients),0)::float8 AS used,coalesce(sum(recipients) FILTER (WHERE workspace_id=${workspaceId ?? null}),0)::float8 AS mine,
     ((${linkDay}+1)::timestamp AT TIME ZONE 'UTC')::text AS until
     FROM link_fallback_days WHERE host=${host} AND day=${linkDay} AND recipients>0`)).rows;
-  const p = config.linkWarmup, age = Math.max(0, r!.age);
-  const limit = !p ? 0 : age >= p.days-1 ? p.full : Math.floor(p.initial * (p.full/p.initial)**(age/(p.days-1)));
-  const share = p ? Math.max(1, Math.floor(limit*p.workspacePercent/100)) : 0;
+  const age = Math.max(0, r!.age);
+  const limit = age >= p.days-1 ? p.full : Math.floor(p.initial * (p.full/p.initial)**(age/(p.days-1)));
+  const share = Math.max(1, Math.floor(limit*p.workspacePercent/100));
   return { used: r!.used, limit, left: Math.max(0,Math.min(limit-r!.used, share-r!.mine)), until: new Date(r!.until).toISOString() };
 }
 
@@ -95,12 +97,13 @@ export const linkRoot = async (host: string) => (await placementRoot(host)).root
 export async function linkAllowance(db: DbExecutor, config: Config, wid: string, origin: string) {
   const host = new URL(origin).hostname;
   if (origin === config.publicUrl || config.previousOrigins?.includes(origin)) return null;
-  const root = await linkRoot(host);
-  await db.execute(lockLinkDomain(root));
+  const root = await linkRoot(host), budgeted = host === config.linkHost && !!config.linkWarmup;
+  // The lock orders budgeted releases with each other and with a confirmed listing; any other origin only reads the hold.
+  if (budgeted) await db.execute(lockLinkDomain(root));
   const held = (await db.execute(sql`SELECT 1 FROM deliverability_checks WHERE kind='dbl' AND subject=${root} AND held_at IS NOT NULL`)).rows.length > 0;
   if (held) return { left: 0, reason: 'link_listing' as const, until: new Date(Date.now()+60_000).toISOString() };
-  if (host !== config.linkHost) return null;
-  const b = (await linkBudget(db, config, wid))!;
+  const b = budgeted ? await linkBudget(db, config, wid) : null;
+  if (!b) return null;
   return { left: b.left, reason: 'link_budget' as const, until: b.until };
 }
 /** Whether the workspace may link on the link domain: not paused (a paused connection, an operator's pause or the abuse
