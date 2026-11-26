@@ -8,6 +8,7 @@ import { builtins, ctxFields, emailFields, endpointPayloads, RITUALS_PER_ADDRESS
 import { webhookSignatureGuide } from '../../../../api/src/webhook-signature-guide'
 import { agentSetupGuide } from '../../../../api/src/agent-setup-guide'
 import { builtinDomainGuide } from '../../../../api/src/builtin-limits'
+import { GUIDE_NAMES } from './guide-names'
 import { McpSetup } from './agent-setup'
 import { credentials } from './credentials'
 import { imapPorts, smtpPorts, useMailServers } from './mail-settings'
@@ -69,9 +70,10 @@ const ruleExample = `export default function route(email, ctx) {
 
 const endpointsLine = 'Named places mail can be sent: Slack, Discord, a webhook or a forward.'
 
+const named = (id: string) => GUIDE_NAMES.find(guide => guide.id === id)!
 export const guides: Guide[] = [
   {
-    id: 'receiving', title: 'Receiving', summary: 'How mail reaches your domain and where it goes: addresses, routes, rules and endpoints.',
+    ...named('receiving'),
     body: () => <>
       <Section title="What happens to an email">
         <p>Mail sent to one of your addresses arrives at {productName} through your domain’s receiving MX record. {productName} finds the address’s <strong>route</strong>, runs its <strong>rules</strong>, then delivers it: to the address’s Inbox, and to any <strong>endpoints</strong> its route or rules name. You read it in Receiving → Inbox, over the API or from an agent.</p>
@@ -102,7 +104,7 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'rules', title: 'Rules and AI decisions', summary: `Ready-made or scripted rules that post, forward, junk and label mail, and the questions they can ask ${productName}’s AI.`,
+    ...named('rules'),
     body: () => <>
       <Section title="What a rule is">
         <p>A rule is a short script that runs on every email sent to the addresses it’s attached to. It reads the email and chooses what happens: junk it, label it, post it to Slack, send it to a webhook, forward it. It can’t do anything else: no loops, no clock, no network calls of its own, so it always finishes and does the same thing for the same email.</p>
@@ -136,7 +138,7 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'topics', title: 'Topics and unsubscribes', summary: 'Let people stop one kind of marketing email, such as events or product news, and keep the rest.',
+    ...named('topics'),
     body: () => <>
       <Section title="What a topic is">
         <p>A topic is a kind of marketing email you send: <em>Product updates</em>, <em>Events</em>, <em>Newsletter</em>. Give a campaign or a marketing send a topic, and its unsubscribe link stops that topic alone: the person keeps getting your other marketing. Unsubscribing from everything is always there too, and it always wins. Transactional email has no topic and no unsubscribe.</p>
@@ -165,7 +167,7 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'endpoints', title: 'Endpoints and routes', summary: 'Where mail can go besides the Inbox, and the difference between a route and a rule.',
+    ...named('endpoints'),
     body: () => <>
       <Section title="Endpoints">
         <p>{endpointsLine} Create them in <Link to="/receiving?tab=destinations">Mail routing → Destinations</Link>; each has a name rules call it by. Send a test from its ⋯ menu.</p>
@@ -186,7 +188,7 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'inboxes', title: 'Agent inboxes', summary: 'Expiring addresses that agents and end-to-end tests create, wait on and read.',
+    ...named('inboxes'),
     body: () => <>
       <Section title="What an agent inbox is">
         <p>A random, unguessable address on your receiving domain that lives for a set time: an hour to 30 days. Agents and tests use them to receive sign-up codes, magic links and replies, then throw them away. A <strong>sandbox</strong> inbox has a made-up address that never gets real mail: you send it test mail yourself, so it works before any DNS is set up.</p>
@@ -205,7 +207,7 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'mcp', title: 'Connect an agent (MCP)', summary: `Let OpenCode, Claude Code, Codex, Cursor, ChatGPT and other agents work with ${productName}: as you, with an API key, or with one inbox.`,
+    ...named('mcp'),
     body: () => <>
       <Section title="Ways to connect">
         <Table head={['Connect', 'What the agent can reach', 'Set up']} rows={[
@@ -222,7 +224,7 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'keys', title: 'Keys and tokens', summary: 'API keys, SMTP logins, agent tokens and app passwords.',
+    ...named('keys'),
     body: () => <>
       <Section title="Which one do I need?">
         <Table head={['Credential', 'What it does', 'Where']} rows={credentials.map(c => [<strong key="n">{c.name}</strong>, c.line, c.where])} />
@@ -234,7 +236,7 @@ export const guides: Guide[] = [
   },
   {
     // The same words and code as /docs.md and /llms.txt (api/src/agent-setup-guide.ts).
-    id: agentSetupGuide.id, title: agentSetupGuide.title, summary: agentSetupGuide.summary,
+    ...named(agentSetupGuide.id),
     body: () => <Section title="A setup token or a device code">
       <p>{agentSetupGuide.text}</p>
       <Code label="agent setup">{agentSetupGuide.code}</Code>
@@ -243,7 +245,7 @@ export const guides: Guide[] = [
   },
   {
     // The same words as /docs.md and /llms.txt (api/src/builtin-limits.ts).
-    id: builtinDomainGuide.id, title: builtinDomainGuide.title, summary: builtinDomainGuide.summary,
+    ...named(builtinDomainGuide.id),
     body: () => <Section title="What it sends">
       <p>{builtinDomainGuide.text}</p>
       <p>Find it first in <Link to="/domains">Domains</Link>.</p>
@@ -251,7 +253,7 @@ export const guides: Guide[] = [
   },
   {
     // The same words and code as /docs.md and /llms.txt (api/src/webhook-signature-guide.ts).
-    id: webhookSignatureGuide.id, title: webhookSignatureGuide.title, summary: webhookSignatureGuide.summary,
+    ...named(webhookSignatureGuide.id),
     body: () => <Section title="Check the Webhook-Signature header">
       <p>{webhookSignatureGuide.text}</p>
       <Code label="webhook signature check">{webhookSignatureGuide.code}</Code>

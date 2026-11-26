@@ -7,6 +7,9 @@
 export const SITE_INDEX = '/llms-site.txt';
 /** Where a page under /compare/ that the build didn't make is: nowhere (404), never the dashboard. */
 export const isMissingComparePage = (pathname: string) => pathname === '/compare' || pathname.startsWith('/compare/');
+/** Where a reference page the build didn't make is (app/docs-pages.ts writes one per operation): not found, rather than
+ *  the docs' "Page not found" with 200, which search engines count as a soft 404. */
+export const isMissingDocsPage = (pathname: string) => pathname.startsWith('/docs/api/');
 
 export function withSiteIndex(llms: string, site: string): string {
   const lines = site.trim();

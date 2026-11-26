@@ -9,7 +9,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
@@ -375,7 +375,7 @@ export default {
       // A comparison the build has no page for (app/price-pages.ts writes one per entry, served before the Worker): not
       // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
       // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
-      if (isMissingComparePage(pathname)) return untransformed(shell, request, 404);
+      if (isMissingComparePage(pathname) || isMissingDocsPage(pathname)) return untransformed(shell, request, 404);
       return untransformed(shell, request);
     }
     // A linked campaign image (src/linked-images.ts) is the same bytes for every reader: once answered, this colo keeps it
