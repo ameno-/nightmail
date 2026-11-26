@@ -21911,7 +21911,7 @@ describe('List hygiene', () => {
       // This workspace's mail to the dead domain mostly failed for good (src/delivery-history.ts writes this row).
       await db.query('INSERT INTO delivery_domain_stats (workspace_id, domain, sent, hard_bounced, user_unknown, first_seen, last_seen) VALUES ($1, $2, 20, 15, 15, now(), now())', [wid, dead]);
       const before = runtime.config.listRisk;
-      runtime.config.listRisk = { FLAGGED_SOURCE: { elevated: 0.01, high: 0.1 }, DEAD_DOMAINS: { elevated: 0.01, high: 0.5 }, NEVER_MAILED: { elevated: 0.5, high: 0.6 } };
+      runtime.config.listRisk = { FLAGGED_SOURCE: { elevated: 0.05, high: 0.12 }, DEAD_DOMAINS: { elevated: 0.2, high: 0.4 }, NEVER_MAILED: { elevated: 0.7, high: 0.9 } };
       try {
         const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Risk', from: 'sender@example.com', subject: 'News', html: '<p>Hello there.</p>', audience: { listId: list.id } }), 201);
         const preview = ok(await local('GET', '/v1/campaigns/' + campaign.id + '/audience?readiness=true'));
@@ -21934,8 +21934,8 @@ describe('List hygiene', () => {
       } finally { runtime.config.listRisk = before; }
       // Without the private lines: values, no band.
       assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.5 }, null), { band: null, factors: [] });
-      assert.deepEqual(bandListRisk({ NEVER_MAILED: 1 }, { NEVER_MAILED: { elevated: 0.5, high: 0.6 } }), { band: 'elevated', factors: [{ code: 'NEVER_MAILED', level: 'elevated' }] });
-      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.001 }, { FLAGGED_SOURCE: { elevated: 0.01 } }), { band: 'low', factors: [] });
+      assert.deepEqual(bandListRisk({ NEVER_MAILED: 1 }, { NEVER_MAILED: { elevated: 0.7, high: 0.9 } }), { band: 'elevated', factors: [{ code: 'NEVER_MAILED', level: 'elevated' }] });
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.001 }, { FLAGGED_SOURCE: { elevated: 0.05 } }), { band: 'low', factors: [] });
     });
   });
 });
