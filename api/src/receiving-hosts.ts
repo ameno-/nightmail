@@ -6,7 +6,7 @@ import type { domains } from './db/operations.js';
 import { checkMx, expectedMx } from './mailbox-dns.js';
 import { queueReconcile } from './mailbox-setup.js';
 import { reservedPlatformName } from './domain-claims.js';
-import { derivedReadiness, dnsUnavailable, hostedDomain, recheckJob, type HostedDomain } from './operations.js';
+import { derivedReadiness, dnsUnavailable, followMxJob, hostedDomain, recheckJob, type HostedDomain } from './operations.js';
 import { establishedHost, inspectReceivingHost, type ReceivingIssue } from './receiving-host.js';
 import { claimProjection, hostGraceStart } from './states.js';
 import { productName } from './brand.js';
@@ -142,6 +142,7 @@ async function addHosted(c: Ctx, wid: string, row: HostedDomain, input: AddInput
     await saveProjection(db, current, wid, rows.map(r => r.id === saved.id ? saved : r).concat(rows.some(r => r.id === saved.id) ? [] : [saved]));
     // Check it now rather than at the next hourly check: it routes as soon as its MX answers.
     await db.execute(recheckJob(wid, sql`SELECT ${row.id}::text AS id,${current.token}::uuid AS token`));
+    await db.execute(followMxJob(wid, sql`SELECT ${row.id}::text AS id,${current.token}::uuid AS token`));
     await recordAudit(db, c, { action: 'inbound_host.create', workspaceId: wid, target: { type: 'inbound_host', id: saved.id }, after: { domainId: row.id, name: host, catchAll: saved.catchAll, confirm: !!input.confirm, restored: !!same } });
     return { row: saved, created: true };
   }).catch((e: unknown) => {
