@@ -10256,6 +10256,56 @@ describe('Hosted MCP OAuth and tools', () => {
           ok(await send('POST', `${inbox}/${held}/done`, keyed(operator)));
           assert.deepEqual([(await row(held)).needsYou, await counted() - before], [null, 1]);
         });
+
+        await t.test('12 held answers: staff send one as the agent wrote it (plain text by email, as written in chat) or edited, as their own queued reply, or discard it; one held for shrunk access or written by an earlier build is never sent, only replaced by a fresh reply; each is decided once, on the trail', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const conv = await stranger(), asIs = msg(), toEdit = msg(), toDrop = msg(), access = msg(), earlier = msg(), sentAnswer = msg(), question = msg();
+          ok(reply(await platform.mirrorMessages(conv, [{ id: sentAnswer, author: 'agent', kind: 'reply', text: 'Hello.', delivery: 'sent' }, { id: question, author: 'customer', text: 'Why was my email held?' },
+            { id: asIs, author: 'agent', kind: 'held', text: 'It was **held** for review; open `Logs` to see it released.', delivery: 'held', reason: 'paused' },
+            { id: toEdit, author: 'agent', kind: 'held', text: 'It was held.', delivery: 'held', reason: 'gate' },
+            { id: toDrop, author: 'agent', kind: 'held', text: 'Maybe.', delivery: 'held', reason: 'closed' },
+            { id: access, author: 'agent', kind: 'held', text: 'Your account **Acme** is suspended.', delivery: 'held', reason: 'access' },
+            { id: earlier, author: 'agent', kind: 'held', text: 'Your 61 bounced emails were to old lists.', delivery: 'held', reason: 'earlier' }])));
+          const drafts = `${inbox}/${conv}/drafts`;
+          error(await send('POST', `${drafts}/${asIs}/send`, keyed(reader)), 403, 'OPERATOR_REQUIRED');
+          error(await send('POST', `${drafts}/${asIs}/send`, session(operator)), 422);
+          for (const id of [sentAnswer, question, msg()]) error(await send('POST', `${drafts}/${id}/send`, keyed(operator)), 404);
+          // As written, by email: plain text, as the agent's email answers are sent.
+          const key = unique('draft'), sent = ok(await send('POST', `${drafts}/${asIs}/send`, keyed(operator, key)), 201);
+          assert.deepEqual([sent.author, sent.kind, sent.text, sent.delivery, sent.staff.userId], ['staff', 'reply', 'It was held for review; open Logs to see it released.', 'queued', operator.userId]);
+          assert.deepEqual(ok(await send('POST', `${drafts}/${asIs}/send`, keyed(operator, key)), 201), sent, 'The same key answers the same reply.');
+          error(await send('POST', `${drafts}/${asIs}/send`, keyed(operator)), 409, 'SUPPORT_DRAFT_DECIDED');
+          error(await send('POST', `${drafts}/${asIs}/discard`, keyed(operator)), 409, 'SUPPORT_DRAFT_DECIDED');
+          // A reply reached the customer after it was written: not as written (it answers an earlier moment), only edited.
+          for (const body of [undefined, { text: 'It was held.' }]) error(await send('POST', `${drafts}/${toEdit}/send`, keyed(operator), body as Json | undefined), 409, 'SUPPORT_DRAFT_STALE');
+          const edited = ok(await send('POST', `${drafts}/${toEdit}/send`, keyed(operator), { text: 'It was held by our checks; we released it.' }), 201);
+          const dropped = ok(await send('POST', `${drafts}/${toDrop}/discard`, keyed(operator)));
+          assert.deepEqual([dropped.draft.outcome, dropped.draft.by.userId, dropped.draft.replyId, dropped.delivery], ['discarded', operator.userId, null, 'held']);
+          error(await send('POST', `${drafts}/${toDrop}/send`, keyed(operator)), 409, 'SUPPORT_DRAFT_DECIDED');
+          // Held for shrunk access, or written by an earlier build: never sent, as written, with its text, or as its plain text.
+          for (const [id, body] of [[access, undefined], [access, { text: 'Your account **Acme** is suspended.' }], [access, { text: 'Your account Acme is suspended.' }], [earlier, undefined], [earlier, { text: 'Your 61 bounced emails were to old lists.' }]] as const) {
+            const refused = error(await send('POST', `${drafts}/${id}/send`, keyed(operator), body as Json | undefined), 409, 'SUPPORT_DRAFT_FRESH_REPLY');
+            assert.match(refused.message, /so it can’t be sent\. Write a fresh reply\.$/);
+          }
+          const replaced = ok(await send('POST', `${drafts}/${access}/send`, keyed(operator), { text: 'Please sign in to Nightmail and press Help, so we can look at your account with you.' }), 201);
+          ok(await send('POST', `${drafts}/${earlier}/discard`, keyed(operator)));
+          const detail = ok(await send('GET', `${inbox}/${conv}`, session(reader)));
+          assert.deepEqual(detail.messages.filter((m: Json) => m.draft).map((m: Json) => [m.id, m.draft.outcome, m.draft.replyId]),
+            [[asIs, 'sent', sent.id], [toEdit, 'edited', edited.id], [toDrop, 'discarded', null], [access, 'replaced', replaced.id], [earlier, 'discarded', null]]);
+          assert.deepEqual(ok(reply(await platform.pullOutbox(conv))).data.map((r: Json) => r.text),
+            ['It was held for review; open Logs to see it released.', 'It was held by our checks; we released it.', 'Please sign in to Nightmail and press Help, so we can look at your account with you.'], 'What goes out is the staff reply, delivered like any other; nothing of a refused draft.');
+          assert.deepEqual([ok(reply(await platform.inboxState(conv))).agentState, detail.conversation.lastAuthor], ['paused', 'staff']);
+          assert.deepEqual((await db.query(`SELECT action, count(*)::int AS n FROM audit_events WHERE target_id = $1 AND action LIKE 'support.draft_%' AND internal GROUP BY action ORDER BY action`, [conv])).rows,
+            [{ action: 'support.draft_discard', n: 2 }, { action: 'support.draft_send', n: 3 }]);
+          // In chat, as written: the panel shows Markdown, as it shows the agent's own answers.
+          const chatConv = await chat(owner), chatDraft = msg();
+          ok(reply(await platform.mirrorMessages(chatConv, [{ id: chatDraft, author: 'agent', kind: 'held', text: 'Press **Verify** on the domain.', delivery: 'held', reason: 'paused' }])));
+          assert.equal(ok(await send('POST', `${inbox}/${chatConv}/drafts/${chatDraft}/send`, keyed(operator)), 201).text, 'Press **Verify** on the domain.');
+          ok(reply(await platform.closeConversation(conv)));
+          const late = msg();
+          await db.query("INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, delivery) VALUES ($1, $2, 99, 'agent', 'held', 'Late.', 'held')", [late, conv]);
+          error(await send('POST', `${drafts}/${late}/send`, keyed(operator)), 409, 'SUPPORT_CONVERSATION_CLOSED');
+        });
       } finally { globalThis.fetch = previous; }
     });
   });
