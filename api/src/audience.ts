@@ -894,7 +894,7 @@ export type ListContactResult = 'added' | 'updated' | 'deleted' | 'invalid' | 'n
  * distinguish it from a manual addition. Takes the list, then the contact, as an import does.
  */
 export async function upsertListContact(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string,
-  input: { email: string; name: string | null; fromWaitlist?: boolean; consentAgain?: boolean; properties: Record<string, string | number | boolean | null>; consent: { source: string; evidence: string; occurredAt: string } }): Promise<ListContactResult> {
+  input: { email: string; name: string | null; fromWaitlist?: boolean; consentAgain?: boolean; properties: Record<string, string | number | boolean | null>; consent: { source: string; evidence: string; occurredAt: string; policyVersion?: string } }): Promise<ListContactResult> {
   const parsed = ContactInput.safeParse({ email: input.email, ...input.name ? { name: input.name } : {}, properties: input.properties });
   if (!parsed.success) return 'invalid';
   const { email, name, properties } = parsed.data;

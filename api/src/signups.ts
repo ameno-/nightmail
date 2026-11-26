@@ -354,13 +354,14 @@ async function syncSignupsList(runtime: Runtime, list: SignupsList, until: numbe
 // of one list in the platform workspace named "Nightmail customers", for product news and service status. Nothing is set
 // by hand. The first run with someone to write makes the list, under an advisory lock so two runs make one, and records
 // its ID (nightmail_customers_list): it is found by ID whatever it is renamed to. Once deleted it stays deleted and nothing
-// is written (CUSTOMERS_LIST_MISSING, hourly); a migration deleting the row makes a new one, which every account is
-// written to again. Each account is written once per list and address (nightmail_customers), with properties to segment
+// is written (CUSTOMERS_LIST_MISSING, hourly). A migration deleting the row makes a new one, which every account is
+// written to again; each account's membership of the old list goes as it moves, so an old list that still exists (renamed
+// rather than deleted) ends without everyone this put there. Each account is written once per list and address (nightmail_customers), with properties to segment
 // by: signed_up_at (ISO 8601 in UTC), the sign-up's time for an account that took a place (joined_via sign-up), else when
 // the account was made (joined_via admitted: an invitation, staff or an operator let it in); email_domain and mailbox as
 // the sign-ups list has them; and the sign-up's name, else the account's. Consent, through upsertListContact: a contact
-// with no decision is subscribed with the source "Nightmail account" (legitimate interests, not an opt-in), recorded again
-// for one already subscribed so its history says why it is on this list; an opt-out stays an opt-out (one decision per
+// with no decision is subscribed with the source "Nightmail account" (legitimate interests, not an opt-in) and the notice it
+// rests on (CUSTOMERS_NOTICE), recorded again for one already subscribed so its history says why it is on this list; an opt-out stays an opt-out (one decision per
 // contact in the workspace), suppression is never touched and a deleted contact stays deleted. An account whose address
 // changes moves to the new one; one deleted, owning no workspace or without a verified address comes off (its contact,
 // consent and suppression stay). The same signups.sync run does all of it, within a minute; jobs carry no address.
@@ -402,8 +403,16 @@ export async function customersList(db: Database, workspaceId: string): Promise<
     return listId;
   });
 }
-const customerConsent = (occurredAt: string) => ({ source: `${productName} account`, occurredAt,
-  evidence: `Account holder: owns a ${productName} workspace with this verified address. Product news and service status emails, on legitimate interests; not an opt-in.` });
+/**
+ * The notice a "Nightmail account" record rests on, as its policy version: the Privacy Policy and Terms that say customers
+ * get product news and service status emails, and the line under every sign-in button, published together on that date
+ * (app/src/features/legal/content, their `updated`); change it with them. A record is dated when the account signed up or
+ * was made, so one dated before the notice is someone who signed up before it existed: the record doesn't claim they saw
+ * it, and signed_up_at is what a send filters on.
+ */
+export const CUSTOMERS_NOTICE = 'Privacy Policy and Terms of 26 November 2026';
+const customerConsent = (occurredAt: string) => ({ source: `${productName} account`, occurredAt, policyVersion: CUSTOMERS_NOTICE,
+  evidence: `Account holder: owns a ${productName} workspace with this verified address. Product news and service status emails, on legitimate interests; not an opt-in. Dated when the account signed up, which can be before the notice.` });
 type Written = { workspace_id: string; list_id: string; email: string };
 // One account at a time, so a run never writes an account twice or takes back what another just wrote.
 const lockAccount = (tx: DbExecutor, userId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId},57901))`);

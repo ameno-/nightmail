@@ -2020,7 +2020,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
 test('Nightmail customers: every account that owns a workspace joins one list in the platform workspace, made once by two runs at once and found by ID after a rename, at its verified address with when it signed up; written as an account holder without touching opt-outs, suppression or deleted contacts; a deleted account and an old address come off, and a deleted list is not made again', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
-  const {signupJobs, signupsTick, CUSTOMERS_LIST_NAME} = await import('./src/signups.js'), {JobDeferred} = await import('./src/jobs.js'), {recordUnsubscribe} = await import('./src/audience.js');
+  const {signupJobs, signupsTick, CUSTOMERS_LIST_NAME, CUSTOMERS_NOTICE} = await import('./src/signups.js'), {JobDeferred} = await import('./src/jobs.js'), {recordUnsubscribe} = await import('./src/audience.js');
   const db = await fixtureDatabase(t);
   const pool = new pg.Pool({connectionString:FIXTURE_DATABASE_URL, max:6, connectionTimeoutMillis:5_000}); cleanup(t,()=>pool.end());
   const runtime: import('./src/core.js').Runtime = { db:drizzle(pool), config:loadConfig({...process.env, PUBLIC_URL:'https://customers.example.org', MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', NIGHTMAIL_HOSTED_SCREEN:'false', BANE_HOSTED_SCREEN:'false'}),
@@ -2095,6 +2095,8 @@ test('Nightmail customers: every account that owns a workspace joins one list in
   assert.deepEqual(await contactOf(suppressed.email).then(c=>[c.consent,c.suppressed,c.listed,c.consents]),['unknown',true,true,[]]);
   assert.deepEqual(await contactOf(deleted.email).then(c=>[c.deleted,c.listed,c.consents]),[true,false,[]]);
   assert.deepEqual(await contactOf(waitlisted.email).then(c=>[c.consent,c.listed,c.consents]),['subscribed',true,['subscribed Nightmail waitlist','subscribed Nightmail account']]);
+  // Each account holder's record names the notice it rests on.
+  assert.deepEqual((await db.query("SELECT DISTINCT policy_version FROM audience_consent_audit WHERE workspace_id=$1 AND source='Nightmail account'",[platform])).rows.map(r=>r.policy_version),[CUSTOMERS_NOTICE]);
   assert.equal(await queued(),false);
 
   // Renamed in the dashboard, it is still the list: a new sign-up joins it within the minute, and no list is made.
