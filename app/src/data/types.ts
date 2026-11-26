@@ -103,12 +103,12 @@ export interface AudiencePreview { matched: number; suppressed: number; unsubscr
 // The API's CampaignReadiness: the send review of a marketing campaign (api/src/standing-model.ts RAMP.readiness).
 type HistoryFigures = { largestSend: number; sent: number; bounceRate: number | null; complaintRate: number | null }
 export interface CampaignReadiness {
-  verdict: 'ready' | 'ramp_recommended' | 'ramp_required'; summary: string | null; reasons: { code: string; message: string }[]
-  domain: { name: string; firstSeenAt: ISODate | null; ageDays: number | null; dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null; mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured'
+  verdict: 'ready' | 'ramp_recommended' | 'ramp_required'; summary: string | null; reasons: { code: string; message: string }[]; findings?: { code: string; message: string }[]
+  domain: { name: string; firstSeenAt: ISODate | null; ageDays: number | null; registeredAt?: string | null; registeredDays?: number | null; dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null; mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured'
     sharedLinkPacing?: boolean; linkHost: 'not_configured'; ownLinkHost: { hostname: string; active: boolean } | null; linkOrigin: string | null }
   history: { workspace: HistoryFigures; domain: HistoryFigures }
   list: { recipients: number; risky: number; neverMailed: number | null; createdAt: ISODate | null; lastSentAt: ISODate | null; lastImport: { at: ISODate; contacts: number; consent: string | null } | null }
-  sizeJump: number | null; plan: { batches: number[]; seconds: number | null } | null; required: { by: 'NEW_DOMAIN' | 'SIZE_JUMP'; maxPerDay: number } | null
+  sizeJump: number | null; plan: { batches: number[]; seconds: number | null } | null; required: { by: 'NEW_DOMAIN' | 'SIZE_JUMP'; reason?: 'NEW_REGISTRATION' | 'BLOCKLISTED' | 'NEW_DOMAIN' | 'SIZE_JUMP'; maxPerDay: number } | null
 }
 type ReviewDisplayPart<T> = { data: T; error?: never } | { data?: never; status: number; retryAfter?: number;
   error: { code: string; message: string; field?: string; requestId: string; retryable: boolean; details?: Record<string, unknown>[] } }

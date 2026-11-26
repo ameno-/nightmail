@@ -33083,17 +33083,47 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,computed_at,evidence_at) VALUES($1,'graded',500,92,92,92,NULL,NULL,now(),now())`, [wid]);
       await db.query("UPDATE billing_config SET mode='off' WHERE singleton");
       await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now()+interval '1 hour',1000,10000000,0)`, [pool, REGION]);
-      const { rampPlan, judgeReadiness } = await import('./src/standing-model.js');
+      const { rampPlan, judgeReadiness, RAMP_LINES } = await import('./src/standing-model.js');
       // The lines (RAMP.readiness and RAMP.plan).
       assert.deepEqual([rampPlan(8_000, 0), rampPlan(60_000, 0), rampPlan(1_820_000, 0), rampPlan(1_000_000, 40_000)],
         [[8_000], [10_000, 40_000, 10_000], [10_000, 40_000, 160_000, 640_000, 970_000], [80_000, 320_000, 600_000]]);
-      const facts = { matched: null, risky: 0, neverMailed: null, domainAgeDays: 400, dmarc: true, largestSend: 1_000, largestCleanSend: 1_000, accepted: 10_000, bounced: 10, complained: 0, enforced: true };
+      const facts = { matched: null, risky: 0, neverMailed: null, domainAgeDays: 400, dmarc: true, largestSend: 1_000, largestCleanSend: 1_000, accepted: 10_000, bounced: 10, complained: 0, enforced: true,
+        registeredDays: null, linkRegisteredDays: null, usualDay: 0 };
       assert.deepEqual([4_000, 9_000, 49_999, 50_000, 100_000, 100_001].map(recipients => judgeReadiness({ ...facts, recipients }).verdict),
         ['ready', 'ready', 'ramp_recommended', 'ramp_recommended', 'ramp_recommended', 'ramp_required']);
       assert.deepEqual([judgeReadiness({ ...facts, recipients: 50_000, domainAgeDays: 29 }).requiredBy, judgeReadiness({ ...facts, recipients: 50_000, domainAgeDays: 29, enforced: false }).verdict], ['NEW_DOMAIN', 'ramp_recommended']);
-      // A domain added recently whose clean campaigns here already cover the send in one day: no plan, so none required.
+      // A domain added recently whose clean campaigns here already cover the send in one day: nothing to require. Without the
+      // private lines (NIGHTMAIL_RAMP), as before: one day; with them (here their defaults), the ramp it recommends is never a single day.
       const covered = judgeReadiness({ ...facts, recipients: 1_744_207, domainAgeDays: 13, largestSend: 1_810_000, largestCleanSend: 1_810_000 });
-      assert.deepEqual([covered.verdict, covered.requiredBy, covered.reasons, rampPlan(1_744_207, 1_810_000)], ['ramp_recommended', null, ['NEW_DOMAIN'], [1_744_207]]);
+      assert.deepEqual([covered.verdict, covered.requiredBy, covered.reasons, rampPlan(1_744_207, 1_810_000), covered.plan, covered.firstBatch], ['ramp_recommended', null, ['NEW_DOMAIN'], [1_744_207], [1_744_207], null]);
+      assert.deepEqual(judgeReadiness({ ...facts, recipients: 1_744_207, domainAgeDays: 13, largestSend: 1_810_000, largestCleanSend: 1_810_000, lines: RAMP_LINES }).plan, [348_842, 1_395_365]);
+      // Without the lines, none of the new facts changes the review: it is today's.
+      const plain = { ...facts, recipients: 1_800_000, domainAgeDays: 14, largestSend: 1_821_173, largestCleanSend: 0 }, today = judgeReadiness(plain);
+      const unset = judgeReadiness({ ...plain, registeredDays: 1_448, linkRegisteredDays: 3, usualDay: 22_000, blocklisted: true, blocklistUncounted: true });
+      assert.deepEqual([unset.verdict, unset.reasons, unset.requiredBy, unset.plan, unset.firstBatch], [today.verdict, today.reasons, today.requiredBy, today.plan, null]);
+      // How old the domain is on the internet, apart from how long it has sent here (registration from RDAP, cached).
+      const established = { ...facts, registeredDays: 1_448, lines: RAMP_LINES };
+      // A domain registered years ago, new here, its last large send not clean (a reply named a blocklist), far above its usual day.
+      const newsletter = judgeReadiness({ ...established, recipients: 1_800_000, domainAgeDays: 14, largestSend: 1_821_173, largestCleanSend: 0, usualDay: 22_000 });
+      assert.deepEqual([newsletter.verdict, newsletter.requiredBy, newsletter.reasons, newsletter.plan, newsletter.firstBatch], ['ramp_recommended', null, ['NEW_HERE', 'USUAL_JUMP'], [44_000, 176_000, 704_000, 876_000], { size: 2_000, waitMinutes: 60 }]);
+      // After a send that drew blocklist replies, until one finishes without any: the ramp is required. Not counted yet: said so.
+      const after = judgeReadiness({ ...established, recipients: 1_800_000, domainAgeDays: 14, largestSend: 1_821_173, largestCleanSend: 0, usualDay: 22_000, blocklisted: true });
+      assert.deepEqual([after.verdict, after.requiredBy, after.reasons[0], after.plan.length > 1], ['ramp_required', 'BLOCKLISTED', 'BLOCKLISTED_BEFORE', true]);
+      assert.deepEqual(judgeReadiness({ ...established, recipients: 8_000, largestSend: 1_000, largestCleanSend: 1_000, blocklisted: true }).requiredBy, 'BLOCKLISTED');
+      assert.equal(judgeReadiness({ ...established, recipients: 1_800_000, domainAgeDays: 14, largestSend: 1_821_173, largestCleanSend: 0, usualDay: 22_000, blocklistUncounted: true }).reasons.includes('BLOCKLIST_UNCOUNTED'), true);
+      // Said, but on its own it recommends no ramp: yesterday's send not counted yet doesn't slow an established sender today.
+      const usual = judgeReadiness({ ...established, recipients: 90_000, largestSend: 100_000, largestCleanSend: 100_000, usualDay: 30_000, blocklistUncounted: true });
+      assert.deepEqual([usual.verdict, usual.reasons], ['ready', ['BLOCKLIST_UNCOUNTED']]);
+      // A brand-new domain's first campaign: the young plan, required.
+      const fresh = judgeReadiness({ ...facts, recipients: 60_000, registeredDays: 5, domainAgeDays: 2, largestSend: 0, largestCleanSend: 0, lines: RAMP_LINES });
+      assert.deepEqual([fresh.verdict, fresh.requiredBy, fresh.reasons.slice(0, 2)], ['ramp_required', 'NEW_REGISTRATION', ['NEW_REGISTRATION', 'NO_HISTORY']]);
+      const youngLines = { newRegistrationDays: 30, usualJump: 10, minimumSplit: 2_000, young: { first: 500, cleanFactor: 2, growth: 2, maxBatches: 8 }, established: { first: 10_000, cleanFactor: 2, growth: 4, maxBatches: 5 }, firstBatch: { size: 5_000, waitMinutes: 120 } };
+      assert.deepEqual(judgeReadiness({ ...facts, recipients: 60_000, registeredDays: 5, domainAgeDays: 2, largestSend: 0, largestCleanSend: 0, lines: youngLines }).plan, [500, 1_000, 2_000, 4_000, 8_000, 16_000, 28_500]);
+      // An established domain at its usual volume: ready. A small sender's 500-recipient list: ready.
+      assert.equal(judgeReadiness({ ...established, recipients: 90_000, largestSend: 100_000, largestCleanSend: 100_000, usualDay: 30_000 }).verdict, 'ready');
+      assert.equal(judgeReadiness({ ...facts, recipients: 500, domainAgeDays: 3, largestSend: 0, largestCleanSend: 0, lines: RAMP_LINES }).verdict, 'ready');
+      // Registration unknown is never taken for old: judged by when it was added, as before.
+      assert.deepEqual(judgeReadiness({ ...facts, recipients: 60_000, domainAgeDays: 2, largestSend: 0, largestCleanSend: 0, lines: RAMP_LINES }).requiredBy, 'NEW_DOMAIN');
       const list = ok(await local('POST', '/v1/lists', { name: unique('readiness') }), 201);
       await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'fresh-'||n||'@example.net','subscribed' FROM generate_series(1,60000) n RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
@@ -33101,12 +33131,36 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const c = await create('Big first send'), path = `/v1/campaigns/${c.id}`;
       assert.equal(ok(await local('GET', `${path}/audience`)).readiness, undefined, 'Only when asked for.');
       const review = ok(await local('GET', `${path}/audience?readiness=true`)).readiness;
-      assert.deepEqual([review.verdict, review.required, review.plan.batches], ['ramp_required', { by: 'NEW_DOMAIN', maxPerDay: 10_000 }, [10_000, 40_000, 10_000]]);
-      assert.equal(review.summary, "This domain is new and this list is much larger than anything it has sent. Mailbox providers block new senders who send to huge lists at once, so we'll send 10,000 today and grow from there.");
+      assert.deepEqual([review.verdict, review.required, review.plan.batches], ['ramp_required', { by: 'NEW_DOMAIN', reason: 'NEW_DOMAIN', maxPerDay: 10_000 }, [10_000, 40_000, 10_000]]);
+      assert.equal(review.summary, "This domain is new and this list is much larger than anything it has sent. Mailbox providers block new senders who send to huge lists at once, so we'll send 10,000 today and grow from there.", 'Without the private lines: today\u2019s review, no first small batch.');
       assert.deepEqual(review.reasons.map((r: Json) => r.code), ['NEW_DOMAIN', 'NO_HISTORY', 'NEVER_MAILED']);
       assert.deepEqual([review.domain.name, review.domain.ageDays, review.domain.dmarc, review.domain.mailFrom, review.domain.linkHost, review.list.neverMailed, review.list.lastSentAt, review.sizeJump],
         [domain, 0, null, 'not_configured', 'not_configured', 60_000, null, null]);
       assert.ok(review.plan.seconds > 2 * 86_400 && review.plan.seconds < 3 * 86_400, String(review.plan.seconds));
+      assert.equal(review.plan.firstBatch ?? null, null);
+      // From here on with the private lines set (their defaults: NIGHTMAIL_RAMP '{}').
+      runtime.config.rampLines = {};
+      // With its registration known (src/domain-age.ts fills domain_registrations hourly): an old domain new here, then a new one.
+      const registered = async (days: number) => { await db.query("INSERT INTO domain_registrations(root, registered_at, status) VALUES ($1, now() - make_interval(days => $2), 'known') ON CONFLICT (root) DO UPDATE SET registered_at=excluded.registered_at", [domain, days]); return ok(await local('GET', `${path}/audience?readiness=true`)).readiness; };
+      const old = await registered(1_500);
+      assert.deepEqual([old.verdict, old.required.by, old.findings.map((r: Json) => r.code).slice(0, 1), old.domain.registeredDays], ['ramp_required', 'SIZE_JUMP', ['NEW_HERE'], 1_500]);
+      // The original list keeps its codes: NEW_HERE reads NEW_DOMAIN there, with the new sentence.
+      assert.deepEqual(old.reasons[0], { code: 'NEW_DOMAIN', message: old.findings[0].message });
+      assert.match(old.findings[0].message, /^fresh\.example was registered in [A-Z][a-z]+ \d{4}; it was added here today\.$/);
+      const young = await registered(10);
+      assert.deepEqual([young.verdict, young.required.by, young.required.reason, young.findings[0].code], ['ramp_required', 'NEW_DOMAIN', 'NEW_REGISTRATION', 'NEW_REGISTRATION']);
+      assert.match(young.summary, /^This domain was registered recently/);
+      await db.query('DELETE FROM domain_registrations WHERE root=$1', [domain]);
+      // The hourly pass looks registrations up (here with a stand-in for RDAP): unknown stays unknown, and the review judges by when it was added.
+      const { refreshRegistrations } = await import('./src/domain-age.js');
+      const lookups: string[] = [], lookup = async (root: string) => { lookups.push(root); return root === domain ? Date.parse('2022-12-01T00:00:00Z') : null; };
+      for (let i = 0; i < 100 && !lookups.includes(domain); i++) await refreshRegistrations(runtime, lookup);
+      assert.deepEqual((await db.query('SELECT to_char(registered_at, $2) AS at, status FROM domain_registrations WHERE root=$1', [domain, 'YYYY-MM-DD'])).rows, [{ at: '2022-12-01', status: 'known' }]);
+      const looked = lookups.length;
+      await refreshRegistrations(runtime, lookup);
+      assert.ok(!lookups.slice(looked).includes(domain), 'A known date is not looked up again for 30 days.');
+      assert.equal(ok(await local('GET', `${path}/audience?readiness=true`)).readiness.domain.registeredAt, '2022-12-01');
+      await db.query('DELETE FROM domain_registrations WHERE root=$1', [domain]);
       // All at once, or a daily limit over the plan's first day: refused, with why.
       const refused = error(await local('POST', `${path}/send`, { revision: c.revision }), 422, 'RAMP_REQUIRED');
       assert.ok(refused.message.startsWith(review.summary), refused.message);
@@ -33114,7 +33168,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await local('POST', `${path}/send`, { revision: c.revision, pacing: { plan: 'recommended', perDay: 5_000 } }), 422);
       // The plan: accepted, stored, and kept unless a daily limit no larger than its first day replaces it.
       const queued = ok(await local('POST', `${path}/send`, { revision: c.revision, pacing: { plan: 'recommended', rateShare: 1 } }), 202);
-      assert.deepEqual([queued.readiness.verdict, queued.readiness.plan.batches, queued.readiness.list.neverMailed], ['ramp_required', [10_000, 40_000, 10_000], null]);
+      assert.deepEqual([queued.readiness.verdict, queued.readiness.plan.batches, queued.readiness.plan.firstBatch, queued.readiness.list.neverMailed], ['ramp_required', [10_000, 40_000, 10_000], { size: 2_000, waitMinutes: 60 }, null]);
       let seen = ok(await local('GET', path));
       assert.deepEqual([seen.delivery.pacing.plan, seen.delivery.pacing.batch, seen.delivery.consent], [[10_000, 40_000, 10_000], 1, null]);
       error(await local('POST', `${path}/pacing`, { perDay: null }), 422, 'RAMP_REQUIRED');
@@ -33123,6 +33177,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       seen = ok(await local('POST', `${path}/pacing`, { perDay: 5_000 }));
       assert.deepEqual([seen.delivery.pacing.plan, seen.delivery.pacing.perDay], [null, 5_000]);
       ok(await local('POST', `${path}/cancel`));
+      // After replies named a blocklist (src/delivery-history.ts counts them): the ramp is required, and a consent confirmation doesn't waive it.
+      await db.query("INSERT INTO delivery_blocklist_daily (workspace_id, day, from_domain, link_host, list, rejections) VALUES ($1, current_date - 2, $2, '', 'spamhaus', 3)", [wid, domain]);
+      const blocked = await create('After a blocklist'), listed = ok(await local('GET', `/v1/campaigns/${blocked.id}/audience?readiness=true`)).readiness;
+      assert.deepEqual([listed.required.by, listed.required.reason, listed.findings[0].code, listed.reasons.some((r: Json) => r.code.startsWith('BLOCKLIST'))], ['SIZE_JUMP', 'BLOCKLISTED', 'BLOCKLISTED_BEFORE', false]);
+      assert.match(listed.findings[0].message, /named a blocklist on \d{4}-\d{2}-\d{2}, and no send has finished without one since\.$/);
+      error(await local('POST', `/v1/campaigns/${blocked.id}/send`, { revision: blocked.revision, consent: { confirmed: true, source: 'Signed up on our site since 2023.' } }), 422, 'RAMP_REQUIRED');
+      await db.query('DELETE FROM delivery_blocklist_daily WHERE workspace_id=$1', [wid]);
       // Or a consent source the sender confirms: stored with the campaign and in Activity.
       const other = await create('Confirmed list');
       error(await local('POST', `/v1/campaigns/${other.id}/send`, { revision: other.revision, consent: { confirmed: true, source: 'short' } }), 422);
@@ -33135,8 +33196,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1 AND email LIKE 'fresh-%' ORDER BY id LIMIT 700`, [wid, small.id]);
       const daily = ok(await local('POST', '/v1/campaigns', { name: 'Daily', from, subject: 'Daily', html: '<p>Fixture.</p>', audience: { listId: small.id } }), 201), dailyPath = `/v1/campaigns/${daily.id}`;
       ok(await local('POST', `${dailyPath}/send`, { revision: daily.revision }), 202);
-      await db.query("UPDATE sending_campaigns SET probe_cleared_at=now(), pace_plan='{100,300}' WHERE id=$1", [daily.id]);
+      // With a first small batch: 40, a wait for their feedback, then the rest of the first day's 100.
+      await db.query("UPDATE sending_campaigns SET probe_cleared_at=now(), pace_plan='{100,300}', pace_first_batch=40, pace_first_wait_minutes=60 WHERE id=$1", [daily.id]);
       const day = async () => { await run('campaign.run'); const v = ok(await local('GET', dailyPath)); return [v.delivery.expanded, v.delivery.pacing.batch, v.delivery.waiting?.reason ?? null]; };
+      assert.deepEqual(await day(), [40, 1, 'pacing_window']);
+      assert.deepEqual(ok(await local('GET', dailyPath)).delivery.pacing.firstBatch, { size: 40, waitMinutes: 60 });
+      await db.query("UPDATE sending_campaigns SET window_started_at=window_started_at-interval '61 minutes', waiting_until=now() WHERE id=$1", [daily.id]);
       assert.deepEqual(await day(), [100, 1, 'pacing_window']);
       assert.equal(ok(await local('GET', dailyPath)).sendEstimate.seconds > 86_400 - 60, true, 'The rest waits for the next days.');
       const nextDay = () => db.query("UPDATE sending_campaigns SET window_started_at=window_started_at-interval '25 hours', waiting_until=now() WHERE id=$1", [daily.id]);
