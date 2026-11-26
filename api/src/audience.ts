@@ -7,7 +7,7 @@ import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type PropertyRule, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
-import { ContactTopic, contactTopicStates, recordTopicChoices, topicChoiceJoin, topicChoiceReaches, type TopicRule } from './topics.js';
+import { ContactTopic, contactTopicStates, recordTopicChoices, topicChoiceJoin, topicChoiceReaches, topicStates, type TopicRule } from './topics.js';
 import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { mailAddress, validMailAddressSql } from './outbound-content.js';
@@ -774,34 +774,67 @@ export async function canMarket(runtime: Runtime, identity: Actor, email: string
   const [row] = await runtime.db.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email.trim().toLowerCase()))).limit(1);
   return !!row && !row.deletedAt && !row.suppressed && row.marketingConsent === 'subscribed';
 }
-export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, email: string, source: 'footer-confirm' | 'rfc8058-post' | 'ses-subscription'): Promise<{ contactId: string; changed: boolean }> {
+/** Who acted on an unsubscribe link, as the consent history records it: the mailbox's one-click (RFC 8058), the hosted
+ *  confirmation, the hosted preference page (src/operations.ts), or SES's own subscription event. */
+export type RecipientSource = 'footer-confirm' | 'rfc8058-post' | 'ses-subscription' | 'preferences';
+const RECIPIENT_EVIDENCE: Record<RecipientSource, string> = {
+  'ses-subscription': 'Signed SES subscription event reported unsubscribeAll for a single-recipient email.',
+  'rfc8058-post': 'POST request presented a valid one-click unsubscribe token; no human identity asserted.',
+  'footer-confirm': 'Footer confirmation form submitted with a valid unsubscribe token; no human identity asserted.',
+  preferences: 'Preference page submitted with a valid unsubscribe token; no human identity asserted.',
+};
+/** The contact an unsubscribe link names, held FOR UPDATE; made when the address has none, so the opt-out is kept for it. */
+async function linkContact(tx: DbExecutor, workspaceId: string, email: string) {
   const normalized = Email.safeParse(email);
   if (!normalized.success) throw new ApiError(422, 'INVALID_EMAIL', 'A valid email address is required.');
+  const identity = { workspaceId };
+  await tx.insert(contacts).values({ id: rowId('con'), ...identity, email: normalized.data, risk: staticRiskSql(normalized.data, workspaceId, peekHygieneLists()) as unknown as Risk }).onConflictDoNothing();
+  const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, normalized.data))).limit(1).for('update');
+  if (!contact) throw new ApiError(500, 'CONSENT_WRITE_FAILED', 'Unable to persist consent.');
+  return contact;
+}
+export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, email: string, source: RecipientSource): Promise<{ contactId: string; changed: boolean }> {
   return runtime.db.transaction(async tx => {
-    const identity = { workspaceId };
-    await tx.insert(contacts).values({ id: rowId('con'), ...identity, email: normalized.data, risk: staticRiskSql(normalized.data, workspaceId, peekHygieneLists()) as unknown as Risk }).onConflictDoNothing();
-    const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, normalized.data))).limit(1).for('update');
-    if (!contact) throw new ApiError(500, 'CONSENT_WRITE_FAILED', 'Unable to persist consent.');
+    const contact = await linkContact(tx, workspaceId, email);
     if (contact.marketingConsent === 'unsubscribed') return { contactId: contact.id, changed: false };
     const now = new Date().toISOString();
-    const evidence = source === 'ses-subscription' ? 'Signed SES subscription event reported unsubscribeAll for a single-recipient email.' : source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token; no human identity asserted.' : 'Footer confirmation form submitted with a valid unsubscribe token; no human identity asserted.';
-    await recordConsent(tx, identity, contact, { status: 'unsubscribed', source, evidence, occurredAt: now, actorKeyId: null }, now);
+    await recordConsent(tx, { workspaceId }, contact, { status: 'unsubscribed', source, evidence: RECIPIENT_EVIDENCE[source], occurredAt: now, actorKeyId: null }, now);
     return { contactId: contact.id, changed: true };
   });
 }
 /** A recipient's unsubscribe from mail with a topic (src/operations.ts /unsubscribe): that topic only, archived or not; the
  *  contact's marketing consent stays as it is. A contact deleted since keeps its choice, as it keeps its consent. */
 export async function recordTopicUnsubscribe(runtime: Runtime, workspaceId: string, email: string, topicId: string, source: 'footer-confirm' | 'rfc8058-post'): Promise<{ contactId: string; changed: boolean }> {
-  const normalized = Email.safeParse(email);
-  if (!normalized.success) throw new ApiError(422, 'INVALID_EMAIL', 'A valid email address is required.');
   return runtime.db.transaction(async tx => {
-    const identity = { workspaceId };
-    await tx.insert(contacts).values({ id: rowId('con'), ...identity, email: normalized.data, risk: staticRiskSql(normalized.data, workspaceId, peekHygieneLists()) as unknown as Risk }).onConflictDoNothing();
-    const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, normalized.data))).limit(1).for('update');
-    if (!contact) throw new ApiError(500, 'CONSENT_WRITE_FAILED', 'Unable to persist consent.');
-    const evidence = source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token for this topic; no human identity asserted.' : 'Footer confirmation form submitted with a valid unsubscribe token for this topic; no human identity asserted.';
-    const changed = await recordTopicChoices(tx, workspaceId, contact, [{ topicId, subscribed: false }], { source, evidence, occurredAt: new Date().toISOString(), actorKeyId: null }, false, true);
+    const contact = await linkContact(tx, workspaceId, email);
+    const changed = await recordTopicChoices(tx, workspaceId, contact, [{ topicId, subscribed: false }], { source, evidence: `${RECIPIENT_EVIDENCE[source]} The link was about this topic.`, occurredAt: new Date().toISOString(), actorKeyId: null }, false, true);
     return { contactId: contact.id, changed: changed.length > 0 };
+  });
+}
+/** What the hosted preference page shows the holder of an unsubscribe link, and nothing more: the address's marketing
+ *  consent (null without a contact), the workspace's topics that aren't archived with its choice about each, and the
+ *  link's own topic, archived or not. Reads only; nothing is made. */
+export async function linkPreferences(db: DbExecutor, workspaceId: string, email: string, topicId: string | null) {
+  const [contact] = await db.select({ id: contacts.id, consent: contacts.marketingConsent, deletedAt: contacts.deletedAt }).from(contacts)
+    .where(and(eq(contacts.workspaceId, workspaceId), eq(contacts.email, email.trim().toLowerCase()))).limit(1);
+  const current = contact && !contact.deletedAt ? contact : null;
+  const topics = await topicStates(db, workspaceId, current?.id ?? null, topicId);
+  return { consent: current?.consent ?? null, topics: topics.filter(topic => !topic.archived), linked: topics.find(topic => topic.id === topicId) ?? null };
+}
+/**
+ * The preference page's Save: of the topics it showed (`shown`), those checked (`on`) reach the person and the rest don't.
+ * Only choices that change are recorded (source preferences), each with its consent record and event; a topic archived or
+ * made since the page was shown is left alone. A person unsubscribed from everything, or with no contact, changes nothing
+ * here: the page never lifts an opt-out from all marketing, and a topic turned back on needs that.
+ */
+export async function recordPreferences(runtime: Runtime, workspaceId: string, email: string, shown: string[], on: Set<string>) {
+  return runtime.db.transaction(async tx => {
+    const [contact] = await tx.select().from(contacts).where(and(eq(contacts.workspaceId, workspaceId), eq(contacts.email, email.trim().toLowerCase()), isNull(contacts.deletedAt))).limit(1).for('update');
+    if (contact?.marketingConsent !== 'subscribed') return null;
+    const states = (await topicStates(tx, workspaceId, contact.id, null)).filter(topic => !topic.archived && shown.includes(topic.id));
+    const choices = states.filter(topic => topic.subscribed !== on.has(topic.id)).map(topic => ({ topicId: topic.id, subscribed: on.has(topic.id) }));
+    if (choices.length) await recordTopicChoices(tx, workspaceId, contact, choices, { source: 'preferences', evidence: RECIPIENT_EVIDENCE.preferences, occurredAt: new Date().toISOString(), actorKeyId: null }, true);
+    return choices.map(choice => ({ ...choice, name: states.find(topic => topic.id === choice.topicId)!.name }));
   });
 }
 /**

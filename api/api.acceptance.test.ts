@@ -20364,6 +20364,62 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     error(await http('POST', `/v1/campaigns/${late.id}/send`, key.secret, { revision: kept.revision }), 422, 'TOPIC_NOT_FOUND');
   });
 
+  test('the hosted preference page: a GET changes nothing, a topic link\u2019s button leaves that topic, Save sets the topics it showed, and everything wins and stays', async t => {
+    const key = await keyFixture(t), form = { 'content-type': 'application/x-www-form-urlencoded' };
+    const topic = async (body: Json) => { const made = ok(await http('POST', '/v1/topics', key.secret, { name: unique('Topic'), ...body }), 201); cleanup(t, async () => { ok(await http('PATCH', `/v1/topics/${made.id}`, key.secret, { archived: true })); }); return made; };
+    const news = await topic({ name: unique('News <b>&"'), description: 'Product <i>news</i> & more' }), events = await topic({ subscribedByDefault: false });
+    const person = async () => { const contact = await resource(t, key.secret, '/v1/contacts', { email: address() }); ok(await consent(key.secret, contact.id, 'subscribed')); return contact; };
+    const ana = await person(), ben = await person();
+    const linkOf = async (to: string, extra: Json = {}) => {
+      const sent = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to, kind: 'marketing', ...extra })), 202);
+      const url = new URL(/Unsubscribe:\s*(https?:\/\/\S+)/.exec(ok(await http('GET', `/v1/emails/${sent.id}/content`, key.secret)).text)![1]);
+      secrets.add(url.pathname.split('/').at(-1)!);
+      return url.pathname;
+    };
+    const states = async (contact: Json) => Object.fromEntries(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).topics.filter((row: Json) => [news.id, events.id].includes(row.topicId)).map((row: Json) => [row.topicId === news.id ? 'news' : 'events', row.subscribed]));
+    const post = async (path: string, body: string) => ok(await http('POST', path, undefined, body, form));
+    const save = (on: string[], shown = [news.id, events.id]) => [ 'preferences=save', ...shown.map(id => `shown=${id}`), ...on.map(id => `topic=${id}`)].join('&');
+    const escaped = (text: string) => text.replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
+    const checked = (page: string, id: string) => new RegExp(`name="topic" value="${id}" checked`).test(page);
+
+    // Ana's link from mail about the news topic: the page shows her choices, the topic's own button first, and no address.
+    const anas = await linkOf(ana.email, { topicId: news.id });
+    const first = ok(await http('GET', anas));
+    assert.ok(first.includes('Email preferences') && first.includes(`Unsubscribe from ${escaped(news.name)}`) && first.includes(escaped(news.description)) && !first.includes(news.name) && !first.includes('<i>'), 'Topic names and descriptions are text, never markup.');
+    assert.ok(checked(first, news.id) && !checked(first, events.id) && first.includes('name="preferences" value="all"') && !/<script/i.test(first) && !first.includes(ana.email));
+    assert.equal(ok(await http('GET', anas)), first);
+    assert.deepEqual(await states(ana), { news: true, events: false }, 'A GET changes nothing.');
+    // The topic's button leaves that topic alone, as the one-click does.
+    assert.match(await post(anas, 'confirm=footer'), /You’re unsubscribed[\s\S]*Back to your email preferences/);
+    assert.deepEqual(await states(ana), { news: false, events: false });
+    const after = ok(await http('GET', anas));
+    assert.ok(after.includes(`You don’t receive ${escaped(news.name)} emails`) && !checked(after, news.id) && !after.includes('name="confirm"'));
+    // Save sets each topic the page showed, turning one back on included: she is choosing it herself.
+    assert.match(await post(anas, save([news.id, events.id])), new RegExp(`Preferences saved[\\s\\S]*You’ll receive again: ${escaped(news.name)}, `));
+    assert.deepEqual(await states(ana), { news: true, events: true });
+    assert.match(await post(anas, save([news.id, events.id])), /Nothing changed\./);
+    // A topic made after the page was shown is left alone: only what it showed is set.
+    const later = await topic({});
+    assert.match(await post(anas, save([])), /You’ll no longer receive: /);
+    assert.deepEqual(await states(ana), { news: false, events: false });
+    assert.deepEqual(ok(await http('GET', `/v1/contacts/${ana.id}`, key.secret)).topics.find((row: Json) => row.topicId === later.id), { topicId: later.id, name: later.name, subscribed: true, chosen: false, updatedAt: null });
+    const audit = page(await http('GET', `/v1/contacts/${ana.id}/consent`, key.secret)).filter(row => row.topicId).map(row => `${row.topicId === news.id ? 'news' : 'events'} ${row.status} ${row.source}`).sort();
+    assert.deepEqual(audit, ['events subscribed preferences', 'events unsubscribed preferences', 'news subscribed preferences', 'news unsubscribed footer-confirm', 'news unsubscribed preferences'], 'Each change the page makes is a consent record of its own.');
+    // Unsubscribe from all wins and stays: the page shows it and offers nothing, and Save can't lift it.
+    assert.match(await post(anas, 'preferences=all'), /You’re unsubscribed/);
+    assert.equal(ok(await http('GET', `/v1/contacts/${ana.id}`, key.secret)).marketingConsent, 'unsubscribed');
+    const gone = ok(await http('GET', anas));
+    assert.ok(gone.includes('unsubscribed from all marketing emails') && !/<form\b/.test(gone));
+    assert.match(await post(anas, save([news.id])), /Nothing changed/);
+    assert.deepEqual([await states(ana), ok(await http('GET', `/v1/contacts/${ana.id}`, key.secret)).marketingConsent], [{ news: false, events: false }, 'unsubscribed']);
+    // Ben's link from mail without a topic: his own choices (not Ana's), and its everything button is today's confirmation.
+    const bens = await linkOf(ben.email);
+    const his = ok(await http('GET', bens));
+    assert.ok(checked(his, news.id) && !checked(his, events.id) && !his.includes('Unsubscribe from ' + escaped(news.name)) && his.includes('name="confirm" value="footer"'));
+    assert.match(await post(bens, 'confirm=footer'), /You’re unsubscribed/);
+    assert.deepEqual([ok(await http('GET', `/v1/contacts/${ben.id}`, key.secret)).marketingConsent, await states(ben)], ['unsubscribed', { news: true, events: false }]);
+  });
+
   test('a campaign’s own unsubscribe page changes only the footer link: List-Unsubscribe keeps its one HTTPS one-click address', async () => {
     const { screenedAs, withUnsubscribe } = await import('./src/sending.js');
     const runtime = { config: { publicUrl: 'https://mail.example' } } as unknown as import('./src/core.js').Runtime;
