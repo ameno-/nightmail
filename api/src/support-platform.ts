@@ -31,6 +31,8 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['GET', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/state$/],
   ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/state$/],
   ['GET', /^\/v1\/operator\/support\/outbox$/],
+  // A chat as Nightmail holds it, with the messages the dashboard filed while the chat couldn't take them (support-conversations.ts fileChatTicket).
+  ['GET', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/filed$/],
   // Emails whose sender asked to be answered by email instead (support-conversations.ts releaseGeneralAnswer).
   ['GET', /^\/v1\/operator\/support\/general-answers$/],
   ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/messages\/msg_[a-z2-7]{16}\/delivery$/],
@@ -114,6 +116,12 @@ export type InboxState = { id: string; status: 'open' | 'ticketed' | 'closed'; a
   ticket: { id: string; type: string | null; severity: string | null; resolvedAt: string | null } | null; queuedReplies: number };
 /** An email whose sender asked, from its sign-in link, to be answered by email instead (support-conversations.ts releaseGeneralAnswer). */
 export type GeneralAnswerDue = { conversationId: string; messageId: string; requestedAt: string };
+/**
+ * A chat as Nightmail holds it (GET /v1/operator/support/conversations/{id}/filed): `filed` when Nightmail opened it from
+ * a filed message and the support platform never registered it; `messages` the customer's filed messages, oldest first.
+ */
+export type FiledConversation = { id: string; status: 'open' | 'ticketed' | 'closed'; filed: boolean; user: { id: string; name: string | null; email: string | null };
+  workspace: { id: string; name: string; role: 'owner' | 'admin' | 'member' } | null; page: string | null; requestIds: string[]; messages: { id: string; text: string; at: string }[] };
 /** A staff reply waiting for delivery. */
 export type OutboxReply = { id: string; conversationId: string; channel: 'chat' | 'email'; text: string; staffName: string | null; createdAt: string };
 
@@ -237,6 +245,12 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
      * after its wake), oldest first: answer each in general, once, with no account access.
      */
     generalAnswers: (conversationId?: string) => call<{ data: GeneralAnswerDue[] }>('GET', `/v1/operator/support/general-answers${conversationId === undefined ? '' : `?conversationId=${encodeURIComponent(String(conversationId))}`}`),
+    /**
+     * A chat as Nightmail holds it, with the customer's messages the dashboard filed as a ticket while the chat couldn't
+     * take them: adopt one Nightmail opened (filed) as this person's chat in this workspace, and take each filed message
+     * into the transcript under its own ID, as already with staff.
+     */
+    filedConversation: (conversationId: string) => call<FiledConversation>('GET', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/filed`),
     /** Record a staff reply's delivery: sent, or failed for good. */
     markDelivery: (conversationId: string, messageId: string, status: 'sent' | 'failed') =>
       call<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/messages/${encodeURIComponent(String(messageId))}/delivery`, { status }),

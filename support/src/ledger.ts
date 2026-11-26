@@ -7,6 +7,7 @@ import { fromRow, type TicketRow } from './tickets.js';
 import type { Flow } from './work.js';
 import { newId } from './tokens.js';
 import { log, logError } from './log.js';
+import { adoptFiledChat } from './conversation.js';
 
 // The work ledger (D1 `support_work`, migrations/0005). Every message a flow accepts gets a row before its webhook
 // answers, mail refused at the edge is kept as a row instead of vanishing, and each object mirrors its work items here
@@ -230,7 +231,11 @@ async function staffReplies(env: Env) {
   for (const reply of pulled.data) byConversation.set(reply.conversationId, [...byConversation.get(reply.conversationId) ?? [], reply]);
   let n = 0;
   for (const [id, replies] of byConversation) {
-    try { n += await env.CONVERSATION.get(env.CONVERSATION.idFromName(id)).deliver({ replies }); }
+    try {
+      // A chat Nightmail opened from a filed message, its wake lost: adopted here, so the reply still reaches the person.
+      if (!(await env.DB.prepare('SELECT 1 FROM conversations WHERE id = ?').bind(id).first()) && !await adoptFiledChat(env, id)) continue;
+      n += await env.CONVERSATION.get(env.CONVERSATION.idFromName(id)).deliver({ replies });
+    }
     catch (error) { logError(error, { event: 'inbox', code: 'STAFF_REPLY_HANDOFF_FAILED' }, 'warn'); }
   }
   return n;

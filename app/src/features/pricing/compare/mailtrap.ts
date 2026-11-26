@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Mailtrap (/compare/mailtrap): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailtrap's own pages on CHECKED: the Email Live Sending plans on its pricing page (monthly billing), and its plans docs.
@@ -55,5 +55,4 @@ export const mailtrap: Entry = {
   ],
   // Mailtrap's readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'team', 'domain', 'agent', 'campaign'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

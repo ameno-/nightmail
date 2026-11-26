@@ -282,14 +282,14 @@ void main() {
 
   // someone in the glass. With the set off (uGone: for how many seconds), the dark screen is a mirror of the room, and
   // after a while there is a man in it, behind whoever is looking (uSomeone: crt/someone.mp4, filmed on black and kept
-  // brighter in the file than it is shown, so only its light is added and the glass shows through him). He comes out
-  // of the dark over half a minute, standing still; then he moves (the tube plays the film). He is gone the moment
-  // the set comes on.
+  // brighter in the file than it is shown, so only its light is added and the glass shows through him). Two seconds
+  // after the set goes dark he starts to come out of it, and over the next twelve he is there, standing still; then
+  // he moves (the tube plays the film). He is gone the moment the set comes on.
   if (uGone > 0. && uPower < .05) {
     // (his darks lifted a little, so the clothes are there to be made out, not only the face and hands)
     vec3 he = pow(texture(uSomeone, uv).rgb, vec3(.82));
     he *= .86 + .28 * hash(gl_FragCoord.xy * .37 + frame * 3.);
-    col += GLASS * SOMEONE * he * smoothstep(5., 32., uGone);
+    col += GLASS * SOMEONE * he * smoothstep(2., 14., uGone);
   }
   o = vec4(pow(max(col, 0.), vec3(.92)), 1.);
 }`
@@ -324,7 +324,7 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
     // pixel, until the set is first switched off. His film is fetched then, and not before: its first frame is him
     // standing still, which is what the glass shows until MOVES seconds have gone; then it plays, once, and its last
     // frame stays. Switching on rewinds it.
-    const glass = gl.createTexture(), MOVES = 38
+    const glass = gl.createTexture(), MOVES = 20
     let alive = true, clip: HTMLVideoElement | null = null, stands = false, moving = false
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, glass)
     for (const [key, value] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_2D, key, value)

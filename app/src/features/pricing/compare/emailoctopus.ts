@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs EmailOctopus (/compare/emailoctopus): a comparison's whole entry (prices.ts, Entry). Every figure was read
 // on EmailOctopus's own pages on CHECKED: the monthly prices in pricing.md, which carries its pricing page's tables.
@@ -88,5 +88,4 @@ export const emailOctopus: Entry = {
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'team', 'domain', 'receive'],
   without: ['signup forms', 'landing pages', 'automations'],
-  description: `EmailOctopus prices by subscribers, Nightmail by email. Monthly prices at ${listOf(sizes.map(formatCount))} subscribers, checked ${dayOf(CHECKED)}.`,
 }

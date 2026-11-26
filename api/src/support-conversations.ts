@@ -446,6 +446,32 @@ export function registerSupportConversations(app: App) {
   });
 
   const Released = z.object({ conversationId: z.string(), messageId: z.string(), requestedAt: z.string() }).openapi('SupportGeneralAnswerDue');
+  const Filed = z.object({
+    id: z.string(), status: z.enum(['open', 'ticketed', 'closed']),
+    filed: z.boolean().describe('Nightmail opened this conversation from a filed message: the support platform has never registered it, and adopts it as a chat for this person and workspace.'),
+    user: z.object({ id: z.string(), name: z.string().nullable(), email: z.string().nullable() }),
+    workspace: z.object({ id: z.string(), name: z.string(), role: z.enum(['owner', 'admin', 'member']) }).nullable().describe('The chat\u2019s workspace, while the person is still a member there; null otherwise (then it is not theirs to continue).'),
+    page: z.string().nullable().describe('The dashboard page of the handoff that opened it.'), requestIds: z.array(z.string()).describe('The failed requests that handoff named.'),
+    messages: z.array(z.object({ id: z.string(), text: z.string(), at: z.string() })).describe('The customer\u2019s messages filed while the chat couldn\u2019t take them, oldest first: take each into the transcript under its own ID (the mirror then leaves it as it is), as already handed to staff (no turn for it).'),
+  }).openapi('SupportFiledConversation');
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'get', path: '/v1/operator/support/conversations/{id}/filed', operationId: 'operatorGetFiledSupportConversation',
+    description: 'A chat conversation as Nightmail holds it, with the messages the dashboard filed while the support chat couldn\u2019t take them (the binding only): what the support platform needs to adopt a conversation it never registered (evidence.filed) and to take filed messages into one it holds. Only a chat with a person; 404 otherwise.',
+    request: { params: ConversationParam }, responses: { 200: response(Filed), ...errors } }), async c => {
+    await supportPlatformOnly(c);
+    const { rows: [row] } = await c.env.db.execute<{ id: string; status: z.infer<typeof Filed>['status']; filed: boolean; user: z.infer<typeof Filed>['user']; workspace: z.infer<typeof Filed>['workspace'];
+      page: string | null; request_ids: string[] | null; messages: z.infer<typeof Filed>['messages'] }>(sql`SELECT s.id, s.status, coalesce((s.evidence->>'filed')::boolean, false) AS filed,
+        json_build_object('id', u.id, 'name', u.name, 'email', u.email) AS user,
+        (SELECT json_build_object('id', w.id, 'name', w.name, 'role', m.role) FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = s.user_id AND m.workspace_id = s.workspace_id) AS workspace,
+        h.page, h.request_ids,
+        coalesce((SELECT json_agg(json_build_object('id', f.id, 'text', f.text, 'at', to_char(f.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) ORDER BY f.seq)
+          FROM support_messages f WHERE f.conversation_id = s.id AND f.author = 'customer' AND f.kind = 'filed'), '[]') AS messages
+      FROM support_conversations s JOIN nightmail_users u ON u.id = s.user_id
+      LEFT JOIN LATERAL (SELECT page, request_ids FROM support_handoffs WHERE conversation_id = s.id ORDER BY created_at LIMIT 1) h ON true
+      WHERE s.id = ${c.req.valid('param').id} AND s.channel = 'chat'`);
+    if (!row) notFound('Support conversation');
+    return c.json({ id: row!.id, status: row!.status, filed: row!.filed, user: row!.user, workspace: row!.workspace, page: row!.page, requestIds: row!.request_ids ?? [], messages: row!.messages }, 200);
+  });
+
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'get', path: '/v1/operator/support/general-answers', operationId: 'operatorSupportGeneralAnswersDue',
     description: 'The support platform\u2019s due list (the binding only): conversations whose sender asked, from the sign-in link, to be answered by email instead (releaseGeneralAnswer), still open and with nothing reaching them since, oldest first. Answer each in general, once, with no account access.',
     request: { query: z.object({ conversationId: z.string().regex(CONVERSATION_ID).optional().describe('Only this conversation\u2019s (after its wake).') }) },

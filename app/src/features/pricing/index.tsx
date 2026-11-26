@@ -70,10 +70,10 @@ function placeOf(root: ParentNode | null, control: Element | null | undefined): 
 const atPlace = (root: ParentNode | null, place: Place | null) => place ? controls(root).filter(control => keyOf(control) === place.key)[place.nth] : undefined
 
 /** A price page's frame: a scene (frame.tsx), or for a comparison that doesn't exist, a bar along the top (the
- *  wordmark, the price pages and the theme) over one plain column. */
+ *  wordmark, the price pages and the theme) over one plain column. title: the tab's whole title. */
 function PriceFrame({ title, children, end, scene }: { title: string; children: ReactNode; end?: ReactNode; scene?: boolean }) {
   use(fontsReady)
-  useEffect(() => { document.title = `${title} · ${productName.toLowerCase()}` }, [title])
+  useEffect(() => { document.title = title }, [title])
   // A page opens at its top, unless it takes over from the painted one, which the reader may have scrolled.
   const painted = useShellTakeover(), opened = useRef(false)
   useLayoutEffect(() => { if (opened.current || !painted) window.scrollTo(0, 0); opened.current = true }, [title, painted])
@@ -100,8 +100,9 @@ export function PricePage() {
   const page = PRICE_PAGES.find(p => p.path === (vendor === null ? '/pricing' : `/compare/${vendor}`))
   // The board's frame in the homepage's steel, while its concrete waits for a yes (board.tsx): ?frame=steel.
   const [search] = useSearchParams()
-  if (vendor !== null && !comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
-  return <PriceFrame title={page?.title ?? 'Price calculator'} end={<BoardEnd comparison={comparison} />} scene>
+  if (vendor !== null && !comparison) return <PriceFrame title={`Page not found · ${productName.toLowerCase()}`}><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
+  // The tab's title is the one the page's HTML carries (price-pages.ts), so search engines read one title either way.
+  return <PriceFrame title={page!.searchTitle} end={<BoardEnd comparison={comparison} />} scene>
     <PriceScene comparison={comparison} frame={search.get('frame')} />
   </PriceFrame>
 }

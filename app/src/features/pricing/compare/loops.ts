@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Loops (/compare/loops): a comparison's whole entry (prices.ts, Entry). Every figure was read on Loops's
 // own pages on CHECKED: the monthly prices in pricing.md, which carries its pricing page's brackets.
@@ -60,5 +60,4 @@ export const loops: Entry = {
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'free', 'send', 'receive'],
   without: ['signup forms', 'automations'],
-  description: `Loops prices by subscribers, Nightmail by email. Monthly prices at ${listOf(sizes.map(formatCount))} subscribers, checked ${dayOf(CHECKED)}.`,
 }

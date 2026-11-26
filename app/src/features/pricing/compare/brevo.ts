@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Brevo (/compare/brevo): a comparison's whole entry (prices.ts, Entry). Every figure was read on Brevo's
 // own pages on CHECKED: each paid tier's monthly total from its pricing page's configurator (Monthly selected), and the
@@ -76,5 +76,4 @@ export const brevo: Entry = {
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'team', 'free', 'send'],
   without: ['signup forms', 'landing pages', 'automations'],
-  description: `Brevo prices by emails a month, Nightmail by email. Monthly prices at ${listOf(sizes.map(formatCount))} subscribers, checked ${dayOf(CHECKED)}.`,
 }

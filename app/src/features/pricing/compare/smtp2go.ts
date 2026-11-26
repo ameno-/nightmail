@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs SMTP2GO (/compare/smtp2go): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // SMTP2GO's own pages on CHECKED: the plans on its pricing page as it renders with monthly billing ($15 for 10,000; the
@@ -49,5 +49,4 @@ export const smtp2go: Entry = {
   ],
   // SMTP2GO's readers first see the API, the allowances and the campaigns it leaves out.
   panels: ['send', 'free', 'campaign', 'contacts', 'receive', 'agent', 'domain'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }
