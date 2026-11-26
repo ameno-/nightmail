@@ -362,6 +362,8 @@ const pages = ids => [
     ['Pricing · signed in', '/pricing', {}],
     ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
     ['Compare · Resend', '/compare/resend', { user: null, from: '/pricing', click: 'vs Resend' }],
+    // Signed in, the page painted for a visitor gives way to Open dashboard and no terms line.
+    ['Compare · Resend · signed in', '/compare/resend', {}],
     ['Compare', '/compare', { user: null }],
     ['Compare · with the set', '/compare/with-set', { user: null }],
   ] : [
