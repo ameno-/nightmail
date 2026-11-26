@@ -21,25 +21,20 @@ export const inboxViews: { value: InboxView; label: string; count?: keyof InboxC
 export const viewOf = (search: string): InboxView => { const view = new URLSearchParams(search).get('view'); return view && view !== 'needs_you' ? 'all' : 'needs_you' }
 export const channelOf = (search: string): Channel | '' => { const channel = new URLSearchParams(search).get('channel'); return channel && Object.hasOwn(channelLabels, channel) ? channel as Channel : '' }
 
-// Where a conversation stands. Needing you, the most pressing reason first: a failed send, a customer who got no reply,
-// blocked work, a customer waiting, a ticket. Otherwise: the agent handling it, waiting on the customer, done or closed.
-export type Triage = { key: 'failed' | 'no_reply' | 'blocked' | 'waiting' | 'ticket' | 'paused' | 'agent' | 'customer' | 'done' | 'closed'; text: string; tone: Tone }
+// Where a conversation stands, in six labels: three distinct failure states (Not sent, No reply sent, Blocked),
+// Needs you (anything else awaiting staff), Waiting (open, awaiting the customer or agent), and Done.
+export type Triage = { key: 'failed' | 'no_reply' | 'blocked' | 'needs_you' | 'waiting' | 'done'; text: string; tone: Tone }
 export function triageOf(c: SupportConversation): Triage {
   const reasons = c.needsYou?.reasons
   if (!reasons) {
-    if (c.done) return { key: 'done', text: 'Done', tone: 'neutral' }
-    if (c.status === 'closed') return { key: 'closed', text: 'Closed', tone: 'neutral' }
-    // Agent feedback has nobody to answer: once its ticket is resolved it is finished.
-    if (c.channel === 'agent_feedback') return { key: 'done', text: c.ticket?.resolvedAt ? 'Resolved' : 'Open', tone: 'neutral' }
-    if ((c.lastAuthor === 'agent' || c.lastAuthor === 'staff') && !c.preview?.held) return { key: 'customer', text: 'Waiting on customer', tone: 'neutral' }
-    return c.agentState === 'active' ? { key: 'agent', text: 'AI handling', tone: 'success' } : { key: 'paused', text: 'Paused', tone: 'neutral' }
+    if (c.done || c.status === 'closed' || (c.channel === 'agent_feedback' && Boolean(c.ticket?.resolvedAt))) return { key: 'done', text: 'Done', tone: 'neutral' }
+    if (c.channel === 'agent_feedback') return { key: 'needs_you', text: 'Needs you', tone: 'info' }
+    return { key: 'waiting', text: 'Waiting', tone: 'neutral' }
   }
   if (reasons.includes('failed')) return { key: 'failed', text: 'Not sent', tone: 'danger' }
   if (reasons.includes('no_reply')) return { key: 'no_reply', text: 'No reply sent', tone: 'danger' }
   if (reasons.includes('blocked')) return { key: 'blocked', text: 'Blocked', tone: 'warning' }
-  if (reasons.includes('paused') && c.lastAuthor === 'customer') return { key: 'waiting', text: 'Customer waiting', tone: 'warning' }
-  if (reasons.includes('ticket')) return { key: 'ticket', text: 'Ticket open', tone: c.needsYou!.urgent ? 'warning' : 'info' }
-  return { key: 'paused', text: 'Waiting on you', tone: 'info' }
+  return { key: 'needs_you', text: 'Needs you', tone: c.needsYou!.urgent ? 'warning' : 'info' }
 }
 export function InboxTabs({ view, counts, onChange, disabled = false }: { view: InboxView; counts: InboxCounts | null; onChange?: (view: InboxView) => void; disabled?: boolean }) {
   return <div className="sinbox-tabs"><Tabs value={view} label="Support views" disabled={disabled} onValueChange={value => onChange?.(value as InboxView)}
