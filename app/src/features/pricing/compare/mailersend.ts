@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs MailerSend (/compare/mailersend): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // MailerSend's own pages on CHECKED: each plan's price and overage on its pricing page (monthly billing), and its help
@@ -57,5 +57,4 @@ export const mailerSend: Entry = {
   ],
   // MailerSend's readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'domain', 'route', 'agent', 'campaign'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

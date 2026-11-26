@@ -92,6 +92,12 @@ export type TransportEvent =
   | { type: 'server'; message: ServerMessage }
   | { type: 'connection'; state: Connection; retryAt?: number; reason?: string }
 
+/** A message the chat couldn't take, filed as a ticket for the team (POST /v1/contact-support with ticket): the
+ *  conversation that holds it (the person's chat), its ID there, and where the team replies by email. */
+export type FiledTicket = { conversationId: string; messageId: string; replyTo: string | null }
+/** Why a message couldn't be filed: past the person's hourly limit, or Nightmail couldn't be reached (kept, tried again). */
+export class FileError extends Error { constructor(readonly reason: 'capped' | 'unreachable') { super(reason) } }
+
 /** What the panel talks to: the support Worker's socket (socket.ts) or the scripted demo (demo.ts). */
 export interface SupportTransport {
   readonly kind: 'live' | 'demo'
@@ -107,6 +113,9 @@ export interface SupportTransport {
   decideAction(actionId: string, decision: 'confirm' | 'decline'): Promise<SupportAction>
   /** Forgets a closed conversation so the next message starts a new one. */
   restart(): void
+  /** Files a message the chat can't take as a ticket for the team, through Nightmail alone (it works while the support
+   *  Worker is down); the ticket's conversation becomes the one this transport continues. Rejects with a FileError. */
+  file(text: string): Promise<FiledTicket>
   /** Whether this transport takes screenshots. */
   readonly uploads: boolean
   /** Uploads one screenshot (§5.1), reporting progress from 0 to 1; the returned att_ ID goes in user.message.attachments.

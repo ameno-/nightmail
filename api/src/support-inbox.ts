@@ -106,7 +106,7 @@ const Event = z.object({ id: z.string(), kind: z.enum(EVENT_KINDS), by: z.object
   details: z.record(z.string(), z.unknown()), at: z.string() }).openapi('SupportInboxEvent');
 const Item = z.object({
   id: z.string(), channel: z.enum(['chat', 'email', 'agent_feedback']).describe('agent_feedback: a report an agent filed with sendFeedback (src/feedback.ts), bound to its credential\u2019s workspace; nobody to reply to.'),
-  mode: z.enum(['member', 'non_member', 'pending_signin', 'unverified']), verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'credential']),
+  mode: z.enum(['member', 'non_member', 'pending_signin', 'unverified']), verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'credential', 'agent']).describe('agent: an email conversation Nightmail opened for an agent\u2019s report that asks something, bound to the person it emails the answer to.'),
   status: z.enum(['open', 'ticketed', 'closed']), subject: z.string().nullable(),
   customer: z.object({ userId: z.string(), name: z.string().nullable(), email: z.string().nullable() }).nullable().describe('The person Nightmail bound the conversation to, or null.'),
   sender: z.string().nullable().describe('An email conversation’s sender address, whether or not it proved who it is.'),
@@ -220,7 +220,9 @@ const owedAt = sql`(SELECT CASE WHEN si.message_id IS NULL OR (si.general_answer
     ELSE least(si.signed_in_at, (SELECT CASE WHEN min(r.general_answer_requested_at) >= m.created_at THEN min(r.general_answer_requested_at) END
       FROM support_email_signins r WHERE r.conversation_id = m.conversation_id)) END
   FROM (SELECT 1) one LEFT JOIN support_email_signins si ON si.conversation_id = m.conversation_id AND si.message_id = m.source_message_id)`;
-const unansweredSince = sql`(SELECT min(${owedAt}) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
+// A message the dashboard filed as a ticket (kind filed) had its answer at once: the panel told them it was filed and
+// that the team replies by email, as the agent's own ticket notice does. It is Needs you for its ticket, not No reply sent.
+const unansweredSince = sql`(SELECT min(${owedAt}) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' AND m.kind IS DISTINCT FROM 'filed'
   AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND ${reached}), 0))`;
 const NO_REPLY_AFTER = sql`interval '10 minutes'`;
 const noReply = (since: SQL) => sql`(c.channel <> 'agent_feedback' AND coalesce(${since} < now() - ${NO_REPLY_AFTER}, false))`;
@@ -482,6 +484,7 @@ export function registerSupportInbox(app: App) {
         done_at = CASE WHEN ${reopen} THEN NULL ELSE done_at END, done_by = CASE WHEN ${reopen} THEN NULL ELSE done_by END,
         ticket_id = CASE WHEN ticket_type = 'staff' THEN coalesce(${ticket?.id ?? null}, ticket_id) ELSE coalesce(ticket_id, ${ticket?.id ?? null}) END,
         ticket_resolved_at = CASE WHEN ticket_type = 'staff' AND ${ticket?.id ?? null}::text IS NOT NULL THEN NULL ELSE ticket_resolved_at END,
+        ticket_resolved_by = CASE WHEN ticket_type = 'staff' AND ${ticket?.id ?? null}::text IS NOT NULL THEN NULL ELSE ticket_resolved_by END,
         ticket_type = coalesce(${ticket?.type ?? null}, ticket_type), ticket_severity = coalesce(${ticket?.severity ?? null}, ticket_severity),
         status = CASE WHEN ${ticket?.id ?? null}::text IS NOT NULL AND status = 'open' THEN 'ticketed' ELSE status END,
         turns = greatest(turns, ${body.turns ?? 0}::int), cost_usd = greatest(cost_usd, ${body.costUsd ?? 0}::numeric), blocked_work = coalesce(${body.blockedWork ?? null}::int, blocked_work),
@@ -598,7 +601,7 @@ export function registerSupportInbox(app: App) {
       activity: Json[]; notes: Json[]; available: boolean; events: { id: string; kind: z.infer<typeof Event>['kind']; user_id: string | null; name: string | null; details: Json; at: string }[]; brief: z.infer<typeof Brief> | null;
       reply_address: string | null; reply_verified: boolean }>(sql`WITH conv AS (SELECT * FROM support_conversations WHERE id = ${id}), logged AS (${viewed})
       SELECT (SELECT row_to_json(i) FROM (SELECT ${itemColumns} FROM ${itemFrom(operator.userId)} WHERE c.id = conv.id) i) AS item,
-        conv.evidence, conv.thread_id, conv.content_workspace_id, (SELECT page FROM support_handoffs WHERE conversation_id = conv.id) AS page,
+        conv.evidence, conv.thread_id, conv.content_workspace_id, (SELECT page FROM support_handoffs WHERE conversation_id = conv.id ORDER BY created_at LIMIT 1) AS page,
         (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.agent_approval_id IS NOT NULL AS via_agent, m.email_from, m.delivery,
           m.held_reason, m.files, CASE WHEN m.source_message_id IS NOT NULL THEN ${emailOf} END AS email,
           m.draft_outcome, m.draft_by, (SELECT name FROM nightmail_users WHERE id = m.draft_by) AS draft_by_name, m.draft_at::text AS draft_at, m.draft_reply,

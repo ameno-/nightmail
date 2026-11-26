@@ -7,17 +7,17 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 `gh pr merge <n>` enqueues a PR. The queue is enabled on the **classic `dev` branch protection**, not the disabled `dev merge queue` ruleset. It merges onto the latest `dev` and the entries ahead of it only after the required `merge_group` checks (`build`, `acceptance`, `cls`, `preview`, `gateway`, `support`) pass. Only accounts allowed to push `dev` can enqueue.
 
 - **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
-- **Cost:** ordinary PRs run selected suites twice, once on the PR and once in the queue. The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
-- **Landing batches:** a PR from a branch in this repository whose name starts with `land/batch-` runs the full build and audit. Its five heavy suites are marked unselected, so their required checks pass through the usual skip check. Forks and other branch names use normal PR selection.
-- **Why the name cannot bypass the gate:** the shortcut applies only to the PR event. Before a batch can merge into `dev`, the queue checks the combined commit against the latest `dev`, using the same path rules as for any other entry. Every selected suite must pass on that commit; a green PR cannot substitute for it.
+- **PR checks:** PRs from this repository run the full build and audit. Their five heavy suites wait for the queue; fork PRs still run every suite selected by their changed paths.
+- **Full CI before queueing:** add the `full-ci` label to run every suite on the PR, even for docs-only changes.
+  Remove it to return to the default; either label change starts a new PR run.
 - **Path-gated checks:** the six required check names always report a result. A check passes only if its selected suite succeeded, or path detection succeeded and deliberately skipped it. Detection uses the PR merge checkout's first parent, or the **live dev tip** on a queue entry's first-parent chain (including pending PRs ahead of it). If dev has already advanced past the group, run everything.
-- **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
+- **Failures:** when a required check fails, CI waits up to three minutes for GitHub to record a failed-check ejection of that PR at that exact queue commit. It then comments with the failed checks and run link. Fix and re-add the ejected PR. Rebuilt followers and audit-only failures get no comment.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
 - **Breaking API changes:** each queue entry is compared with its first parent, which already includes the PRs ahead of it. Only the `api-breaking` label on the PR supplying this entry's head can waive its breaks. An unlabelled entry must still pass, even if it undoes an earlier entry's change.
 
 ## Which changes select which suites
 
-| Changed input | Suites selected on a PR or queue entry |
+| Changed input | Suites selected on a fork PR or queue entry |
 | --- | --- |
 | Workflow, shared action, CI/deploy script, or dependency lockfile | Everything. Non-queue pushes to dev also run everything. |
 | API code (including the hosted MCP), configuration, migrations or tests | Build (API types, both Worker bundles, pre-merge checks and generated contract/SDK), acceptance, preview and CLS (its fixture runs this API's migrations, server and read limits and seeds its tables with raw SQL). Bundling needs Vite's static assets, not a separate dashboard type-check. |

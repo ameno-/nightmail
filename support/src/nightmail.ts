@@ -36,7 +36,7 @@ export type OutboxReply = { id: string; conversationId: string; channel: 'chat' 
 /** How Nightmail knows who a conversation is for: its own signed handoff, or a message it received at a support address. */
 export type ConversationEvidence = { kind: 'handoff'; token: string } | { kind: 'email'; messageId: string };
 export type Mode = 'member' | 'non_member' | 'pending_signin' | 'unverified';
-export type Verification = 'handoff' | 'dmarc' | 'signin' | 'none';
+export type Verification = 'handoff' | 'dmarc' | 'signin' | 'none' | 'agent';
 /** A registration's answer (POST /v1/operator/support/conversations): Nightmail's decision about the conversation. */
 export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification; status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean;
   /** Email: the message passed the sender checks a general answer needs (api/src/support-conversations.ts emailEvidence). */
@@ -67,6 +67,13 @@ export type SupportAction = {
 };
 
 /** The methods of Nightmail's SupportPlatform entrypoint, as this Worker calls them over RPC. */
+/**
+ * A chat as Nightmail holds it (GET /v1/operator/support/conversations/{id}/filed): `filed` when Nightmail opened it
+ * from a message the dashboard filed and this Worker never registered it; `messages` the customer's filed messages,
+ * oldest first, already with staff.
+ */
+export type FiledConversation = { id: string; status: 'open' | 'ticketed' | 'closed'; filed: boolean; user: { id: string; name: string | null; email: string | null };
+  workspace: { id: string; name: string; role: 'owner' | 'admin' | 'member' } | null; page: string | null; requestIds: string[]; messages: { id: string; text: string; at: string }[] };
 export interface SupportPlatform {
   verifyWake(token: string, conversationId: string): Promise<boolean>;
   /** A staff download of one screenshot: Nightmail's short-lived token for this conversation and attachment. */
@@ -85,6 +92,8 @@ export interface SupportPlatform {
   pullOutbox(conversationId?: string): Promise<PlatformReply<{ data: OutboxReply[] }>>;
   /** Conversations whose sender asked, from the sign-in link, to be answered by email instead (one conversation's, after its wake). */
   generalAnswers(conversationId?: string): Promise<PlatformReply<{ data: { conversationId: string; messageId: string; requestedAt: string }[] }>>;
+  /** A chat as Nightmail holds it, with the messages the dashboard filed while the chat couldn't take them (api/src/support-conversations.ts). */
+  filedConversation(conversationId: string): Promise<PlatformReply<FiledConversation>>;
   markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed'): Promise<PlatformReply<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>>;
   // One path to a human (api/src/support-staff-mail.ts): the staff emails Nightmail wrote, and each one sent.
   staffMail(): Promise<PlatformReply<{ data: StaffEmail[] }>>;
@@ -104,13 +113,18 @@ export interface SupportPlatform {
   feedbackTriage(conversationId: string, note: TriageNoteInput): Promise<PlatformReply<{ conversationId: string; ticketId: string | null; messageId: string; classification: string; createdAt: string }>>;
   /** What one reading of a report cost (its model turns and US dollars): sent once, after it ends. */
   feedbackUsage(conversationId: string, usage: { turns: number; costUsd: number }): Promise<PlatformReply<{ conversationId: string; turns: number; costUsd: number }>>;
+  /** Agent reports to answer by email (api/src/feedback-triage.ts): each one's email conversation, claimed (at most three times). */
+  agentAnswersDue(limit: number): Promise<PlatformReply<{ data: AgentAnswer[] }>>;
 }
 /** What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply). */
 export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null };
+/** An agent's report that asks something, to answer by email: the person's own conversation, its first message the report (untrusted). */
+export type AgentAnswer = { conversationId: string; messageId: string; reportConversationId: string; filedAt: string; credential: 'apiKey' | 'agentToken' | 'mcp' | 'dashboard'; credentialEnd: string | null; subject: string | null; text: string;
+  person: { userId: string; email: string; name: string | null }; workspace: { id: string; name: string } };
 /** An agent feedback report to triage: Nightmail's facts, and its text as its filer wrote it (untrusted). */
 export type FeedbackReport = { conversationId: string; ticketId: string; filedAt: string; operation: string | null; requestId: string | null; text: string };
 /** The triage agent's one note: its summary and likely cause, a suggested classification, and duplicates by ticket ID. */
-export type TriageNoteInput = { summary: string; cause: string; classification: 'bug' | 'docs_gap' | 'neither'; duplicates: string[] };
+export type TriageNoteInput = { summary: string; cause: string; classification: 'bug' | 'docs_gap' | 'neither' | 'question'; duplicates: string[] };
 /** A staff email to send from the support address to the team: a new thread, or a reply in threadId to replyToMessageId. */
 export type StaffEmail = { key: string; threadId: string | null; replyToMessageId: string | null; subject: string; text: string; html: string };
 /** A platform reply's body, or (any other status than `ok`) a NightmailError the work queue can classify. */

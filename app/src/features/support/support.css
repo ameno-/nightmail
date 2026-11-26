@@ -10,8 +10,9 @@
    above the tab bar. */
 .app-shell--compact .support-panel:not(.support-panel--sheet) { inset: calc(var(--mobile-bar-height) + env(safe-area-inset-top)) var(--page-inset) max(calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--page-inset)), calc(var(--keyboard-inset, 0px) + var(--page-inset))) auto; width: min(400px, calc(100vw - 2 * var(--page-inset))); height: auto; max-height: 720px; transform-origin: right top; }
 
-/* Phone: a full-height sheet resting on the tab bar (which stays in reach), above the keyboard while typing. */
-.support-panel--sheet { inset: max(var(--space-12), env(safe-area-inset-top)) 0 max(calc(var(--tab-bar-height) + env(safe-area-inset-bottom)), var(--keyboard-inset, 0px)); z-index: 29; width: auto; height: auto; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; opacity: 1; transform: translateY(100%); transition: transform 220ms var(--ease-out-strong), visibility 0s 220ms; }
+/* Phone: a full-height sheet resting on the tab bar (which stays in reach), above the keyboard while typing. Get started
+   has no tab bar: the sheet rests on the screen's bottom edge. */
+.support-panel--sheet { inset: max(var(--space-12), env(safe-area-inset-top)) 0 max(calc(var(--tab-bar-height, 0px) + env(safe-area-inset-bottom)), var(--keyboard-inset, 0px)); z-index: 29; width: auto; height: auto; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; opacity: 1; transform: translateY(100%); transition: transform 220ms var(--ease-out-strong), visibility 0s 220ms; }
 .support-panel--sheet[data-open] { transform: none; transition: transform 320ms var(--ease-drawer), visibility 0s; }
 @starting-style { .support-panel--sheet[data-open] { transform: translateY(100%); } }
 .support-panel--sheet .ui-sheet__grab { height: 16px; padding-top: var(--space-6); }
@@ -72,6 +73,9 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-user { max-width: 100%; padding: var(--space-6) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-2); white-space: pre-wrap; }
 .support-failed { display: flex; align-items: center; gap: var(--space-4); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .support-failed .ui-button { margin-right: calc(-1 * var(--button-pad-x)); }
+/* Under what went to the team as a ticket (the chat couldn't take it): one quiet line, its text read from the left. */
+.support-filed { display: flex; align-items: flex-start; gap: var(--space-6); max-width: 100%; margin: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.support-filed svg { flex: none; margin-top: var(--space-2); }
 
 /* The caret at the end of text that is still arriving. An empty inline box with padding (not an inline-block), so it
    travels with the text without counting as a layout shift. */

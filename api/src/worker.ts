@@ -9,7 +9,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isPublicPage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
@@ -311,6 +311,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async inboxState(conversationId: string) { return (await this.platform()).inboxState(conversationId); }
   async pullOutbox(conversationId?: string) { return (await this.platform()).pullOutbox(conversationId); }
   async generalAnswers(conversationId?: string) { return (await this.platform()).generalAnswers(conversationId); }
+  async filedConversation(conversationId: string) { return (await this.platform()).filedConversation(conversationId); }
   async markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed') { return (await this.platform()).markDelivery(conversationId, messageId, status); }
   async staffMail() { return (await this.platform()).staffMail(); }
   async staffMailSent(key: string, sent: { threadId: string; messageId: string }) { return (await this.platform()).staffMailSent(key, sent); }
@@ -321,6 +322,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async feedbackRelated(conversationId: string) { return (await this.platform()).feedbackRelated(conversationId); }
   async feedbackTriage(conversationId: string, note: Parameters<SupportPlatformApi['feedbackTriage']>[1]) { return (await this.platform()).feedbackTriage(conversationId, note); }
   async feedbackUsage(conversationId: string, usage: Parameters<SupportPlatformApi['feedbackUsage']>[1]) { return (await this.platform()).feedbackUsage(conversationId, usage); }
+  async agentAnswersDue(limit: number) { return (await this.platform()).agentAnswersDue(limit); }
   // A plain fetch to the entrypoint answers nothing: the methods above are the whole surface.
   override async fetch() { return new Response(null, { status: 404 }); }
 }
@@ -361,7 +363,8 @@ export default {
       // Existing files are served asset-first. Only dashboard routes get the shell on a miss. "/" on a hosted
       // installation is the homepage: home.html, the dashboard's shell with the homepage's first screen painted in it
       // (app/home-shell.ts); Workers Assets answers /home with it.
-      if (pathname.startsWith('/assets/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
+      // A hashed build file or a link-preview card (og/<name>-<hash>.png: app/link-card.ts) that isn't there is not found.
+      if (pathname.startsWith('/assets/') || pathname.startsWith('/og/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
       if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok || page.status === 304) return untransformed(page, request); }
       // A price page (app/price-pages.ts writes one per comparison), or its Markdown twin: the file, compressed here
@@ -375,8 +378,11 @@ export default {
       // A comparison the build has no page for (app/price-pages.ts writes one per entry, served before the Worker): not
       // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
       // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
-      if (isMissingComparePage(pathname)) return untransformed(shell, request, 404);
-      return untransformed(shell, request);
+      if (isMissingComparePage(pathname) || isMissingDocsPage(pathname)) return untransformed(shell, request, 404);
+      // A signed-in screen (site-index.ts): a crawler sees the sign-in under its address, so it stays out of search.
+      const page = untransformed(shell, request);
+      if (!isPublicPage(pathname)) page.headers.set('x-robots-tag', 'noindex');
+      return page;
     }
     // A linked campaign image (src/linked-images.ts) is the same bytes for every reader: once answered, this colo keeps it
     // and answers it again before admission, the database or storage.

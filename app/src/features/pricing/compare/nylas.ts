@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, readOn, type Entry, type Offer } from '../prices.ts'
+import { fact, readOn, type Entry, type Offer } from '../prices.ts'
 
 // Nightmail vs Nylas (/compare/nylas): a comparison's whole entry (prices.ts, Entry), of Nylas's Agent Accounts, its
 // inboxes for AI agents (not its email and calendar sync API). Every figure was read on Nylas's own pages on CHECKED.
@@ -43,5 +43,4 @@ export const nylas: Entry = {
   ],
   // Nylas's readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'domain', 'free', 'send', 'team', 'route'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} agent inboxes, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

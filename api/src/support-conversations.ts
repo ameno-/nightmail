@@ -117,7 +117,7 @@ const SENT_WITHIN_DAYS = 3;
 const Mode = z.enum(['member', 'non_member', 'pending_signin', 'unverified']);
 const Registered = z.object({
   id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode.describe('member: reads the account by role; non_member: general answers; pending_signin and unverified: the same fixed reply with a sign-in for that message, then (generalAnswer, nobody claimed it in time) a general answer.'),
-  verification: z.enum(['handoff', 'dmarc', 'signin', 'none']), status: z.enum(['open', 'ticketed', 'closed']),
+  verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'agent']), status: z.enum(['open', 'ticketed', 'closed']),
   workspaceId: z.string().nullable().describe('The one workspace in scope: a chat’s, or the one an email narrowed to. Null: every membership.'),
   contentShared: z.boolean().describe('Whether the customer let support read message content (a chat, in its own workspace).'),
   created: z.boolean().describe('False when this registration repeated or added to an earlier one.'),
@@ -136,12 +136,15 @@ export const supportPlatformOnly = async (c: Ctx) => {
 };
 const limitReached = (channel: 'chat' | 'email') => new ApiError(429, 'SUPPORT_CONVERSATION_LIMIT', channel === 'chat' ? `This person already has ${OPEN_CONVERSATIONS} open support chats. Close one first.`
   : `This person already has ${OPEN_EMAIL_CONVERSATIONS} open email support conversations. One must end first.`);
-const openCount = (userId: unknown, channel: 'chat' | 'email') => sql`(SELECT count(*)::int FROM support_conversations WHERE user_id = ${userId} AND channel = ${channel} AND status <> 'closed')`;
+// Not the conversations Nightmail opened for their agents' reports (verification 'agent'): those have their own daily
+// caps (src/feedback.ts FEEDBACK_ANSWERS) and never take the room of the person's own email.
+const openCount = (userId: unknown, channel: 'chat' | 'email') => sql`(SELECT count(*)::int FROM support_conversations WHERE user_id = ${userId} AND channel = ${channel} AND status <> 'closed' AND verification <> 'agent')`;
 /**
  * Serializes admission for one person: every path that sets user_id (a handoff, an email, a claim) takes this lock first, before
  * any conversation or handoff row, so its count is a later statement that sees every admission committed before it.
  */
 const admit = (tx: DbExecutor, userId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 39601))`);
+export const admitPerson = admit;
 
 /** Printable ASCII: only such an address is compared for an account (a Unicode one never binds; it can sign in). */
 const ASCII = /^[\x21-\x7e]+$/;
@@ -322,6 +325,54 @@ export async function releaseGeneralAnswer(tx: DbExecutor, conversationId: strin
   return 'released';
 }
 
+const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
+const random32 = (n: number) => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => BASE32[b & 31]).join('');
+/**
+ * The support chat couldn't take a message (it couldn't start, its service couldn't be reached, or it dropped after the
+ * person sent it), so the dashboard filed it (POST /v1/contact-support with ticket). It goes into this person's open chat
+ * in this workspace, the one the Help panel continues, or opens one from the handoff (evidence.filed), as a customer
+ * message of kind filed, with a ticket of type staff (Needs you) unless one is open, and the agent paused for it. The
+ * same words again within the hour are the same message (a retry, or the support platform mirrored it before the chat
+ * dropped): not stored twice, but back in Needs you all the same. In the caller's transaction, after the handoff row,
+ * which it marks used for that conversation.
+ *
+ * Nothing calls the support platform from here, so it works while the platform is down: the inbox is Nightmail's own, and
+ * a staff reply waits in the outbox. The platform adopts a conversation it doesn't hold and takes the filed messages into
+ * its transcript from GET /v1/operator/support/conversations/{id}/filed (when the panel resumes it, or a staff reply
+ * wakes it).
+ */
+export async function fileChatTicket(tx: DbExecutor, input: { userId: string; workspaceId: string; handoffId: string; text: string }) {
+  await admit(tx, input.userId);
+  const { rows: [open] } = await tx.execute<{ id: string; messages: number }>(sql`SELECT id, messages FROM support_conversations
+    WHERE channel = 'chat' AND user_id = ${input.userId} AND workspace_id = ${input.workspaceId} AND status <> 'closed'
+    ORDER BY coalesce(last_message_at, created_at) DESC, created_at DESC, id DESC LIMIT 1 FOR NO KEY UPDATE`);
+  let conversation = open;
+  if (!conversation) {
+    if ((await tx.execute<{ n: number }>(sql`SELECT ${openCount(input.userId, 'chat')} AS n`)).rows[0]!.n >= OPEN_CONVERSATIONS) throw limitReached('chat');
+    conversation = { id: `conv_${random32(26)}`, messages: 0 };
+    await tx.execute(sql`INSERT INTO support_conversations(id, channel, user_id, verification, evidence, mode, workspace_id)
+      VALUES (${conversation.id}, 'chat', ${input.userId}, 'handoff', ${JSON.stringify({ handoff: input.handoffId, filed: true })}::jsonb, 'member', ${input.workspaceId})`);
+  }
+  const { rows: [same] } = await tx.execute<{ id: string }>(sql`SELECT id FROM support_messages WHERE conversation_id = ${conversation.id} AND author = 'customer'
+    AND text = ${input.text} AND created_at > now() - interval '1 hour' ORDER BY seq DESC LIMIT 1`);
+  let messageId = same?.id;
+  if (!messageId) {
+    messageId = `msg_${random32(16)}`;
+    await tx.execute(sql`INSERT INTO support_messages(id, conversation_id, seq, author, kind, text) VALUES (${messageId}, ${conversation.id}, ${conversation.messages + 1}, 'customer', 'filed', ${input.text})`);
+    await tx.execute(sql`UPDATE support_conversations SET messages = messages + 1, last_message_at = now() WHERE id = ${conversation.id}`);
+  }
+  // Every filing brings a conversation staff marked done back to them, the same words again included: the person was
+  // told it was filed.
+  await tx.execute(sql`UPDATE support_conversations SET done_at = NULL, done_by = NULL WHERE id = ${conversation.id} AND done_at IS NOT NULL`);
+  const [{ openStaffTicket }, { event }] = await Promise.all([import('./support-staff-mail.js'), import('./support-inbox.js')]);
+  await openStaffTicket(tx, conversation.id, 'P2', true, { reason: 'chat_unavailable' });
+  // The agent stops for the ticket, as after an emailed one: a person answers it, here or when the chat is back.
+  const { rows: [paused] } = await tx.execute(sql`UPDATE support_conversations SET agent_state = 'paused', paused_by = 'ticket', paused_at = now() WHERE id = ${conversation.id} AND agent_state = 'active' RETURNING id`);
+  if (paused) await tx.execute(event(conversation.id, 'paused', null, { by: 'ticket' }));
+  await tx.execute(sql`UPDATE support_handoffs SET used_at = now(), conversation_id = ${conversation.id} WHERE id = ${input.handoffId}`);
+  return { conversationId: conversation.id, messageId };
+}
+
 export function registerSupportConversations(app: App) {
   const operatorSecurity: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
   const sessionSecurity: Record<string, string[]>[] = [{ dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -444,6 +495,32 @@ export function registerSupportConversations(app: App) {
   });
 
   const Released = z.object({ conversationId: z.string(), messageId: z.string(), requestedAt: z.string() }).openapi('SupportGeneralAnswerDue');
+  const Filed = z.object({
+    id: z.string(), status: z.enum(['open', 'ticketed', 'closed']),
+    filed: z.boolean().describe('Nightmail opened this conversation from a filed message: the support platform has never registered it, and adopts it as a chat for this person and workspace.'),
+    user: z.object({ id: z.string(), name: z.string().nullable(), email: z.string().nullable() }),
+    workspace: z.object({ id: z.string(), name: z.string(), role: z.enum(['owner', 'admin', 'member']) }).nullable().describe('The chat\u2019s workspace, while the person is still a member there; null otherwise (then it is not theirs to continue).'),
+    page: z.string().nullable().describe('The dashboard page of the handoff that opened it.'), requestIds: z.array(z.string()).describe('The failed requests that handoff named.'),
+    messages: z.array(z.object({ id: z.string(), text: z.string(), at: z.string() })).describe('The customer\u2019s messages filed while the chat couldn\u2019t take them, oldest first: take each into the transcript under its own ID (the mirror then leaves it as it is), as already handed to staff (no turn for it).'),
+  }).openapi('SupportFiledConversation');
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'get', path: '/v1/operator/support/conversations/{id}/filed', operationId: 'operatorGetFiledSupportConversation',
+    description: 'A chat conversation as Nightmail holds it, with the messages the dashboard filed while the support chat couldn\u2019t take them (the binding only): what the support platform needs to adopt a conversation it never registered (evidence.filed) and to take filed messages into one it holds. Only a chat with a person; 404 otherwise.',
+    request: { params: ConversationParam }, responses: { 200: response(Filed), ...errors } }), async c => {
+    await supportPlatformOnly(c);
+    const { rows: [row] } = await c.env.db.execute<{ id: string; status: z.infer<typeof Filed>['status']; filed: boolean; user: z.infer<typeof Filed>['user']; workspace: z.infer<typeof Filed>['workspace'];
+      page: string | null; request_ids: string[] | null; messages: z.infer<typeof Filed>['messages'] }>(sql`SELECT s.id, s.status, coalesce((s.evidence->>'filed')::boolean, false) AS filed,
+        json_build_object('id', u.id, 'name', u.name, 'email', u.email) AS user,
+        (SELECT json_build_object('id', w.id, 'name', w.name, 'role', m.role) FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = s.user_id AND m.workspace_id = s.workspace_id) AS workspace,
+        h.page, h.request_ids,
+        coalesce((SELECT json_agg(json_build_object('id', f.id, 'text', f.text, 'at', to_char(f.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) ORDER BY f.seq)
+          FROM support_messages f WHERE f.conversation_id = s.id AND f.author = 'customer' AND f.kind = 'filed'), '[]') AS messages
+      FROM support_conversations s JOIN nightmail_users u ON u.id = s.user_id
+      LEFT JOIN LATERAL (SELECT page, request_ids FROM support_handoffs WHERE conversation_id = s.id ORDER BY created_at LIMIT 1) h ON true
+      WHERE s.id = ${c.req.valid('param').id} AND s.channel = 'chat'`);
+    if (!row) notFound('Support conversation');
+    return c.json({ id: row!.id, status: row!.status, filed: row!.filed, user: row!.user, workspace: row!.workspace, page: row!.page, requestIds: row!.request_ids ?? [], messages: row!.messages }, 200);
+  });
+
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'get', path: '/v1/operator/support/general-answers', operationId: 'operatorSupportGeneralAnswersDue',
     description: 'The support platform\u2019s due list (the binding only): conversations whose sender asked, from the sign-in link, to be answered by email instead (releaseGeneralAnswer), still open and with nothing reaching them since, oldest first. Answer each in general, once, with no account access.',
     request: { query: z.object({ conversationId: z.string().regex(CONVERSATION_ID).optional().describe('Only this conversation\u2019s (after its wake).') }) },
@@ -674,7 +751,7 @@ export function registerSupportConversations(app: App) {
   // ---------- stamped: the conversation's own scope (supportGate has checked and logged the call) ----------
   const Workspace = z.object({ id: z.string(), name: z.string(), role: z.enum(['owner', 'admin', 'member']) });
   const Scope = z.object({
-    conversation: z.object({ id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode, verification: z.enum(['handoff', 'dmarc', 'signin', 'none']),
+    conversation: z.object({ id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode, verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'agent']),
       signedIn: z.array(z.string()).describe('The messages of an email conversation its person confirmed, signed in (the claim), oldest first: each is answered once. Empty otherwise.') }),
     user: z.object({ id: z.string().nullable().describe('The person the conversation is bound to, as Nightmail stamps it; null when nobody is.'), name: z.string().nullable(), email: z.string().nullable(),
       mailboxProven: z.boolean().describe('Whether email is the account’s verified address and a sign-in proved it a mailbox the person reads within the proof window. Only then may an answer written from the account go to it, and only to email as stored.'),
@@ -705,7 +782,7 @@ export function registerSupportConversations(app: App) {
         (SELECT json_build_object('id', id, 'name', name, 'role', role) FROM memberships WHERE id = s.workspace_id) AS workspace,
         coalesce((SELECT json_agg(json_build_object('id', id, 'name', name, 'role', role) ORDER BY name, id) FROM memberships WHERE s.workspace_id IS NULL OR s.channel = 'email' OR id = s.workspace_id), '[]') AS workspaces,
         (SELECT id FROM memberships WHERE id = s.content_workspace_id) AS "contentWorkspaceId",
-        (SELECT page FROM support_handoffs WHERE conversation_id = s.id) AS page,
+        (SELECT page FROM support_handoffs WHERE conversation_id = s.id ORDER BY created_at LIMIT 1) AS page,
         EXISTS (SELECT FROM audit_events v WHERE v.action = 'support.view' AND v.actor_id = s.id AND v.workspace_id IS NOT NULL AND v.workspace_id NOT IN (SELECT id FROM memberships)) AS shrunk,
         s.workspace_id FROM s`);
     const { workspace_id: _w, ...scope } = row!;

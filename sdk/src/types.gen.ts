@@ -6933,6 +6933,23 @@ export type SupportHandoff = {
      */
     expiresAt: string;
     shareContent: boolean;
+    /**
+     * The message filed as a ticket (ticket in the request), or null.
+     */
+    ticket: {
+        /**
+         * Your support chat that now holds the message: the Help panel continues it.
+         */
+        conversationId: string;
+        /**
+         * The message as the conversation holds it.
+         */
+        messageId: string;
+        /**
+         * Where the team replies by email: your account address.
+         */
+        replyTo: string | null;
+    } | null;
 };
 
 export type BillingSummary = {
@@ -7170,11 +7187,30 @@ export type FeedbackReceipt = {
      * The support ticket it was filed as.
      */
     ticketId: string;
+    answer: FeedbackAnswer;
     /**
      * How many values that looked like keys, tokens or passwords were removed from message and context.
      */
     redacted: number;
     createdAt: string;
+};
+
+/**
+ * Whether support answers it, and to whom: always by email to a person, never through this tool.
+ */
+export type FeedbackAnswer = {
+    /**
+     * Who an answer is emailed to: the person behind this credential, their address masked (r•••@e•••.com), or for an API key "an owner of this workspace". Null: no answer will be sent.
+     */
+    to: string | null;
+    /**
+     * Why none will be: nobody in the workspace can get support email, or today’s answers are used up.
+     */
+    reason: 'nobody' | 'capped' | null;
+    /**
+     * What happens now, in one sentence. Nothing more ever comes back through this call or tool.
+     */
+    next: string;
 };
 
 export type FeedbackRequest = {
@@ -26497,6 +26533,15 @@ export type ContactSupportData = {
          */
         shareContent?: boolean;
         message?: string;
+        /**
+         * The support chat couldn't take this message (it couldn't start, Nightmail support couldn't be reached, or it dropped after it was sent): file it as a ticket for the team instead. It goes into your open support chat in this workspace, or opens one, and the team replies by email to your account address, and in the chat. Counts against the same hourly limit. Send the words here, not in message.
+         */
+        ticket?: {
+            /**
+             * What the person wrote, as they wrote it in the chat.
+             */
+            message: string;
+        };
     };
     path?: never;
     query?: never;

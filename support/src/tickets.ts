@@ -23,7 +23,7 @@ export type TicketContext = {
    * tickets of an unbound conversation are always unverified. A ticket's customer is the person Nightmail stamped (its
    * scope), never one looked up from an address.
    */
-  verified: 'handoff' | 'dmarc' | 'signin' | 'magic_link' | null;
+  verified: 'handoff' | 'dmarc' | 'signin' | 'magic_link' | 'agent' | null;
   /** The email's DMARC verdict, for email tickets. */
   dmarc: string | null;
   /** The address that wrote, for an unverified email ticket (never presented as a customer). */

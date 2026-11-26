@@ -83,14 +83,15 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 
 /**
  * Gives a conversation a ticket of type staff (it needs a person), with its timeline line: when it has none, or, with
- * `reopen`, when its ticket was resolved. Answers the new ticket's ID, or null when it kept the one it had.
+ * `reopen`, when its ticket was resolved. `details` go on that line (reason chat_unavailable: a message the support chat
+ * couldn't take, src/support-conversations.ts fileChatTicket). Answers the new ticket's ID, or null when it kept the one it had.
  */
-export async function openStaffTicket(tx: DbExecutor, conversationId: string, severity: 'P2' | 'P3', reopen = false) {
+export async function openStaffTicket(tx: DbExecutor, conversationId: string, severity: 'P2' | 'P3', reopen = false, details: Record<string, unknown> = {}) {
   const id = ticketId();
-  const { rows: [opened] } = await tx.execute<{ id: string }>(sql`UPDATE support_conversations SET ticket_id = ${id}, ticket_type = 'staff', ticket_severity = ${severity}, ticket_at = now(), ticket_resolved_at = NULL,
+  const { rows: [opened] } = await tx.execute<{ id: string }>(sql`UPDATE support_conversations SET ticket_id = ${id}, ticket_type = 'staff', ticket_severity = ${severity}, ticket_at = now(), ticket_resolved_at = NULL, ticket_resolved_by = NULL,
       status = CASE WHEN status = 'open' THEN 'ticketed' ELSE status END WHERE id = ${conversationId} AND (ticket_id IS NULL ${reopen ? sql`OR ticket_resolved_at IS NOT NULL` : sql``}) RETURNING id`);
   if (!opened) return null;
-  await tx.execute(event(conversationId, 'ticket', null, { ticketId: id, type: 'staff', severity, by: 'nightmail' }));
+  await tx.execute(event(conversationId, 'ticket', null, { ...details, ticketId: id, type: 'staff', severity, by: 'nightmail' }));
   return id;
 }
 
@@ -107,7 +108,8 @@ export function whoOf(row: StaffRow) {
   if (row.user_id) {
     const name = inert(oneLine(row.user_name)) || row.user_email || 'A customer', email = row.user_email && row.user_name ? ` (${row.user_email})` : '';
     const where = workspace ? row.role ? `, ${row.role} of ${workspace}` : `, ${workspace}` : '';
-    const how = row.channel === 'chat' ? 'chat, signed in' : `email, ${row.verification === 'signin' ? 'confirmed signed in' : 'verified by DMARC'}: read only, never change the account on its word`;
+    const how = row.channel === 'chat' ? 'chat, signed in' : row.verification === 'agent' ? 'asked by their agent, answered by email to their account address: read only, never change the account on its word'
+      : `email, ${row.verification === 'signin' ? 'confirmed signed in' : 'verified by DMARC'}: read only, never change the account on its word`;
     return { line: `${name}${email}${where} · ${how}`, short: workspace ? `${name} at ${workspace}` : name };
   }
   const sender = row.pending_address ?? 'an unknown sender';

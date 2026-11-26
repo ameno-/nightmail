@@ -6,6 +6,7 @@ import { MAX_IMAGE_BYTES } from './image.js';
 import { daily } from './limits.js';
 import { acceptIntake, acceptSupport, blockUnconfigured, holdAtEdge, intakeAddress, ledgered, sweep } from './ledger.js';
 import { readiness } from './replay.js';
+import { adoptFiledChat } from './conversation.js';
 import { log, logError } from './log.js';
 import { FAVICON_LINKS, favicon } from './favicon.js';
 import { productName } from '../../api/src/brand.js';
@@ -76,6 +77,7 @@ async function startChat(request: Request, env: Env): Promise<Response> {
       if (admitted.ok) {
         const claimed = await env.DB.prepare('INSERT INTO handoffs_used (jti, conversation_id, used_at) VALUES (?, ?, ?) ON CONFLICT (jti) DO NOTHING').bind(handoff.id, existing.id, Date.now()).run();
         if (!claimed.meta.changes) return fail(409, 'HANDOFF_USED', 'This handoff already opened a conversation. Get a fresh one.', headers);
+        await conversation(env, existing.id).takeFiled();
         const chat = await chatToken(env.SUPPORT_ROOT_SECRET, existing.id, handoff.userId);
         return json({ conversationId: existing.id, chatToken: chat.token, socketUrl: socketUrl(env, existing.id, chat.token), expiresAt: chat.expiresAt }, 200, headers);
       }
@@ -115,7 +117,10 @@ async function resumeChat(request: Request, env: Env): Promise<Response> {
   const checked = await env.BANE.verifyHandoff(body.handoff);
   if (!checked.ok) return fail(401, 'HANDOFF_INVALID', 'That handoff is not valid or has expired. Get a fresh one and retry.', headers);
   if (checked.handoff.usedAt) return fail(409, 'HANDOFF_USED', 'This handoff was already used. Get a fresh one.', headers);
-  const row = await env.DB.prepare('SELECT channel, user_id, status FROM conversations WHERE id = ?').bind(body.conversationId).first<{ channel: string; user_id: string | null; status: string }>();
+  const read = () => env.DB.prepare('SELECT channel, user_id, status FROM conversations WHERE id = ?').bind(body.conversationId).first<{ channel: string; user_id: string | null; status: string }>();
+  // A chat Nightmail opened from a message the dashboard filed (the chat couldn't take it): adopted for this person, once.
+  let row = await read();
+  if (!row && await adoptFiledChat(env, body.conversationId!, checked.handoff.userId)) row = await read();
   if (!row || row.status === 'closed') return fail(404, 'CONVERSATION_NOT_FOUND', 'That conversation has ended. Start a new one.', headers);
   // An email conversation continues by email, never in the panel: the panel starts a conversation of its own instead.
   if (row.channel === 'email') return fail(409, 'EMAIL_CONVERSATION', 'This conversation continues by email. Start a new one here.', headers);
@@ -126,6 +131,8 @@ async function resumeChat(request: Request, env: Env): Promise<Response> {
     : fail(404, 'CONVERSATION_NOT_FOUND', 'That conversation has ended. Start a new one.', headers);
   const claimed = await env.DB.prepare('INSERT INTO handoffs_used (jti, conversation_id, used_at) VALUES (?, ?, ?) ON CONFLICT (jti) DO NOTHING').bind(checked.handoff.id, body.conversationId, Date.now()).run();
   if (!claimed.meta.changes) return fail(409, 'HANDOFF_USED', 'This handoff was already used. Get a fresh one.', headers);
+  // What the dashboard filed into it while the chat couldn't take it, into its history (no turn: staff answer those).
+  await conversation(env, body.conversationId!).takeFiled();
   // Only a new chat token: account access never expires mid-conversation (Nightmail reads it from the conversation on
   // every request), so there is nothing to renew.
   const chat = await chatToken(env.SUPPORT_ROOT_SECRET, body.conversationId, checked.handoff.userId);
@@ -239,7 +246,8 @@ async function wake(request: Request, env: Env, ctx: ExecutionContext): Promise<
   const id = typeof body?.conversationId === 'string' && CONVERSATION_ID.test(body.conversationId) ? body.conversationId : null;
   if (!id || !await env.BANE.verifyWake(token, id)) return new Response(null, { status: 401 });
   if (env.WAKE && !(await env.WAKE.limit({ key: 'wake' })).success) return new Response(null, { status: 429, headers: { 'retry-after': '60' } });
-  if (!(await env.DB.prepare('SELECT 1 FROM conversations WHERE id = ?').bind(id).first())) return accepted;
+  // A staff reply to a chat Nightmail opened from a filed message: adopted first, so the reply reaches the person.
+  if (!(await env.DB.prepare('SELECT 1 FROM conversations WHERE id = ?').bind(id).first()) && !await adoptFiledChat(env, id)) return accepted;
   ctx.waitUntil(conversation(env, id).wake().then(r => log('info', { event: 'inbox', code: 'SUPPORT_WOKEN', queued: r.queued }), error => logError(error, { event: 'inbox', code: 'SUPPORT_WAKE_FAILED' }, 'warn')));
   return accepted;
 }

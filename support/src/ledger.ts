@@ -7,6 +7,7 @@ import { fromRow, type TicketRow } from './tickets.js';
 import type { Flow } from './work.js';
 import { newId } from './tokens.js';
 import { log, logError } from './log.js';
+import { adoptFiledChat } from './conversation.js';
 
 // The work ledger (D1 `support_work`, migrations/0005). Every message a flow accepts gets a row before its webhook
 // answers, mail refused at the edge is kept as a row instead of vanishing, and each object mirrors its work items here
@@ -25,6 +26,8 @@ const DAY = 86_400_000, MINUTES_10 = 600_000, MINUTES_5 = 300_000;
 const SIGNIN_WAKES = 50;
 /** Agent feedback reports the triage agent starts reading per sweep, and the daily counter they count against. */
 const TRIAGE_PER_SWEEP = 5, TRIAGE_KEY = 'global:triage';
+/** Agent reports a sweep starts answering by email. */
+const AGENT_ANSWERS_PER_SWEEP = 5;
 
 /** Whether the flow already accepted or kept this message: a later delivery of it changes nothing. */
 export async function ledgered(env: Env, flow: Flow, messageId: string) {
@@ -109,7 +112,7 @@ export async function blockUnconfigured(env: Env, input: { messageId: string; th
 /** Every five minutes: each step on its own, so one failing never stops the others. */
 export async function sweep(env: Env, now = Date.now()) {
   const result: Record<string, number> = {};
-  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['triage', () => triageFeedback(env, now)], ['staffMail', () => staffMail(env)], ['staff', () => staffReplies(env)], ['signins', () => signinWakes(env, now)], ['releases', () => releaseWakes(env)],
+  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['triage', () => triageFeedback(env, now)], ['agentAnswers', () => agentAnswers(env)], ['staffMail', () => staffMail(env)], ['staff', () => staffReplies(env)], ['signins', () => signinWakes(env, now)], ['releases', () => releaseWakes(env)],
     ['replaySupport', () => replay(env, 'support', now)], ['replayIntake', () => replay(env, 'intake', now)]];
   for (const [name, step] of steps) {
     try { result[name] = await step(); }
@@ -201,6 +204,26 @@ async function triageFeedback(env: Env, now: number) {
   return n;
 }
 
+/**
+ * Agent reports that ask something (api/src/feedback-triage.ts planAnswer), each answered by email to its person by the
+ * conversation Nightmail opened for it (conversation.ts startAgentAnswer), in a thread of its own. Claimed a few at a
+ * time (Nightmail hands each out at most three times); the answer's turn counts against the agents' own daily pool.
+ */
+async function agentAnswers(env: Env) {
+  if (!env.CONSOLE_GATEWAY_KEY) return 0;
+  const due = platformBody(await env.BANE.agentAnswersDue(AGENT_ANSWERS_PER_SWEEP)).data;
+  let n = 0;
+  for (const answer of due) {
+    try {
+      const now = Date.now();
+      await env.DB.prepare("INSERT INTO conversations (id, channel, user_id, email, workspace_id, workspace_name, created_at, updated_at) VALUES (?, 'email', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
+        .bind(answer.conversationId, answer.person.userId, answer.person.email, answer.workspace.id, answer.workspace.name, now, now).run();
+      if ((await env.CONVERSATION.get(env.CONVERSATION.idFromName(answer.conversationId)).startAgentAnswer(answer)).started) n++;
+    } catch (error) { logError(error, { event: 'email', code: 'AGENT_ANSWER_START_FAILED' }, 'warn'); }
+  }
+  return n;
+}
+
 /** Every staff reply waiting in Nightmail's outbox, to its conversation (each queues it once). */
 async function staffReplies(env: Env) {
   const pulled = platformBody(await env.BANE.pullOutbox());
@@ -208,7 +231,11 @@ async function staffReplies(env: Env) {
   for (const reply of pulled.data) byConversation.set(reply.conversationId, [...byConversation.get(reply.conversationId) ?? [], reply]);
   let n = 0;
   for (const [id, replies] of byConversation) {
-    try { n += await env.CONVERSATION.get(env.CONVERSATION.idFromName(id)).deliver({ replies }); }
+    try {
+      // A chat Nightmail opened from a filed message, its wake lost: adopted here, so the reply still reaches the person.
+      if (!(await env.DB.prepare('SELECT 1 FROM conversations WHERE id = ?').bind(id).first()) && !await adoptFiledChat(env, id)) continue;
+      n += await env.CONVERSATION.get(env.CONVERSATION.idFromName(id)).deliver({ replies });
+    }
     catch (error) { logError(error, { event: 'inbox', code: 'STAFF_REPLY_HANDOFF_FAILED' }, 'warn'); }
   }
   return n;

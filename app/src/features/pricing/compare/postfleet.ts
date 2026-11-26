@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, readOn, type Entry, type Offer } from '../prices.ts'
+import { fact, readOn, type Entry, type Offer } from '../prices.ts'
 
 // Nightmail vs Postfleet (/compare/postfleet): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Postfleet's own pages on CHECKED.
@@ -38,5 +38,4 @@ export const postfleet: Entry = {
   ],
   // Postfleet's readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'domain', 'free', 'send', 'route', 'team'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} agent inboxes, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

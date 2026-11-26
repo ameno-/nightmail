@@ -31,6 +31,8 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['GET', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/state$/],
   ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/state$/],
   ['GET', /^\/v1\/operator\/support\/outbox$/],
+  // A chat as Nightmail holds it, with the messages the dashboard filed while the chat couldn't take them (support-conversations.ts fileChatTicket).
+  ['GET', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/filed$/],
   // Emails whose sender asked to be answered by email instead (support-conversations.ts releaseGeneralAnswer).
   ['GET', /^\/v1\/operator\/support\/general-answers$/],
   ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/messages\/msg_[a-z2-7]{16}\/delivery$/],
@@ -48,6 +50,8 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['GET', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/related$/],
   ['POST', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/triage$/],
   ['POST', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/usage$/],
+  // Agent reports that ask something (src/feedback-triage.ts): their email conversations, claimed for the support agent.
+  ['POST', /^\/v1\/operator\/support\/agent-answers\/due$/],
 ];
 const SUPPORT_READ = /^\/v1\/support\/[A-Za-z0-9_./-]{1,200}$/;
 /** The writes a conversation makes: narrowing its scope to one workspace, and keeping a note about its person. */
@@ -79,7 +83,10 @@ export function stampedAllows(method: string, path: string) {
 /** An agent feedback report the triage agent reads (src/feedback-triage.ts): text is untrusted, as its filer wrote it. */
 export type FeedbackReport = { conversationId: string; ticketId: string; filedAt: string; operation: string | null; requestId: string | null; text: string };
 /** The triage agent's note on a report: its words, a suggested classification, and earlier reports from the same workspace. */
-export type TriageNoteInput = { summary: string; cause: string; classification: 'bug' | 'docs_gap' | 'neither'; duplicates: string[] };
+export type TriageNoteInput = { summary: string; cause: string; classification: 'bug' | 'docs_gap' | 'neither' | 'question'; duplicates: string[] };
+/** An agent's report that asks something, to answer by email: the person's own conversation, its first message the report (untrusted). */
+export type AgentAnswer = { conversationId: string; messageId: string; reportConversationId: string; filedAt: string; credential: 'apiKey' | 'agentToken' | 'mcp' | 'dashboard'; credentialEnd: string | null; subject: string | null; text: string;
+  person: { userId: string; email: string; name: string | null }; workspace: { id: string; name: string } };
 /** A staff email the support platform sends (src/support-staff-mail.ts): a new thread, or a reply in threadId under replyToMessageId. */
 export type StaffEmail = { key: string; threadId: string | null; replyToMessageId: string | null; subject: string; text: string; html: string };
 export type PlatformReply<T = unknown> = { status: number; body: T; requestId: string | null; retryAfter: string | null };
@@ -93,7 +100,7 @@ export type HandoffCheck =
 
 /** How the support platform knows who a conversation is for: Nightmail checks each itself. */
 export type ConversationEvidence = { kind: 'handoff'; token: string } | { kind: 'email'; messageId: string };
-export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none';
+export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none' | 'agent';
   status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean;
   /** Email only: the message passed the sender checks a general answer needs (support-conversations.ts emailEvidence). */
   generalAnswer?: boolean };
@@ -109,6 +116,12 @@ export type InboxState = { id: string; status: 'open' | 'ticketed' | 'closed'; a
   ticket: { id: string; type: string | null; severity: string | null; resolvedAt: string | null } | null; queuedReplies: number };
 /** An email whose sender asked, from its sign-in link, to be answered by email instead (support-conversations.ts releaseGeneralAnswer). */
 export type GeneralAnswerDue = { conversationId: string; messageId: string; requestedAt: string };
+/**
+ * A chat as Nightmail holds it (GET /v1/operator/support/conversations/{id}/filed): `filed` when Nightmail opened it from
+ * a filed message and the support platform never registered it; `messages` the customer's filed messages, oldest first.
+ */
+export type FiledConversation = { id: string; status: 'open' | 'ticketed' | 'closed'; filed: boolean; user: { id: string; name: string | null; email: string | null };
+  workspace: { id: string; name: string; role: 'owner' | 'admin' | 'member' } | null; page: string | null; requestIds: string[]; messages: { id: string; text: string; at: string }[] };
 /** A staff reply waiting for delivery. */
 export type OutboxReply = { id: string; conversationId: string; channel: 'chat' | 'email'; text: string; staffName: string | null; createdAt: string };
 
@@ -232,6 +245,12 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
      * after its wake), oldest first: answer each in general, once, with no account access.
      */
     generalAnswers: (conversationId?: string) => call<{ data: GeneralAnswerDue[] }>('GET', `/v1/operator/support/general-answers${conversationId === undefined ? '' : `?conversationId=${encodeURIComponent(String(conversationId))}`}`),
+    /**
+     * A chat as Nightmail holds it, with the customer's messages the dashboard filed as a ticket while the chat couldn't
+     * take them: adopt one Nightmail opened (filed) as this person's chat in this workspace, and take each filed message
+     * into the transcript under its own ID, as already with staff.
+     */
+    filedConversation: (conversationId: string) => call<FiledConversation>('GET', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/filed`),
     /** Record a staff reply's delivery: sent, or failed for good. */
     markDelivery: (conversationId: string, messageId: string, status: 'sent' | 'failed') =>
       call<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/messages/${encodeURIComponent(String(messageId))}/delivery`, { status }),
@@ -254,6 +273,8 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
       call<{ reply: boolean; notes?: number; ignored?: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null }>('POST', '/v1/operator/support/staff-mail/replies', { messageId, team }),
     /** Claims the agent feedback reports still to read (at most `limit`, at most 5), oldest first: each is handed out at most twice. */
     feedbackDue: (limit: number) => call<{ data: FeedbackReport[] }>('POST', '/v1/operator/support/feedback/due', { limit }),
+    /** Claims the agent reports to answer by email (at most `limit`, at most 5), oldest first: each is handed out at most three times. */
+    agentAnswersDue: (limit: number) => call<{ data: AgentAnswer[] }>('POST', '/v1/operator/support/agent-answers/due', { limit }),
     /** One request's trace, in the report's own workspace only: any other request ID is 404. */
     feedbackRequest: (conversationId: string, requestId: string) =>
       call('GET', `/v1/operator/support/feedback/${encodeURIComponent(String(conversationId))}/requests/${encodeURIComponent(String(requestId))}`),

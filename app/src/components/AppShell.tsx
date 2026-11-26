@@ -22,8 +22,7 @@ import { LegalFooterLinks } from './LegalLinks'
 import { PrivacyToggle } from './PrivacyToggle'
 import { NightmailWordmark } from './NightmailLogo'
 import { togglePrivacy } from '../lib/privacy'
-import { SupportHost, SupportTrigger, supportTriggerProps, useSupportChat, type SupportChat } from './SupportChat'
-import { ContactSupportDialog } from './ContactSupport'
+import { SupportHost, supportTriggerProps, useSupportChat, type SupportChat } from './SupportChat'
 import { notesModifierLabel, useUiNotesMode, useUiNotesShortcut } from '../lib/ui-notes-mode'
 import { productName } from '../../../api/src/brand'
 import { newsletterLinks, useNewsletters, useShownNewsletter } from '../features/newsletters/shared'
@@ -80,12 +79,10 @@ export function AppShell() {
   const access = useWorkspaceAccess()
   const location = useLocation()
   const scoreAbout = useScoreAbout()
-  // The support chat: Help at the foot of the sidebar (in the top bar and More on a phone or tablet), one conversation for
-  // the whole visit that stays open across pages.
-  const support = useSupportChat({ hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
-  // Where the chat isn't on, Help opens Contact support's form instead (hosted); a self-hosted installation has no Help.
-  const [contacting, setContacting] = useState(false)
-  const help = support.mode ? () => support.setOpen(true) : access.multiTenant ? () => setContacting(true) : null
+  // The support chat, hosted only: Help at the foot of the sidebar (in More on a phone or tablet, and ⌘K),
+  // one conversation for the whole visit that stays open across pages. A self-hosted installation has no Help.
+  const support = useSupportChat({ hosted: access.multiTenant, staff: Boolean(session?.identity?.operator) })
+  const help = support.mode ? () => support.setOpen(true) : null
   const signOut = access.multiTenant && session?.identity ? () => void session.logout() : null
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
   const connecting = useConnectAgentOpen()
@@ -282,7 +279,7 @@ export function AppShell() {
   const scoreHost = (scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>
   const connectHost = (connecting || connectMounted) && <Suspense fallback={null}><ConnectAgentHost /></Suspense>
   const context = <>
-    {access.multiTenant && <AccountSwitcher shell />}
+    {access.multiTenant && <AccountSwitcher />}
     {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
     {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
   </>
@@ -305,7 +302,7 @@ export function AppShell() {
   const grouped = groups.map(([name]) => ({ name, links: links.filter(([path]) => groupOf(path) === name) })).filter(group => group.links.length)
   const section = [...links, ...unlisted].find(([path]) => on(path) ?? (location.pathname === path || location.pathname.startsWith(`${path}/`)))?.[1] ?? 'Overview'
   const workspaceName = access.multiTenant ? session?.identity?.workspaces?.find(item => item.id === session?.identity?.workspaceId)?.name ?? 'Workspace' : regionId || productName
-  const overlays = <><AgentWaiting />{connectHost}{support.mode && <SupportHost chat={support} />}{contacting && <ContactSupportDialog onClose={() => setContacting(false)} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} pages={commands} help={help} signOut={signOut} /></>
+  const overlays = <><AgentWaiting />{connectHost}{support.mode && <SupportHost chat={support} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} pages={commands} help={help} signOut={signOut} /></>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <Notices />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
@@ -320,7 +317,6 @@ export function AppShell() {
     <header className="mobile-bar">
       <NavLink className="wordmark" to="/overview" aria-label={`${productName.toLowerCase()} overview`}><NightmailWordmark /></NavLink>
       <div className="mobile-bar__context">{context}</div>
-      {support.mode && <SupportTrigger chat={support} />}
       <ThemeToggle />
     </header>
     {scoreHost}
@@ -341,7 +337,7 @@ export function AppShell() {
           {locked(path) ? <Icon icon={Lock} size="xs" label="Owners and admins only" /> : goKeys[path] && <span className="ui-shortcut" aria-hidden="true">G {goKeys[path]}</span>}
         </Nav>)}
       </div>)}</nav>
-      <div className="sidebar-footer"><SidebarActions support={support} help={help} />{footer}</div>
+      <div className="sidebar-footer"><SidebarActions support={support} />{footer}</div>
     </aside>
     <header className="topbar">
       <nav className="topbar__crumbs" aria-label="Breadcrumb"><span className="topbar__workspace" data-private title={workspaceName}>{workspaceName}</span><span className="topbar__sep" aria-hidden="true">/</span><span className="topbar__section" aria-current="page">{section}</span></nav>
@@ -358,12 +354,11 @@ export function AppShell() {
 }
 
 // Connect your agent and Help, pinned at the foot of the sidebar above the legal links: rows like the navigation's.
-// Help toggles the support chat, docked in the page's bottom-right corner, or opens Contact support where the chat is off.
-function SidebarActions({ support, help }: { support: SupportChat; help: (() => void) | null }) {
-  const chat = support.mode ? supportTriggerProps(support) : null
+// Help toggles the support chat, docked in the page's bottom-right corner.
+function SidebarActions({ support }: { support: SupportChat }) {
   return <div className="sidebar-actions">
     <button type="button" className="sidebar-action" aria-haspopup="dialog" onPointerEnter={preloadConnectAgent} onFocus={preloadConnectAgent} onClick={openConnectAgent}><Icon icon={Bot} size="sm" /><span className="sidebar-action__title">Connect your agent</span></button>
-    {help && <button type="button" aria-haspopup="dialog" onClick={help} {...chat} className={chat ? 'sidebar-action support-trigger' : 'sidebar-action'}><Icon icon={MessageCircleQuestionMark} size="sm" /><span className="sidebar-action__title">Help</span></button>}
+    {support.mode && <button type="button" {...supportTriggerProps(support)} className="sidebar-action support-trigger"><Icon icon={MessageCircleQuestionMark} size="sm" /><span className="sidebar-action__title">Help</span></button>}
   </div>
 }
 

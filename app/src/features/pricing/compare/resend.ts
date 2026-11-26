@@ -1,4 +1,4 @@
-import { dayOf, listOf, formatCount, money, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { formatCount, money, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Resend (/compare/resend): a comparison's whole entry (prices.ts, Entry), and Resend's marketing plans,
 // which the calculator lists too (compare/index.ts, OFFERS). Every figure was read on Resend's own pricing page on
@@ -66,5 +66,4 @@ export const resend: Entry = {
   ],
   // Resend's readers first see the API, the allowances and the domain.
   panels: ['send', 'free', 'domain', 'receive', 'agent', 'campaign', 'route'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

@@ -220,6 +220,8 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
       })
     },
     restart() { seq = 0; void start() },
+    // The demo has no team: a filed message is acknowledged as Nightmail would, with no address.
+    file: async () => { await wait(400); return { conversationId: 'conv_demo', messageId: `msg_demo${Date.now().toString(36)}`, replyTo: null } },
     dispose() { clear(); conversation++; listeners.clear(); if (debug.transport === transport) delete (window as { __baneSupportDemo?: unknown }).__baneSupportDemo },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
   }

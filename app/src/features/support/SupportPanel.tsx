@@ -1,14 +1,13 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
 import { ArrowUp, Check, CircleAlert, Image as ImageIcon, ImagePlus, Square, UserRound, X } from 'lucide-react'
 import { Button, DropdownMenu, IconButton, Skeleton } from '../../components/ui'
 import { SheetOpenEffects, useSheetDrag } from '../../components/ui/sheet'
 import { useSession } from '../../data/context'
-import { supportApi } from '../../data/support'
-import { consumePendingSupportOpen } from '../../components/SupportChat'
+import { PrivateAddress } from '../../components/PrivateAddress'
 import { TOUCH, matches, usePhone, useTouch } from '../../lib/media'
 import { Markdown, settled } from './markdown'
 import { createDemoTransport } from './demo'
-import { createSocketTransport, forgetSaved, loadDraft, saveDraft, supportOrigin } from './socket'
+import { createSocketTransport, createUnavailableTransport, forgetSaved, loadDraft, saveDraft, supportOrigin } from './socket'
 import { actionResult, actionTitle, actionVerb, endSupport, plural, supportStore, ticketTitle, type ActionPart, type Attachment, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
 import { ActionSummary } from './actions'
 import { IMAGE_TYPES, MAX_MESSAGE } from './protocol'
@@ -28,6 +27,8 @@ const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').match
 const OPENING = 'Hey, what’s up? How can we help?'
 /** The status line while an answer is being worked on and no step is running. */
 const WORKING = 'Working on it…'
+/** The chat can't take messages now (it refused, or its connection is lost): what is sent goes to the team as a ticket. */
+const down = (state: ChatState) => state.connection === 'offline' || state.connection === 'unavailable'
 
 // The support chat (hosted): Nightmail's AI support agent in a panel docked in the page's bottom-right corner on a desktop,
 // opened from the sidebar's Help, which leaves the page readable beside it, and a sheet above the tab bar on a phone. It is not
@@ -38,42 +39,28 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
   const userId = identity?.id ?? 'demo', workspaceId = identity?.workspaceId ?? 'demo'
   const workspaceName = identity?.workspaces?.find(item => item.id === identity.workspaceId)?.name ?? null
   // One continuous conversation per account and workspace: another account or workspace gets its own, never this one's.
+  // A dashboard with no support Worker to talk to (not on the hosted service's hosts, no VITE_SUPPORT_ORIGIN) gets the
+  // chat's own refusal, never the scripted demo: only ?support=demo shows that.
   const store = useMemo(() => supportStore(`${mode}:${userId}:${workspaceId}`, () => {
+    if (mode === 'demo') return createDemoTransport({ firstName: identity?.name?.trim().split(/\s+/)[0] || 'Ryan', workspace: { id: workspaceId, name: workspaceName ?? 'Acme' } })
     const origin = supportOrigin()
-    if (mode === 'live' && origin) return createSocketTransport({ origin, userId, workspaceId, resume })
-    const workspace = identity?.workspaces?.find(item => item.id === identity.workspaceId)
-    return createDemoTransport({ firstName: identity?.name?.trim().split(/\s+/)[0] || 'Ryan', workspace: { id: workspaceId, name: workspace?.name ?? 'Acme' } })
-  }, { read: () => loadDraft(mode, userId, workspaceId), write: draft => saveDraft(mode, userId, workspaceId, draft) }), [mode, userId, workspaceId])
+    return origin ? createSocketTransport({ origin, userId, workspaceId, resume }) : createUnavailableTransport()
+  }, { read: () => loadDraft(mode, userId, workspaceId), write: draft => saveDraft(mode, userId, workspaceId, draft),
+    parked: { read: () => loadDraft(mode, userId, workspaceId, 'parked'), write: text => saveDraft(mode, userId, workspaceId, text, 'parked') } }), [mode, userId, workspaceId])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const panel = useRef<HTMLElement>(null), input = useRef<HTMLTextAreaElement>(null)
-  const pendingShare = useRef(false)
   useEffect(() => {
     store.setVisible(open)
-    if (!open) return
-    store.start()
-    const applyHandoff = () => {
-      const pending = consumePendingSupportOpen()
-      if (!pending) return
-      if (pending.shareContent) pendingShare.current = true
-      if (pending.message) { store.setDraft(pending.message); store.send() }
-    }
-    applyHandoff()
-    window.addEventListener('nightmail:support-handoff', applyHandoff)
-    return () => window.removeEventListener('nightmail:support-handoff', applyHandoff)
+    if (open) store.start()
   }, [store, open])
-  useEffect(() => {
-    if (!pendingShare.current || !state.hello?.conversationId) return
-    pendingShare.current = false
-    if (!state.hello.contentAccess && store.transport.kind === 'live') void supportApi.allowContent(state.hello.conversationId).catch(() => {})
-  }, [state.hello?.conversationId, state.hello?.contentAccess, store])
   useEffect(() => { onUnread(state.unread) }, [state.unread])
   // Opening moves focus in (to the message box, or the panel itself on a touch screen, so the keyboard doesn't jump up);
-  // closing with focus inside returns it to Help.
+  // closing with focus inside returns it to Help (the workspace menu's trigger on Get started, which has no Help button).
   useEffect(() => {
     const el = panel.current
     if (!el) return
     if (open) { const frame = requestAnimationFrame(() => (touch ? el : input.current ?? el).focus({ preventScroll: true })); return () => cancelAnimationFrame(frame) }
-    if (el.contains(document.activeElement)) document.getElementById('support-trigger')?.focus({ preventScroll: true })
+    if (el.contains(document.activeElement)) (document.getElementById('support-trigger') ?? document.getElementById('sidebar-workspace'))?.focus({ preventScroll: true })
   }, [open])
   const close = () => { panel.current?.style.removeProperty('transform'); onClose() }
   const drag = useSheetDrag(close, phone)
@@ -116,7 +103,7 @@ function Header({ state, store, workspaceName, onClose }: { state: ChatState; st
   const displayName = `${productName} Support`
   const [tone, subtitle] = state.closed ? ['neutral', 'Conversation ended']
     : state.connection === 'offline' ? ['warning', 'Offline · reconnecting']
-    : state.connection === 'unavailable' ? ['danger', 'Unavailable']
+    : state.connection === 'unavailable' ? ['warning', 'Chat unavailable']
     : [hello || state.connection === 'ready' ? 'success' : 'neutral', `${workspace ? `${workspace} · ` : ''}${hello?.agent.ai === false ? 'Support' : 'AI-assisted'}`]
   const ticketed = state.status === 'ticketed' || state.humanRequested
   return <header className="support-panel__header">
@@ -126,10 +113,10 @@ function Header({ state, store, workspaceName, onClose }: { state: ChatState; st
       <p className="support-panel__subtitle" data-tone={tone}><span className="support-panel__dot" aria-hidden="true" /><span key={subtitle} className="support-panel__subtitle-text" title={subtitle}>{subtitle}</span></p>
     </div>
     <div className="support-panel__actions">
-      <DropdownMenu label="Conversation options" title="Conversation" items={[
+      {state.connection !== 'unavailable' && <DropdownMenu label="Conversation options" title="Conversation" items={[
         { label: ticketed ? `Passed to the ${productName} team` : 'Talk to a person', icon: <UserRound size={16} />, disabled: ticketed || (state.connection !== 'open' && state.connection !== 'ready') || Boolean(state.closed), onSelect: () => store.requestHuman() },
         { label: 'End conversation', icon: <X size={16} />, disabled: Boolean(state.closed) || state.connection !== 'open', onSelect: () => store.end() },
-      ]} />
+      ]} />}
       <IconButton label="Close" onClick={onClose}><X size={16} /></IconButton>
     </div>
   </header>
@@ -166,14 +153,17 @@ function Conversation({ state, store, open, loading }: { state: ChatState; store
         <div className="support-loading__agent"><Skeleton width="84%" height={14} /><Skeleton width="66%" height={14} /><Skeleton width="40%" height={14} /></div>
       </div> : <>
         <article className="support-message support-message--agent support-message--opening"><div className="support-text"><p>{OPENING}</p></div></article>
-        {state.messages.map(message => message.role === 'user' ? <UserMessage key={message.key ?? message.id} message={message} onRetry={() => store.retry()} /> : <AgentMessage key={message.key ?? message.id} message={message} store={store} closed={Boolean(state.closed)} />)}
+        {state.messages.map((message, index) => message.role === 'user' ? <UserMessage key={message.key ?? message.id} message={message} onRetry={() => store.retry()}
+          filed={message.filed && !state.messages[index + 1]?.filed ? { replyTo: state.ticket?.replyTo ?? null } : null} />
+          : <AgentMessage key={message.key ?? message.id} message={message} store={store} closed={Boolean(state.closed)} />)}
       </>}
       <InlineStatus state={state} store={store} />
     </div>
   </div>
 }
 
-function UserMessage({ message, onRetry }: { message: ChatMessage; onRetry: () => void }) {
+// One line under the last of a run of filed messages says where they all went.
+function UserMessage({ message, onRetry, filed }: { message: ChatMessage; onRetry: () => void; filed: { replyTo: string | null } | null }) {
   const text = message.parts.map(part => part.kind === 'text' ? part.text : '').join('')
   return <div className="support-message support-message--user" data-restored={message.restored || undefined}>
     {message.images?.length ? <div className="support-user-images">{message.images.map((image, i) => image.url
@@ -182,6 +172,8 @@ function UserMessage({ message, onRetry }: { message: ChatMessage; onRetry: () =
       : <span key={i} className="support-user-images__placeholder" title={image.name}><ImageIcon size={14} aria-hidden="true" /><span>Screenshot</span><span className="support-user-images__name">{image.name}</span></span>)}</div> : null}
     {text && <p className="support-user">{text}</p>}
     {message.failed && <p className="support-failed"><span>{message.failed}</span><Button variant="ghost" size="sm" onClick={onRetry}>Try again</Button></p>}
+    {/* The chat couldn't take it: it went to the team as a ticket, who answer by email (and here, when the chat is back). */}
+    {filed && <p className="support-filed"><Check size={12} strokeWidth={2.5} aria-hidden="true" /><span>Filed as a ticket.{filed.replyTo ? <> We’ll reply to <PrivateAddress value={filed.replyTo} />.</> : ' We’ll reply by email.'}</span></p>}
   </div>
 }
 
@@ -351,9 +343,18 @@ function MaskedAddress({ value }: { value: string | null | undefined }) {
 
 function InlineStatus({ state, store }: { state: ChatState; store: SupportStore }) {
   if (state.closed) return null
-  if (state.connection === 'offline') return <div className="support-inline" data-tone="warning"><span className="support-inline__dot" aria-hidden="true" /><span>Can’t reach {productName} support. Reconnecting when you’re back online.</span><Button variant="ghost" size="sm" onClick={() => store.reconnect()}>Try now</Button></div>
-  if (state.connection === 'unavailable') return <div className="support-inline" data-tone="danger"><span className="support-inline__dot" aria-hidden="true" /><span>{state.reason === 'RATE_LIMITED' ? 'You’ve started a lot of conversations today. Try again later.' : 'Support chat isn’t available right now.'}</span>{state.reason !== 'RATE_LIMITED' && <Button variant="ghost" size="sm" onClick={() => store.reconnect()}>Try again</Button>}</div>
-  if (state.limit) return <div className="support-inline" data-tone="warning"><span className="support-inline__dot" aria-hidden="true" /><span>{state.limit.message}</span></div>
+  const line = (tone: 'warning' | 'danger', text: ReactNode, action?: ReactNode) => <div className="support-inline" data-tone={tone}><span className="support-inline__dot" aria-hidden="true" /><span>{text}</span>{action}</div>
+  // A message that couldn't be filed: past the hour's limit (it is back in the message box), or Nightmail out of reach.
+  if (state.fileProblem === 'capped') return line('warning', 'That’s the limit for this hour. Your earlier messages are with our team.')
+  if (state.fileProblem === 'capped_first') return line('warning', 'That’s the limit for this hour. Your message is kept in the box.')
+  if (state.fileProblem === 'waiting') return line('warning', 'Can’t reach us right now. Your message is kept and goes as soon as it can.')
+  // Once something is with the team, its line says so; until then, say what sending does while the chat is down.
+  if (state.ticket && down(state)) return null
+  if (state.connection === 'unavailable') return line('warning', 'Chat isn’t available right now. What you send is filed as a ticket.')
+  // A lost connection with a message being answered: the message says "Working on it…" and the header the reconnecting.
+  if (state.connection === 'offline') return state.messages.some(message => message.streaming || message.local) ? null
+    : line('warning', `Reconnecting to ${productName} support.`, <Button variant="ghost" size="sm" onClick={() => store.reconnect()}>Try now</Button>)
+  if (state.limit) return line('warning', state.limit.message)
   return null
 }
 
@@ -365,37 +366,38 @@ function Composer({ state, store, input, busy, canAttach }: { state: ChatState; 
   // A refused screenshot's reason stays a few seconds, then the tray returns to what is attached.
   useEffect(() => { if (state.attachError) { const timer = setTimeout(() => store.clearAttachError(), 6000); return () => clearTimeout(timer) } }, [state.attachError])
   const limited = Boolean(state.limit && (state.limit.until === null || state.limit.until > now))
+  // Short enough for one line on a 320 px phone: the box sizes to it while empty.
+  const placeholder = limited ? 'Messages are paused for now' : state.ticket && down(state) ? 'Add to your ticket' : 'Ask about your sending'
   // The box grows with what is typed, up to six lines, then scrolls.
-  useLayoutEffect(() => { const el = input.current; if (!el) return; el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 132)}px` }, [state.draft])
+  useLayoutEffect(() => { const el = input.current; if (!el) return; el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 132)}px` }, [state.draft, placeholder])
   if (state.closed) return <div className="support-composer support-composer--closed">
     <span>This conversation ended.</span>
     <Button size="sm" onClick={() => store.restart()}>Start a new conversation</Button>
   </div>
   // Open for typing and sending from the moment the panel opens: what is sent before the conversation is connected goes
-  // out once it is. Only a lost or refused connection holds the box.
+  // out once it is, and what the chat can't take (refused, or its connection lost) goes to the team as a ticket.
   const online = state.connection === 'open' && Boolean(state.hello)
-  const ready = state.connection !== 'offline' && state.connection !== 'unavailable'
   const sendable = store.sendable()
   const stop = busy && !state.draft.trim() && !state.attachments.length && online
   function submit(event?: FormEvent) {
     event?.preventDefault()
     if (stop) { store.cancel(); return }
-    if (ready && !limited) store.send()
+    if (!limited) store.send()
   }
   return <form className="support-composer" onSubmit={submit}>
     <AttachmentTray state={state} store={store} />
-    <div className="support-composer__box" data-disabled={!ready || limited || undefined}>
+    <div className="support-composer__box" data-disabled={limited || undefined}>
       {store.transport.uploads && <>
         <IconButton size="sm" className="support-composer__attach" label="Attach a screenshot" disabled={!canAttach || limited} onClick={() => picker.current?.click()}><ImagePlus size={16} /></IconButton>
         {/* On a phone this opens the photo picker: images only, no camera capture. */}
         <input ref={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden tabIndex={-1} onChange={event => { void store.attach([...event.target.files ?? []]); event.target.value = '' }} />
       </>}
       <textarea ref={input} className="support-composer__input" rows={1} value={state.draft} maxLength={MAX_MESSAGE} aria-label={`Message ${productName} Support`}
-        placeholder={state.connection === 'offline' ? 'Waiting for the connection…' : limited ? 'Messages are paused for now' : 'Ask anything about your sending'}
+        placeholder={placeholder}
         onChange={event => store.setDraft(event.target.value)}
         onPaste={event => { const pasted = [...event.clipboardData.files]; if (pasted.length && canAttach) { event.preventDefault(); void store.attach(pasted) } }}
         onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
-      <IconButton type="submit" variant={stop ? 'secondary' : 'primary'} size="sm" className="support-composer__send" label={stop ? 'Stop answering' : 'Send'} data-stop={stop || undefined} disabled={stop ? false : !sendable || !ready || limited}>
+      <IconButton type="submit" variant={stop ? 'secondary' : 'primary'} size="sm" className="support-composer__send" label={stop ? 'Stop answering' : 'Send'} data-stop={stop || undefined} disabled={stop ? false : !sendable || limited}>
         <span className="support-composer__icons" aria-hidden="true"><ArrowUp size={14} strokeWidth={2.25} /><Square size={9} strokeWidth={0} fill="currentColor" /></span>
       </IconButton>
     </div>

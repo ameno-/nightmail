@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Postmark (/compare/postmark): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Postmark's own pages on CHECKED: the plans and their overage in the script its pricing page draws them from.
@@ -63,5 +63,4 @@ export const postmark: Entry = {
   ],
   // Postmark's readers first see the API, receiving and the allowances.
   panels: ['send', 'receive', 'free', 'team', 'agent', 'domain', 'campaign'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

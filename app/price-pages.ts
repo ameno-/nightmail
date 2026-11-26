@@ -2,20 +2,22 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runnerImport, type Plugin, type Rollup } from 'vite'
-import { productName, publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
+import { publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
+import { CRAWL_DISALLOW } from '../api/src/site-index.ts'
 import { pruneCss, usedNames } from './critical-css.ts'
+import { linkCard, withCard } from './link-card.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
 import { PRICE_PAGES } from './src/features/pricing/pages.ts'
 import { PANEL_IDS } from './src/features/pricing/panels.ts'
-import { entryProblems, lastChecked } from './src/features/pricing/prices.ts'
+import { entryProblems } from './src/features/pricing/prices.ts'
 import * as readable from './src/features/pricing/readable.ts'
 import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/readable.ts'
 
 // The public price pages and what's made with them (features/pricing):
 // - pricing.html and compare/<slug>.html, one for every comparison's entry (compare/index.ts): index.html with the
-//   page's own title, description, canonical address, link preview (its card included: pages.ts), Markdown twin and
-//   structured data, and the page itself painted from the HTML alone (prerender.tsx: the scene as the app first draws
+//   page's own title, description, canonical address, link preview (its card, drawn here from its words: pages.ts,
+//   link-card.ts), Markdown twin and structured data, and the page itself painted from the HTML alone (prerender.tsx: the scene as the app first draws
 //   it, in #price-shell) with the CSS it needs inlined (critical-css.ts), so it shows before any of the app's code.
 //   The app's stylesheet and modules are out of the page: the homepage's boot script (home/shell/boot.js) starts them
 //   at the reader's first touch, key or scroll (a press held, and what they typed, carried over) or after 8 s, and the
@@ -24,7 +26,8 @@ import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/read
 //   address under /compare/ with no page is not found.
 // - Each page's Markdown twin, and the homepage's (readable.ts): pricing.md, compare/<slug>.md, index.md;
 //   llms-site.txt, the lines the API's llms.txt puts under its title (api/src/site-index.ts); llms-full.txt.
-// - robots.txt (every crawler welcome, and where the sitemap is) and sitemap.xml: the homepage and the price pages.
+// - robots.txt (every crawler welcome to the pages, not to the API: api/src/site-index.ts, CRAWL_DISALLOW; and where the
+//   sitemap is) and sitemap.xml: the homepage and the price pages.
 // The canonical address, og:url, the twins' links and the sitemap name the hosted site (brand.ts) on every stage; the
 // card is fetched from the stage's own host, as index.html's is. While PRICE_PAGES_LIVE is false each page asks search
 // engines not to index it and the sitemap leaves it out. The build stops on an entry without its sources (prices.ts,
@@ -59,6 +62,10 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       const problems = ENTRIES.flatMap(entry => entryProblems(entry, today, PANEL_IDS))
       if (new Set(ENTRIES.map(entry => entry.slug)).size !== ENTRIES.length) problems.push('Two comparisons have the same slug.')
       for (const [path] of PRICE_LINKS) if (!PRICE_PAGES.some(page => page.path === path)) problems.push(`live.ts links ${path}, which is no price page.`)
+      for (const page of PRICE_PAGES) {
+        if (!(page.searchTitle?.length <= 60)) problems.push(`${page.path}'s title is over 60 characters: ${page.searchTitle}`)
+        if (!(page.description?.length <= 160)) problems.push(`${page.path}'s description is over 160 characters: ${page.description}`)
+      }
       if (problems.length) return this.error(`The price pages can't be built (features/pricing/compare):\n  ${problems.join('\n  ')}`)
 
       const index = bundle['index.html']
@@ -93,9 +100,9 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       const { module: prerender } = await runnerImport<typeof import('./src/features/pricing/prerender.tsx')>(prerenderModule, { root, configFile: false, logLevel: 'error' })
 
       for (const page of PRICE_PAGES) {
-        if (!existsSync(resolve(publicDir, page.card.file))) return this.error(`${page.path}'s card, public/${page.card.file}, is missing: what it shows has changed (features/pricing/pages.ts). Make it with node scripts/price-cards.mjs and delete the old one.`)
-        const title = `${page.title} · ${productName.toLowerCase()}`, canonical = canonicalOrigin + page.path, image = `${origin}/${page.card.file}`
-        let html = template
+        const title = page.searchTitle, canonical = canonicalOrigin + page.path, card = linkCard(page.card)
+        if (!bundle[card.file]) this.emitFile({ type: 'asset', fileName: card.file, source: card.source })
+        let html = withCard(template, card, origin)
         const set = (pattern: RegExp, value: string) => {
           if (!pattern.test(html)) this.error(`index.html has no ${pattern.source} for ${page.file}.`)
           html = html.replace(pattern, (_match, start: string) => start + value)
@@ -106,9 +113,6 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
         set(/(<meta property="og:description" content=")[^"]*/, attr(page.description))
         set(/(<meta name="twitter:title" content=")[^"]*/, attr(title))
         set(/(<meta name="twitter:description" content=")[^"]*/, attr(page.description))
-        for (const name of ['property="og:image"', 'name="twitter:image"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(image))
-        for (const name of ['property="og:image:alt"', 'name="twitter:image:alt"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(page.card.alt))
-        set(/(<meta property="og:image:type" content=")[^"]*/, 'image/jpeg')
         set(/(<!-- Link previews\.)[^>]*-->/, ' This page\'s own (app/price-pages.ts). -->')
         set(/(<meta property="og:type" content="website" \/>)/, `\n    <meta property="og:url" content="${attr(canonical)}" />\n    <link rel="canonical" href="${attr(canonical)}" />`)
         set(/(<link rel="alternate" type="text\/markdown" href=")[^"]*(?=" title=")/, attr(canonicalOrigin + markdownPath(page.path)))
@@ -135,8 +139,9 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       for (const { file, source } of words.markdownFiles()) this.emitFile({ type: 'asset', fileName: file, source })
       this.emitFile({ type: 'asset', fileName: 'llms-site.txt', source: llmsSiteIndex() })
       this.emitFile({ type: 'asset', fileName: 'llms-full.txt', source: words.llmsFull() })
-      const listed = [{ path: '/', modified: null as string | null }, ...PRICE_PAGES_LIVE ? PRICE_PAGES.map(page => ({ path: page.path, modified: page.comparison ? lastChecked(page.comparison) : null })) : []]
-      this.emitFile({ type: 'asset', fileName: 'robots.txt', source: `User-agent: *\nAllow: /\n\nSitemap: ${canonicalOrigin}/sitemap.xml\n` })
+      // The homepage's lastmod: the newest figure it quotes or links (every comparison's, which the price pages carry).
+      const listed = [{ path: '/', modified: PRICE_PAGES.map(page => page.modified).sort().at(-1)! }, ...PRICE_PAGES_LIVE ? PRICE_PAGES.map(page => ({ path: page.path, modified: page.modified })) : []]
+      this.emitFile({ type: 'asset', fileName: 'robots.txt', source: `User-agent: *\nAllow: /\n${CRAWL_DISALLOW.map(path => `Disallow: ${path}\n`).join('')}\nSitemap: ${canonicalOrigin}/sitemap.xml\n` })
       this.emitFile({ type: 'asset', fileName: 'sitemap.xml', source: `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${listed.map(({ path, modified }) => `  <url><loc>${canonicalOrigin}${path}</loc>${modified ? `<lastmod>${modified}</lastmod>` : ''}</url>\n`).join('')}</urlset>\n` })
     } },
   }

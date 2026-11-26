@@ -9,6 +9,7 @@ import { guides, type Guide } from './guides'
 import { SendingLimitsGuide } from '../score/limits'
 import { DocsArticleSkeleton, useDocsAudience } from './frame'
 import { openApiQuery } from './openapi'
+import { docsTitle, operationDescription, operationEntries, tagTitle } from './meta'
 import './docs.css'
 import { productName, productSlug, publicOrigin, sdkPackage } from '../../../../api/src/brand'
 
@@ -16,17 +17,10 @@ type Schema = Record<string, any>
 type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; permission?: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
 type QuickstartStep = { title: string; text: string; code?: string }
 type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
-const methods = ['get', 'post', 'put', 'patch', 'delete']
 // What each operation needs, stated by the API (operation-permissions.ts).
 const permissionExtension = `x-${productSlug}-permission`
-// Tag names are API identifiers (ApiKeys); people read them with spaces (API keys).
-const tagTitle = (tag: string) => tag === 'ApiKeys' ? 'API keys' : tag === 'Auth' ? 'Agent tokens' : tag
 // Examples are written for the hosted origin; this instance's own goes in their place, so a copied command works here.
 const here = (code: string, origin: string) => code.replaceAll(publicOrigin, origin)
-const acronyms = new Set(['api', 'dns', 'url', 'id', 'sdk', 'smtp', 'imap', 'mcp'])
-function operationTitle(value: string) {
-  return value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(' ').map((word, index) => acronyms.has(word.toLowerCase()) ? word.toUpperCase() : index === 0 ? word[0].toUpperCase() + word.slice(1).toLowerCase() : word.toLowerCase()).join(' ')
-}
 
 function resolve(document: Document, value?: Schema): Schema {
   if (!value?.$ref) return value ?? {}
@@ -43,12 +37,7 @@ function typeLabel(document: Document, input: Schema): string {
 function schemaName(input: Schema): string | null { return typeof input?.$ref === 'string' ? input.$ref.split('/').at(-1) ?? null : null }
 function operations(document?: Document): Operation[] {
   if (!document) return []
-  const result: Operation[] = []
-  for (const [path, pathItem] of Object.entries(document.paths)) for (const method of methods) {
-    const operation = pathItem[method]
-    if (!operation?.operationId) continue
-    result.push({ id: operation.operationId, method, path, tag: operation.tags?.[0] ?? 'API', summary: operation.summary ?? operationTitle(operation.operationId), description: operation.description ?? '', permission: operation[permissionExtension]?.text, parameters: [...(Array.isArray(pathItem.parameters) ? pathItem.parameters : []), ...(Array.isArray(operation.parameters) ? operation.parameters : [])], requestBody: operation.requestBody, responses: operation.responses ?? {}, samples: operation['x-codeSamples'] ?? [] })
-  }
+  const result: Operation[] = operationEntries(document).map(({ operation, pathItem, ...entry }) => ({ ...entry, permission: operation[permissionExtension]?.text, parameters: [...(Array.isArray(pathItem.parameters) ? pathItem.parameters : []), ...(Array.isArray(operation.parameters) ? operation.parameters : [])], requestBody: operation.requestBody, responses: operation.responses ?? {}, samples: operation['x-codeSamples'] ?? [] }))
   // Groups follow the document's tag order (Emails and Domains first); operations keep path order within a group.
   const order = (document.tags ?? []).map(tag => tag.name)
   const rank = (tag: string) => { const index = order.indexOf(tag); return index === -1 ? order.length : index }
@@ -230,11 +219,12 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
   </article>
 }
 
-// The tab's title and the description search results and link previews read, per page.
+// The tab's title and the description search results and link previews read, per page (meta.ts): the same as the
+// page's own HTML carries (app/docs-pages.ts).
 const defaultDescription = window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.content ?? ''
 function useDocumentMeta(title: string, description: string) {
   useEffect(() => {
-    window.document.title = `${title} · ${productName} docs`
+    window.document.title = title
     window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.setAttribute('content', description)
   }, [title, description])
   useEffect(() => () => window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.setAttribute('content', defaultDescription), [])
@@ -267,8 +257,8 @@ export function DocsPage() {
   const current = page.kind === 'operation' ? all.find(operation => operation.id === page.id) : undefined
   const missing = page.kind === 'missing' || (page.kind === 'operation' && Boolean(spec) && !current)
   const title = missing ? 'Page not found' : page.kind === 'guide' ? page.guide.title : page.kind === 'operation' ? current?.summary ?? 'API reference' : `${productName} API`
-  const description = page.kind === 'guide' ? page.guide.summary : current ? `${current.method.toUpperCase()} ${current.path}${current.description ? `. ${current.description}` : ''}` : spec?.info.description ?? defaultDescription
-  useDocumentMeta(title, description)
+  const description = page.kind === 'guide' ? page.guide.summary : current ? operationDescription(current) : spec?.info.description ?? defaultDescription
+  useDocumentMeta(docsTitle(page.kind === 'overview' ? null : title), description)
   useAnchorScroll(Boolean(site.origin) && (page.kind === 'guide' || missing || Boolean(spec)))
   const [search, setSearch] = useState('')
   const q = search.trim().toLowerCase()

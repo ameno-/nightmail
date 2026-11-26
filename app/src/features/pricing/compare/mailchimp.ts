@@ -1,4 +1,4 @@
-import { dayOf, listOf, fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Mailchimp (/compare/mailchimp): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailchimp's own pages on CHECKED.
@@ -79,5 +79,4 @@ export const mailchimp: Entry = {
   ],
   // Mailchimp's readers first see the list, the contacts and the team.
   panels: ['campaign', 'contacts', 'team', 'receive', 'free', 'agent', 'route'],
-  description: `Mailchimp prices by contacts, Nightmail by email. Monthly prices at ${listOf(sizes.map(formatCount))} contacts, checked ${dayOf(CHECKED)}.`,
 }

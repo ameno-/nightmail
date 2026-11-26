@@ -10,13 +10,13 @@ import { registerSupportReceiving } from './support-receiving.js';
 import { registerSupportSmtp } from './smtp-refusals.js';
 import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE, type RequestLine } from './support-logs.js';
 import { CONVERSATION_ID, keyId, signSupportToken } from './support-platform.js';
-import { ceilingFor, routedOnly, sectionIds } from './support-conversations.js';
+import { admitPerson, ceilingFor, fileChatTicket, routedOnly, sectionIds } from './support-conversations.js';
 import { productName } from './brand.js';
 
 // Support integration (api/README.md "Support integration"). Internal: these routes are for Nightmail's operators and its
 // support platform, never for customers.
 //
-// 1. A signed-in member presses "Contact support" (POST /v1/contact-support): Nightmail stores a handoff (workspace, user,
+// 1. A signed-in member opens Help, the support chat (POST /v1/contact-support): Nightmail stores a handoff (workspace, user,
 //    page, recent request IDs, and whether they share message content for this request) and returns the support
 //    platform's URL carrying an Ed25519-signed handoff token.
 // 2. The support platform registers a conversation from that handoff (src/support-conversations.ts): Nightmail checks
@@ -161,6 +161,11 @@ const Handoff = z.object({
   token: z.string().nullable().describe('The signed handoff (EdDSA JWS, 10 minutes), or null when signing is not configured.'),
   expiresAt: z.string().describe('Until when support can use this handoff to open read access (30 minutes, once).'),
   shareContent: z.boolean(),
+  ticket: z.object({
+    conversationId: z.string().describe('Your support chat that now holds the message: the Help panel continues it.'),
+    messageId: z.string().describe('The message as the conversation holds it.'),
+    replyTo: z.string().nullable().describe('Where the team replies by email: your account address.'),
+  }).nullable().describe('The message filed as a ticket (ticket in the request), or null.'),
 }).openapi('SupportHandoff');
 
 // ---------- what support reads ----------
@@ -333,27 +338,40 @@ export function registerSupport(app: App) {
       requestIds: z.array(z.string().regex(/^req_[0-9a-f]{32}$/)).max(5).default([]).describe('x-request-id values of recent failed requests.'),
       shareContent: z.boolean().default(false).describe('Let support read message content (email bodies) in this workspace, for this request only.'),
       message: z.string().trim().max(2000).optional(),
+      ticket: z.object({ message: z.string().trim().min(1).max(8000).describe('What the person wrote, as they wrote it in the chat.') }).strict().optional()
+        .describe(`The support chat couldn't take this message (it couldn't start, ${productName} support couldn't be reached, or it dropped after it was sent): file it as a ticket for the team instead. It goes into your open support chat in this workspace, or opens one, and the team replies by email to your account address, and in the chat. Counts against the same hourly limit. Send the words here, not in message.`),
     }).strict()) },
     responses: { 201: response(Handoff), ...errors } }), async c => {
     if (!c.env.config.multiTenant) notFound('Endpoint');
     const a = c.get('actor');
     if (a?.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     const body = c.req.valid('json'), userId = a.keyId.slice(5), handoffId = id('sho');
-    const { rows: [row] } = await c.env.db.execute<{ id: string; expires_at: string; name: string; email: string }>(sql`WITH h AS (
-        INSERT INTO support_handoffs(id, user_id, workspace_id, kind, page, request_ids, message, share_content, expires_at)
-        SELECT ${handoffId}, ${userId}, ${a.workspaceId}, ${body.kind}, ${body.page ?? null}, ${sql.param(body.requestIds)}::text[], ${body.message ?? null}, ${body.shareContent}, now() + ${`${HANDOFF_MINUTES} minutes`}::interval
-        WHERE (SELECT count(*) FROM support_handoffs WHERE user_id = ${userId} AND created_at > now() - interval '1 hour') < ${HANDOFFS_PER_HOUR}
-        RETURNING id, expires_at
-      ), logged AS (${auditInsert(auditContext(c), { action: 'support.contact', workspaceId: a.workspaceId, target: { type: 'support_handoff', id: handoffId },
-        after: { kind: body.kind, page: body.page, requestIds: body.requestIds, contentShared: body.shareContent } }, { where: sql`EXISTS (SELECT FROM h)` })})
-      SELECT h.id, h.expires_at::text, w.name, ${userEmail(sql`${userId}`)} AS email FROM h, workspaces w WHERE w.id = ${a.workspaceId}`);
-    if (!row) { c.header('Retry-After', '3600'); throw new ApiError(429, 'SUPPORT_RATE_LIMITED', `You can contact support ${HANDOFFS_PER_HOUR} times an hour. Email support with your earlier reference instead.`, undefined, true); }
+    if (body.ticket && body.message) throw new ApiError(422, 'VALIDATION_FAILED', 'Send a ticket\u2019s words in ticket.message alone.', 'message');
+    // A ticket is filed in the same transaction as its handoff (src/support-conversations.ts fileChatTicket), under the
+    // person's admission lock, so the hourly count holds for concurrent filings too.
+    const contact = async (db: DbExecutor) => {
+      const { rows: [row] } = await db.execute<{ id: string; expires_at: string; name: string; email: string }>(sql`WITH h AS (
+          INSERT INTO support_handoffs(id, user_id, workspace_id, kind, page, request_ids, message, share_content, expires_at)
+          SELECT ${handoffId}, ${userId}, ${a.workspaceId}, ${body.kind}, ${body.page ?? null}, ${sql.param(body.requestIds)}::text[], ${body.message ?? null}, ${body.shareContent}, now() + ${`${HANDOFF_MINUTES} minutes`}::interval
+          WHERE (SELECT count(*) FROM support_handoffs WHERE user_id = ${userId} AND created_at > now() - interval '1 hour') < ${HANDOFFS_PER_HOUR}
+          RETURNING id, expires_at
+        ), logged AS (${auditInsert(auditContext(c), { action: 'support.contact', workspaceId: a.workspaceId, target: { type: 'support_handoff', id: handoffId },
+          after: { kind: body.kind, page: body.page, requestIds: body.requestIds, contentShared: body.shareContent, ...body.ticket ? { ticket: true } : {} } }, { where: sql`EXISTS (SELECT FROM h)` })})
+        SELECT h.id, h.expires_at::text, w.name, ${userEmail(sql`${userId}`)} AS email FROM h, workspaces w WHERE w.id = ${a.workspaceId}`);
+      const ticket = row && body.ticket ? await fileChatTicket(db, { userId, workspaceId: a.workspaceId, handoffId, text: body.ticket.message }) : null;
+      return { row, ticket };
+    };
+    const { row, ticket } = body.ticket ? await c.env.db.transaction(async tx => { await admitPerson(tx, userId); return contact(tx); }) : await contact(c.env.db);
+    if (!row) { c.header('Retry-After', '3600'); throw new ApiError(429, 'SUPPORT_RATE_LIMITED', `You can contact support ${HANDOFFS_PER_HOUR} times an hour. What you sent before is with the team; try again later.`, undefined, true); }
+    const expiresAt = new Date(row.expires_at).toISOString();
+    // A filed ticket's handoff is spent on its conversation: nothing to sign or continue with.
+    if (ticket) return c.json({ id: handoffId, url: null, token: null, expiresAt, shareContent: body.shareContent, ticket: { ...ticket, replyTo: row.email ?? null } }, 201);
     const support = c.env.config.support, now = Math.floor(Date.now() / 1000);
     const token = support?.signingKey ? await signSupportToken(support.signingKey, { iss: c.env.config.publicUrl, aud: 'bane-support', jti: handoffId, iat: now, exp: now + HANDOFF_TOKEN_SECONDS,
       kind: body.kind, workspace: { id: a.workspaceId, name: row.name }, user: { id: userId, email: row.email, role: a.role }, page: body.page ?? null, requestIds: body.requestIds,
       shareContent: body.shareContent, message: !!body.message }) : null;
     const url = support?.url ? `${support.url}#${token ? `handoff=${token}` : `handoffId=${handoffId}`}` : null;
-    return c.json({ id: handoffId, url, token, expiresAt: new Date(row.expires_at).toISOString(), shareContent: body.shareContent }, 201);
+    return c.json({ id: handoffId, url, token, expiresAt, shareContent: body.shareContent, ticket: null }, 201);
   });
   app.get('/v1/public/support-keys', async c => {
     const key = c.env.config.support?.signingKey;
@@ -389,7 +407,7 @@ export function registerSupport(app: App) {
     // Independent reads, in parallel (the support platform's runtime has a pool for this: src/worker.ts).
     const [{ rows: [user] }, { rows: [handoff] }, summaries, domains, recent, activity, stand, { rows: enforcement }] = await Promise.all([
       db.execute<{ id: string; name: string | null; email: string | null; created_at: string | null }>(sql`SELECT id, name, email, created_at::text FROM nightmail_users WHERE id = ${scope.userId}`),
-      db.execute<{ id: string; page: string | null; request_ids: string[]; message: string | null; created_at: string }>(sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text FROM support_handoffs h WHERE h.conversation_id = ${scope.conversation.id}`),
+      db.execute<{ id: string; page: string | null; request_ids: string[]; message: string | null; created_at: string }>(sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text FROM support_handoffs h WHERE h.conversation_id = ${scope.conversation.id} ORDER BY h.created_at LIMIT 1`),
       workspaceSummaries(db, workspaces, email), domainSummaries(db, domainIds, 50), failures(db, list, hookIds), admin.length ? customerTrail(db, admin, AuditFilters.parse({ limit: 20 })) : Promise.resolve({ data: [] as z.infer<typeof AuditEntry>[] }), standings(db, list),
       db.execute<{ workspaceId: string; kind: string; since: string | null; reason: string | null }>(sql`SELECT workspace_id AS "workspaceId", 'sending_paused' AS kind, paused_at::text AS since,
           left(to_jsonb(pc) ->> 'pause_reason', 300) AS reason FROM provider_connections pc WHERE workspace_id = ANY(${ids(list)}) AND paused_at IS NOT NULL

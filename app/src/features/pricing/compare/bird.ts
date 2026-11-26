@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Bird (/compare/bird): a comparison's whole entry (prices.ts, Entry). Every figure was read on Bird's own
 // pages on CHECKED. Bird sells SparkPost's email: sparkpost.com/pricing redirects to bird.com/pricing/email?sp=true.
@@ -27,6 +27,8 @@ const sizes: Entry['sizes'] = [50_000, 100_000, 1_000_000]
 export const bird: Entry = {
   slug: 'bird',
   vendor: 'Bird',
+  // sparkpost.com/pricing redirects to Bird's (above): people still search for SparkPost.
+  aka: 'SparkPost',
   focus: 'developer',
   offer,
   model: { per: 'email' },
@@ -41,5 +43,4 @@ export const bird: Entry = {
   ],
   // Bird's readers first see the API, the allowances and the inboxes.
   panels: ['send', 'free', 'receive', 'agent', 'campaign', 'domain', 'route'],
-  description: `SparkPost’s pricing now opens Bird’s. Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}.`,
 }

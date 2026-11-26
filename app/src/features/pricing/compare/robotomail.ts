@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type Offer } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, type Entry, type Offer } from '../prices.ts'
 
 // Nightmail vs Robotomail (/compare/robotomail): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Robotomail's own pages on CHECKED.
@@ -39,5 +39,4 @@ export const robotomail: Entry = {
   ],
   // Robotomail's readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'free', 'domain', 'campaign', 'send', 'route'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} agent inboxes, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }
