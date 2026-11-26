@@ -62,6 +62,12 @@ if $api || $dashboard || $sdk; then build=true; fi
 if $api || $dashboard; then preview=true; fi
 # The CLS fixture runs this API (migrations, server, read limits) and seeds its tables with raw SQL.
 if $api || $dashboard; then cls=true; fi
+# A landing batch builds on the PR; the queue classifies the combined diff normally.
+if [[ $GITHUB_EVENT_NAME == pull_request && ${GITHUB_HEAD_REF:-} == land/batch-* &&
+      -n ${PR_HEAD_REPO_ID:-} && $PR_HEAD_REPO_ID == "${GITHUB_REPOSITORY_ID:-}" ]]; then
+  api=true sdk=true dashboard=true build=true
+  acceptance=false cls=false preview=false support=false gateway=false
+fi
 for key in base api sdk dashboard build acceptance preview cls gateway support audit; do
   printf '%s=%s\n' "$key" "${!key}"
 done | tee -a "$GITHUB_OUTPUT"
