@@ -6,6 +6,7 @@ import { productName, publicOrigin } from '../api/src/brand.ts'
 import { pruneCss, usedNames } from './critical-css.ts'
 import type { HomeStart } from './src/features/home/index.tsx'
 import { jsonLd, structuredData } from './src/features/home/tv/readable.ts'
+import { DESCRIPTION, TITLE } from './src/features/home/tv/said.ts'
 
 // The television homepage (features/home/tv) in place of the factory's (home-shell.ts), in a build made with
 // VITE_HOME=tv (vite.config.ts; the deploy sets it for the dev stage, .github/workflows/deploy.yml). It changes:
@@ -97,7 +98,7 @@ function homeShell(): Plugin {
       const mark = (element: string, name: string) => element.replace(/^(<\w+\b[^>]*?\sclass=")([^"]*)"/, `$1$2 ${name}"`)
       const arrow = /<svg\b[^>]*\bsrt-cta-arrow\b[\s\S]*?<\/svg>/.exec(shell)?.[0] ?? ''
       swap(/(<div class="chyp(?: chyp-under)?">)(<button\b[^>]*\sclass="chyp-go"[\s\S]*?<\/button>)(<\/div>)/g, (_match, open, way, close) => `${open}${mark(way!, 'hs-visitor')}<a class="chyp-go hs-member" href="/overview"><span class="srt-cta-label">Open dashboard${arrow}</span></a>${close}`, 2)
-      swap(/<p class="sign-in-consent chy-consent">[\s\S]*?<span aria-hidden="true"> · <\/span>(<a href="\/pricing">[\s\S]*?<\/p>)(?=<\/div><\/div><\/main>$)/, (line, more) => `${mark(line!, 'hs-visitor')}<p class="chy-consent hs-member">${more}`)
+      swap(/<p class="sign-in-consent chy-consent">[\s\S]*?<span aria-hidden="true"> · <\/span>(<a href="\/pricing">[\s\S]*?<\/p>)(?=<\/div><section class="chy-sr chy-words")/, (line, more) => `${mark(line!, 'hs-visitor')}<p class="chy-consent hs-member">${more}`)
       // Behind the glass, the still, where the live picture's canvas goes; the table's reflections as the page draws
       // them for it; the room at the page's light; no remote and no knobs (they are drawn by the app).
       swap(/(<button[^>]*class="chy-screen"[^>]*>)<canvas aria-hidden="true"><\/canvas>/, `$1<img class="hs-still" src="${picture}" alt="" width="964" height="720" fetchpriority="high">`)
@@ -120,6 +121,9 @@ function homeShell(): Plugin {
       const own = css(readFileSync(at('tv/shell/shell.css'), 'utf8').replaceAll('%FLOOR%', floor))
       const faces = fonts.map(font => `@font-face{font-family:'${font.family}';src:url(${font.url}) format('woff2');font-style:normal;font-weight:${font.weight};font-display:swap;unicode-range:${BASIC}}`).join('')
 
+      // The page's name, in its tab and in a link preview's and a search result's title (said.ts).
+      const name = `${productName.toLowerCase()} · ${TITLE}`
+      if ((html.match(/<meta (?:property="og:title"|name="twitter:title") content="/g) ?? []).length !== 2) return this.error('index.html has no og:title and twitter:title for home.html to name the page in.')
       html = html
         .replace('<script src="/theme.js"></script>', [
           `<link rel="preload" href="${scene}" as="image" fetchpriority="high" />`,
@@ -127,7 +131,8 @@ function homeShell(): Plugin {
           ...fonts.map(font => `<link rel="preload" href="${font.url}" as="font" type="font/woff2" crossorigin />`),
           '<script src="/theme.js" data-home></script>',
         ].join('\n    '))
-        .replace(/<title>[^<]*<\/title>/, `<title>${productName.toLowerCase()} · Email for $0.20 per 1,000</title>`)
+        .replace(/<title>[^<]*<\/title>/, `<title>${name}</title>`)
+        .replace(/(<meta (?:property="og:title"|name="twitter:title") content=")[^"]*/g, `$1${name}`)
         // (Served only at the hosted site's "/", so it can name its address: the sitemap lists it, app/price-pages.ts.)
         .replace(/<!-- Link previews\.[^>]*-->/, `<!-- Link previews: the homepage's own (app/home-shell.ts). -->\n    <meta property="og:url" content="${publicOrigin}/" />\n    <link rel="canonical" href="${publicOrigin}/" />`)
         // Its Markdown twin and structured data (features/pricing/readable.ts; price-pages.ts writes index.md).
@@ -172,8 +177,7 @@ const swap: Plugin = {
   },
 }
 
-/** index.html's description and its link preview's (og.png, below) words: the television's. */
-const DESCRIPTION = '$0.20 per 1,000 emails sent via API, after the first 5,000 free every month.'
+/** index.html's description (said.ts) and its link preview's (og.png, below) words: the television's. */
 const ALT = 'A 1980s television on a table in a dark room, playing a price list: “$0.20 per 1,000 emails”, then what 100,000 emails cost on Nightmail ($19) and on SendGrid, Resend, MailerSend, Mailgun, SMTP2GO and Postmark ($34.95 to $115).'
 const words: Plugin = {
   name: 'nightmail:television-words',

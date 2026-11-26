@@ -3,6 +3,7 @@ import { apiKeyEnv, productName, publicOrigin, sdkPackage } from '../../../../..
 import * as factory from '../../pricing/readable.ts'
 import { formatCount, listOf, nightmail } from '../../pricing/prices.ts'
 import { ASSUME, MONTHS, OPENING, RIVALS, usd, VOLUMES } from './data.ts'
+import { DESCRIPTION, LEAD, QUESTIONS, TITLE } from './said.ts'
 
 // What the public pages say for readers that aren't browsers (pricing/readable.ts) when the homepage is the television
 // (VITE_HOME=tv: home-tv.ts, and price-pages.ts for the files it writes). Its Markdown twin leads with the price of
@@ -47,8 +48,11 @@ function homeComparison() {
   ].join('\n\n')
 }
 
+/** The questions the homepage answers (said.ts), each with its answer. */
+const questions = () => [`## Questions`, ...QUESTIONS.map(item => `### ${item.question}\n\n${item.answer}`)].join('\n\n')
+
 /** The homepage's twin, /index.md. */
-export const homeMarkdown = () => factory.homeMarkdown(`${productName} is an email API on Amazon SES: ${sendingPitch()}. Below, what a month of sending costs on it and on ${listOf(RIVALS.map(rival => rival.name))}.`, [agentSteps(), homeComparison()])
+export const homeMarkdown = () => factory.homeMarkdown(`${LEAD} Below, what a month of sending costs on it and on ${listOf(RIVALS.map(rival => rival.name))}.`, [agentSteps(), homeComparison(), questions()])
 
 /** Each public page's Markdown twin (the homepage's is this one), and llms-full.txt made of them. */
 export const markdownFiles = () => factory.markdownFiles().map(({ file, source }) => ({ file, source: file === 'index.md' ? homeMarkdown() : source }))
@@ -59,7 +63,12 @@ export function structuredData(page: Parameters<typeof factory.structuredData>[0
   const data = factory.structuredData(page) as { '@graph': { '@id'?: string; description?: string; offers?: { description?: string } }[] }
   const app = data['@graph'].find(node => node['@id'] === url('/#app'))
   if (!app?.offers) throw new Error('The structured data has no product to describe (pricing/readable.ts, app).')
-  app.description = `An email API on Amazon SES: ${sendingPitch()}.`
+  app.description = `An email API on Amazon SES for transactional and marketing email: ${sendingPitch()}.`
   app.offers.description = `${sendingPitch()}. Contacts and teammates: no charge.`
+  // The homepage's own: the page, and the questions it answers (words.tsx says them on the page).
+  if (page === 'home') data['@graph'].unshift(
+    { '@type': 'WebPage', '@id': url('/'), url: url('/'), name: `${productName}: ${TITLE}`, description: DESCRIPTION, inLanguage: 'en', isPartOf: { '@id': url('/#website') }, about: { '@id': url('/#app') } } as object,
+    { '@type': 'FAQPage', '@id': url('/#questions'), mainEntity: QUESTIONS.map(item => ({ '@type': 'Question', name: item.question, acceptedAnswer: { '@type': 'Answer', text: item.answer } })) } as object,
+  )
   return data
 }
