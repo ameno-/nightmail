@@ -42,8 +42,8 @@ const FENCE = /<\/?untrusted>|<customer>|<\/customer>|<context>|<\/context>|<not
 export function gate(text: string, scope: GateScope): GateResult {
   const reasons: string[] = [];
   // Nightmail's own addresses (support, abuse, privacy, legal, security) are the contacts an answer passes on.
-  const allowedEmails = new Set([...scope.emails, scope.supportAddress, ...Object.values(addresses), ...scope.theirs ?? []].map(e => e.toLowerCase()));
-  for (const email of text.match(EMAIL) ?? []) if (!allowedEmails.has(email.toLowerCase()) && !/^(?:dmarc|postmaster|bounces?)@/i.test(email) && !isExample(email)) reasons.push('email address outside the conversation');
+  const mayContain = new Set([...scope.emails, scope.supportAddress, ...Object.values(addresses), ...scope.theirs ?? []].map(e => e.toLowerCase()));
+  for (const email of text.match(EMAIL) ?? []) if (!mayContain.has(email.toLowerCase()) && !/^(?:dmarc|postmaster|bounces?)@/i.test(email) && !isExample(email)) reasons.push('email address outside the conversation');
   if (SECRET_PREFIX.test(text)) reasons.push('credential-shaped string');
   if (LONG_HEX.test(text) || LONG_B64.test(text.replace(/v=DKIM1[^`\n]*/g, ''))) reasons.push('long opaque string');
   if (INTERNAL_HOST.test(text)) reasons.push('internal hostname');
