@@ -22,6 +22,12 @@
 :root:has(.chy) body { background: #050607; }
 /* Nothing on this page shows a focus ring (Ryan's call: a ring round a photographed object breaks the picture). */
 .chy :focus, .chy :focus-visible { outline: none; }
+/* The source, in the page's top right corner, clear of the picture: GitHub's mark in the terms line's grey, with a
+   thumb's room round it. */
+.chy-github { position: absolute; z-index: 3; top: calc(12px + env(safe-area-inset-top, 0px)); right: calc(14px + env(safe-area-inset-right, 0px)); display: grid; place-items: center; width: 40px; height: 40px; color: var(--faint); transition: color .15s; -webkit-tap-highlight-color: transparent; }
+.chy-github svg { width: 20px; height: 20px; }
+.chy-github:active { color: var(--ink); }
+@media (hover: hover) { .chy-github:hover { color: var(--ink); } }
 .chy-col { --table: .155; --h: min((100dvh - 112px) / (1 + var(--table)), (100vw - 48px) / 1.5136, 860px); position: relative; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100dvh; max-width: 48rem; margin: 0 auto; padding: 24px 0 20px; text-align: center; }
 
 
@@ -132,7 +138,10 @@
 @media (max-width: 640px) {
   .chy { padding: 0 20px 24px; }
   /* the page's foot padding is part of the first screen, so the page does not scroll by it */
-  .chy-col { --h: calc((100vw - 20px) / 1.3587); min-height: calc(100dvh - 24px); justify-content: flex-start; padding-top: calc(14px + env(safe-area-inset-top, 0px)); }
+  /* the set starts under the mark in the corner, which is smaller here */
+  .chy-col { --h: calc((100vw - 20px) / 1.3587); min-height: calc(100dvh - 24px); justify-content: flex-start; padding-top: calc(38px + env(safe-area-inset-top, 0px)); }
+  .chy-github { top: calc(0px + env(safe-area-inset-top, 0px)); right: calc(4px + env(safe-area-inset-right, 0px)); }
+  .chy-github svg { width: 18px; height: 18px; }
   .chy-set { left: 0; }
   /* The rest of the screen is shared out, so none of it is left empty at the foot: the way in stands in the middle of
      what is under the table (the empty first item balances the terms line), and the terms are at the foot. The
@@ -141,6 +150,11 @@
   .chy-way { position: relative; align-self: stretch; }
   .chy-notice { position: absolute; top: calc(100% + 10px); left: 0; right: 0; min-height: 0; }
   .chy-under::before { content: ''; }
+}
+/* The shortest phones: the gaps close up a little, so the page still fits its screen with the mark above the set. */
+@media (max-width: 640px) and (max-height: 600px) {
+  .chy-under { gap: 46px; }
+  .chy-notice { top: calc(100% + 6px); }
 }
 
 /* The label. --stripe is the width of its border; the stripes are an airmail envelope's, red, paper, blue, paper. Round
