@@ -298,10 +298,12 @@ const optionalSources = (db: DbExecutor) => sources ??= db.execute<{ standing: b
 async function operatorTrail(c: Ctx, operator: OperatorIdentity, scope: { workspaceId: string } | { userId: string }, f: Filters, include: string[]) {
   const db = c.env.db, available = await optionalSources(db);
   const wid = 'workspaceId' in scope ? scope.workspaceId : null;
-  const parts = [sql`SELECT ${entrySelect}, e.at, e.internal FROM audit_events e WHERE ${wid ? sql`e.workspace_id = ${wid}` : sql`e.user_id = ${(scope as { userId: string }).userId}`}`];
+  // Keep the public aud_<id> for display, but sort tied audit rows by their bigint identity
+  // (aud_9 sorts after aud_10 as text). Billing and enforcement keep their existing text order.
+  const parts = [sql`SELECT ${entrySelect}, e.at, e.internal, ''::text AS other_uid, e.id AS audit_id FROM audit_events e WHERE ${wid ? sql`e.workspace_id = ${wid}` : sql`e.user_id = ${(scope as { userId: string }).userId}`}`];
   const extra = (uid: SQL, at: SQL, action: SQL, actorType: SQL, from: SQL) => sql`SELECT ${uid} AS uid, ${at}::text AS at_text, ${action} AS action, ${actorType} AS actor_type, NULL::text AS actor_id,
     NULL::text AS actor_label, 'job' AS via, NULL::text AS target_type, NULL::text AS target_id, x.detail AS summary, NULL::text AS reason, NULL::text AS request_id, NULL::text AS ip_network,
-    NULL::text AS user_agent, NULL::text AS actor_email, NULL::text AS subject_id, NULL::text AS subject_email, ${at} AS at, true AS internal FROM ${from}`;
+    NULL::text AS user_agent, NULL::text AS actor_email, NULL::text AS subject_id, NULL::text AS subject_email, ${at} AS at, true AS internal, ${uid} AS other_uid, 0::bigint AS audit_id FROM ${from}`;
   if (wid && include.includes('enforcement') && available.standing) parts.push(extra(sql`'enf_' || x.id`, sql`x.at`, sql`'standing.' || coalesce(x.kind, 'event')`, sql`coalesce(x.detail #>> '{actor,kind}', 'system')`,
     sql`(SELECT s.id::text AS id, s.at, s.kind, to_jsonb(s) - 'workspace_id' AS detail FROM standing_events s WHERE s.workspace_id = ${wid}) x`));
   // Operator actions (hosted_operator_audit) are already in audit_events: migration 262 mirrors and backfilled them.
@@ -311,11 +313,17 @@ async function operatorTrail(c: Ctx, operator: OperatorIdentity, scope: { worksp
     sql`(SELECT b.id::text AS id, b.created_at AS at, b.kind, to_jsonb(b) - 'workspace_id' AS detail FROM billing_ledger b WHERE b.workspace_id = ${wid} AND b.kind = 'usage') x`));
   const all = sql`(${sql.join(parts, sql` UNION ALL `)})`;
   const outer = { at: sql`t.at`, uid: sql`t.uid`, action: sql`t.action`, actorType: sql`t.actor_type`, actorId: sql`t.actor_id`, requestId: sql`t.request_id` };
+  const cursor = parseCursor(f.cursor);
+  const auditId = cursor?.uid.startsWith('aud_') ? cursor.uid.slice(4) : null;
+  if (auditId !== null && (!/^\d+$/.test(auditId) || BigInt(auditId) > 9223372036854775807n))
+    throw new ApiError(422, 'INVALID_CURSOR', 'The cursor is not valid. Start again without it.', 'cursor');
+  const after = cursor ? sql`(t.at, t.other_uid, t.audit_id) < (${cursor.at}::timestamptz, ${auditId === null ? cursor.uid : ''}::text, ${auditId ?? '0'}::bigint)` : sql`true`;
   const context = operatorContext(c, operator);
   const log = auditInsert(context, { action: 'audit.read', workspaceId: wid, userId: 'userId' in scope ? scope.userId : null, target: wid ? { type: 'workspace', id: wid } : { type: 'user', id: (scope as { userId: string }).userId },
     details: { filters: Object.fromEntries(Object.entries({ ...f, cursor: undefined }).filter(([, v]) => v !== undefined)), include }, internal: true });
   const { rows } = await db.execute<Row & { internal: boolean }>(sql`WITH logged AS (${log} RETURNING id)
-    SELECT t.* FROM ${all} t WHERE ${filterSql(f, outer)} ORDER BY t.at DESC, t.uid DESC LIMIT ${f.limit + 1}`);
+    SELECT t.* FROM ${all} t WHERE ${filterSql({ ...f, cursor: undefined }, outer)} AND ${after}
+    ORDER BY t.at DESC, t.other_uid DESC, t.audit_id DESC LIMIT ${f.limit + 1}`);
   const page = entries(rows, f.limit);
   return { ...page, data: page.data.map((entry, i) => ({ ...entry, internal: rows[i]!.internal })) };
 }
