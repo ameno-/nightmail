@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runnerImport, type Plugin, type Rollup } from 'vite'
 import { productName, publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
+import { CRAWL_DISALLOW } from '../api/src/site-index.ts'
 import { pruneCss, usedNames } from './critical-css.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
@@ -24,7 +25,8 @@ import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/read
 //   address under /compare/ with no page is not found.
 // - Each page's Markdown twin, and the homepage's (readable.ts): pricing.md, compare/<slug>.md, index.md;
 //   llms-site.txt, the lines the API's llms.txt puts under its title (api/src/site-index.ts); llms-full.txt.
-// - robots.txt (every crawler welcome, and where the sitemap is) and sitemap.xml: the homepage and the price pages.
+// - robots.txt (every crawler welcome to the pages, not to the API: api/src/site-index.ts, CRAWL_DISALLOW; and where the
+//   sitemap is) and sitemap.xml: the homepage and the price pages.
 // The canonical address, og:url, the twins' links and the sitemap name the hosted site (brand.ts) on every stage; the
 // card is fetched from the stage's own host, as index.html's is. While PRICE_PAGES_LIVE is false each page asks search
 // engines not to index it and the sitemap leaves it out. The build stops on an entry without its sources (prices.ts,
@@ -136,7 +138,7 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       this.emitFile({ type: 'asset', fileName: 'llms-site.txt', source: llmsSiteIndex() })
       this.emitFile({ type: 'asset', fileName: 'llms-full.txt', source: words.llmsFull() })
       const listed = [{ path: '/', modified: null as string | null }, ...PRICE_PAGES_LIVE ? PRICE_PAGES.map(page => ({ path: page.path, modified: page.comparison ? lastChecked(page.comparison) : null })) : []]
-      this.emitFile({ type: 'asset', fileName: 'robots.txt', source: `User-agent: *\nAllow: /\n\nSitemap: ${canonicalOrigin}/sitemap.xml\n` })
+      this.emitFile({ type: 'asset', fileName: 'robots.txt', source: `User-agent: *\nAllow: /\n${CRAWL_DISALLOW.map(path => `Disallow: ${path}\n`).join('')}\nSitemap: ${canonicalOrigin}/sitemap.xml\n` })
       this.emitFile({ type: 'asset', fileName: 'sitemap.xml', source: `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${listed.map(({ path, modified }) => `  <url><loc>${canonicalOrigin}${path}</loc>${modified ? `<lastmod>${modified}</lastmod>` : ''}</url>\n`).join('')}</urlset>\n` })
     } },
   }
