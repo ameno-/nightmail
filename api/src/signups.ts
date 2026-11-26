@@ -1,6 +1,6 @@
 import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 import { sql, type SQL } from 'drizzle-orm';
-import { log, type Config, type Database, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import { id, log, type Config, type Database, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { productName } from './brand.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import type { ListContactResult } from './audience.js';
@@ -243,20 +243,28 @@ export const signupsList = (config: Pick<Config, 'multiTenant' | 'platformDomain
 const waitlistDue = sql`(list_synced_at IS NULL OR list_synced_at IS DISTINCT FROM greatest(last_at,let_in_at) OR list_synced_attempts IS DISTINCT FROM attempts)`;
 const signupDue = sql`(list_synced_at IS NULL AND email IS NOT NULL)`;
 // One job per kind and workspace: queued again only once the last run has finished.
-const queueRun = (list: SignupsList, kind: 'sync' | 'reconcile', when = sql`true`) => sql`INSERT INTO jobs(id,type,workspace_id,payload)
+const queueRun = (list: Pick<SignupsList, 'workspaceId'>, kind: 'sync' | 'reconcile', when = sql`true`) => sql`INSERT INTO jobs(id,type,workspace_id,payload)
   SELECT ${`signups.${kind}:${list.workspaceId}`},${`signups.${kind}`},${list.workspaceId},'{}'::jsonb WHERE ${when}
   ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,status='pending',attempts=0,lease_until=NULL,last_error=NULL,available_at=now() WHERE jobs.status IN ('completed','failed')`;
-/** Every minute (worker cron, Node runner): a signups.sync run while any waitlist row or sign-up is due. Never throws. */
+/**
+ * Every minute (worker cron, Node runner): a signups.sync run while any waitlist row or sign-up is due for the sign-ups
+ * list, or any account for the customers list. Never throws.
+ */
 export async function signupsTick(runtime: Runtime) {
-  const list = signupsList(runtime.config);
-  if (!list) return;
-  try { await runtime.db.execute(queueRun(list, 'sync', sql`EXISTS (SELECT FROM nightmail_waitlist WHERE ${waitlistDue}) OR EXISTS (SELECT FROM nightmail_signups WHERE ${signupDue})`)); }
+  const list = signupsList(runtime.config), customers = customersWorkspace(runtime.config);
+  if (!list && !customers) return;
+  const due = [...list ? [sql`EXISTS (SELECT FROM nightmail_waitlist WHERE ${waitlistDue}) OR EXISTS (SELECT FROM nightmail_signups WHERE ${signupDue})`] : [],
+    ...customers ? [customersDue(customers)] : []];
+  try { await runtime.db.execute(queueRun({ workspaceId: list?.workspaceId ?? customers! }, 'sync', sql.join(due, sql` OR `))); }
   catch { log('warn', { code: 'SIGNUPS_LIST_NOT_QUEUED' }); }
 }
-/** Hourly (maintenance.ts): a signups.reconcile run. */
+/** Hourly (maintenance.ts): a signups.reconcile run, and a warning while the customers list is deleted. */
 export async function queueSignupsReconcile(runtime: Runtime) {
-  const list = signupsList(runtime.config);
+  const list = signupsList(runtime.config), customers = customersWorkspace(runtime.config);
   if (list) await runtime.db.execute(queueRun(list, 'reconcile'));
+  if (!customers) return;
+  const { rows: [gone] } = await runtime.db.execute<{ list_id: string }>(sql`SELECT r.list_id FROM nightmail_customers_list r WHERE r.workspace_id=${customers} AND ${customersListGone}`);
+  if (gone) log('warn', { code: 'CUSTOMERS_LIST_MISSING', workspaceId: customers, listId: gone.list_id });
 }
 
 const iso = (at: string) => new Date(at).toISOString();
@@ -305,8 +313,8 @@ async function syncAddress(db: Database, list: SignupsList, address: string): Pr
 const waitlistConsent = (joinedAt: string) => ({ source: `${productName} waitlist`, evidence: 'Asked for access by signing in with this verified address while sign-ups were closed, and joined the waitlist.', occurredAt: iso(joinedAt) });
 
 const BATCH = 100, RUN_MS = 10_000;
-type Counts = Partial<Record<ListContactResult, number>>;
-const count = (counts: Counts, result: ListContactResult) => { counts[result] = (counts[result] ?? 0) + 1; };
+type Counts = Partial<Record<ListContactResult | 'removed' | 'skipped', number>>;
+const count = (counts: Counts, result: keyof Counts) => { counts[result] = (counts[result] ?? 0) + 1; };
 /** Counts only: addresses never reach a log. A missing list stops the run; the next one tries again. */
 function logRun(list: SignupsList, kind: string, counts: Counts) {
   if (counts.no_list) log('warn', { code: 'SIGNUPS_LIST_MISSING', workspaceId: list.workspaceId, listId: list.listId });
@@ -315,33 +323,171 @@ function logRun(list: SignupsList, kind: string, counts: Counts) {
 // A run queued under a list that has since been turned off or moved changes nothing.
 const listOf = (runtime: Runtime, workspaceId: string) => { const list = signupsList(runtime.config); return list?.workspaceId === workspaceId ? list : null; };
 const more = () => new JobDeferred(new Date().toISOString());
-export const signupJobs: Record<string, JobHandler> = {
-  // Due sign-ups, then due waitlist rows, 100 at a time, for up to ten seconds a run; it comes back while more are due.
-  'signups.sync': retryDatabaseFailures(async (runtime, _payload, job) => {
-    const list = listOf(runtime, job.workspaceId), until = Date.now() + RUN_MS, counts: Counts = {};
-    if (!list) return;
-    try {
-      for (;;) {
-        const { rows: signups } = await runtime.db.execute<{ user_id: string; email: string }>(sql`SELECT user_id,email FROM nightmail_signups WHERE ${signupDue} ORDER BY at LIMIT ${BATCH}`);
-        const { rows: waiting } = signups.length ? { rows: [] } : await runtime.db.execute<{ email: string }>(sql`SELECT email FROM nightmail_waitlist WHERE ${waitlistDue} ORDER BY first_at,email LIMIT ${BATCH}`);
-        if (!signups.length && !waiting.length) return;
-        for (const row of signups) {
-          const { result } = await syncAddress(runtime.db, list, row.email);
-          count(counts, result);
-          if (result === 'no_list') return;
-          await runtime.db.execute(sql`UPDATE nightmail_signups SET list_synced_at=now() WHERE user_id=${row.user_id}`);
-        }
-        for (const row of waiting) {
-          const { result, version, attempts } = await syncAddress(runtime.db, list, row.email);
-          count(counts, result);
-          if (result === 'no_list') return;
-          // The version written: a row changed meanwhile stays due.
-          if (version) await runtime.db.execute(sql`UPDATE nightmail_waitlist SET list_synced_at=${version}::timestamptz,list_synced_attempts=${attempts}
-            WHERE email=${row.email} AND attempts=${attempts} AND greatest(last_at,let_in_at)=${version}::timestamptz`);
-        }
-        if (Date.now() > until) throw more();
+/** The sign-ups list's part of a run: due sign-ups, then due waitlist rows, 100 at a time, until `until`. */
+async function syncSignupsList(runtime: Runtime, list: SignupsList, until: number): Promise<'done' | 'more' | 'missing'> {
+  const counts: Counts = {};
+  try {
+    for (;;) {
+      const { rows: signups } = await runtime.db.execute<{ user_id: string; email: string }>(sql`SELECT user_id,email FROM nightmail_signups WHERE ${signupDue} ORDER BY at LIMIT ${BATCH}`);
+      const { rows: waiting } = signups.length ? { rows: [] } : await runtime.db.execute<{ email: string }>(sql`SELECT email FROM nightmail_waitlist WHERE ${waitlistDue} ORDER BY first_at,email LIMIT ${BATCH}`);
+      if (!signups.length && !waiting.length) return 'done';
+      for (const row of signups) {
+        const { result } = await syncAddress(runtime.db, list, row.email);
+        count(counts, result);
+        if (result === 'no_list') return 'missing';
+        await runtime.db.execute(sql`UPDATE nightmail_signups SET list_synced_at=now() WHERE user_id=${row.user_id}`);
       }
-    } finally { if (Object.keys(counts).length) logRun(list, 'sync', counts); }
+      for (const row of waiting) {
+        const { result, version, attempts } = await syncAddress(runtime.db, list, row.email);
+        count(counts, result);
+        if (result === 'no_list') return 'missing';
+        // The version written: a row changed meanwhile stays due.
+        if (version) await runtime.db.execute(sql`UPDATE nightmail_waitlist SET list_synced_at=${version}::timestamptz,list_synced_attempts=${attempts}
+          WHERE email=${row.email} AND attempts=${attempts} AND greatest(last_at,let_in_at)=${version}::timestamptz`);
+      }
+      if (Date.now() > until) return 'more';
+    }
+  } finally { if (Object.keys(counts).length) logRun(list, 'sync', counts); }
+}
+
+// The customers list (hosted, migration 579): every account that owns a workspace, at its verified address, is a contact
+// of one list in the platform workspace named "Nightmail customers", for product news and service status. Nothing is set
+// by hand. The first run with someone to write makes the list, under an advisory lock so two runs make one, and records
+// its ID (nightmail_customers_list): it is found by ID whatever it is renamed to. Once deleted it stays deleted and nothing
+// is written (CUSTOMERS_LIST_MISSING, hourly). A migration deleting the row makes a new one, which every account is
+// written to again; each account's membership of the old list goes as it moves, so an old list that still exists (renamed
+// rather than deleted) ends without everyone this put there. Each account is written once per list and address (nightmail_customers), with properties to segment
+// by: signed_up_at (ISO 8601 in UTC), the sign-up's time for an account that took a place (joined_via sign-up), else when
+// the account was made (joined_via admitted: an invitation, staff or an operator let it in); email_domain and mailbox as
+// the sign-ups list has them; and the sign-up's name, else the account's. Consent, through upsertListContact: a contact
+// with no decision is subscribed with the source "Nightmail account" (legitimate interests, not an opt-in) and the notice it
+// rests on (CUSTOMERS_NOTICE), recorded again for one already subscribed so its history says why it is on this list; an opt-out stays an opt-out (one decision per
+// contact in the workspace), suppression is never touched and a deleted contact stays deleted. An account whose address
+// changes moves to the new one; one deleted, owning no workspace or without a verified address comes off (its contact,
+// consent and suppression stay). The same signups.sync run does all of it, within a minute; jobs carry no address.
+export const CUSTOMERS_LIST_NAME = `${productName} customers`;
+/** Who is on the customers list: accounts with a verified address that own a workspace. Teammates too: drop the role. */
+const customerAccount = (user: SQL) => sql`${user}.email_verified AND EXISTS (SELECT FROM workspace_members m WHERE m.user_id=${user}.id AND m.role='owner')`;
+/** The customers list's workspace: the platform workspace, hosted. */
+export const customersWorkspace = (config: Pick<Config, 'multiTenant' | 'platformDomainWorkspace'>) => config.multiTenant && config.platformDomainWorkspace ? config.platformDomainWorkspace : null;
+const customersListGone = sql`NOT EXISTS (SELECT FROM audience_lists l WHERE l.workspace_id=r.workspace_id AND l.id=r.list_id)`;
+const customerWritten = (workspaceId: string) => sql`EXISTS (SELECT FROM nightmail_customers c JOIN nightmail_customers_list r ON r.workspace_id=c.workspace_id AND r.list_id=c.list_id
+  WHERE c.user_id=u.id AND c.workspace_id=${workspaceId} AND c.email=lower(u.email))`;
+/** A row (c) whose account no longer qualifies. */
+const customerLeft = sql`NOT EXISTS (SELECT FROM nightmail_users u WHERE u.id=c.user_id AND ${customerAccount(sql`u`)})`;
+/**
+ * Anything due for the customers list: an account to write while the workspace exists and its list does or is still to
+ * be made, or a row whose account left (its row goes even while the list is deleted).
+ */
+const customersDue = (workspaceId: string) => sql`((EXISTS (SELECT FROM workspaces w WHERE w.id=${workspaceId})
+  AND NOT EXISTS (SELECT FROM nightmail_customers_list r WHERE r.workspace_id=${workspaceId} AND ${customersListGone})
+  AND EXISTS (SELECT FROM nightmail_users u WHERE ${customerAccount(sql`u`)} AND NOT ${customerWritten(workspaceId)})) OR EXISTS (SELECT FROM nightmail_customers c WHERE ${customerLeft}))`;
+/**
+ * The customers list's ID: the one recorded, else one made now, in the transaction that records it, under a lock that a
+ * second run waits on and then finds it. Null when the recorded list has been deleted, or the workspace doesn't exist.
+ */
+export async function customersList(db: Database, workspaceId: string): Promise<string | null> {
+  const recorded = sql`SELECT r.list_id,NOT ${customersListGone} AS present FROM nightmail_customers_list r WHERE r.workspace_id=${workspaceId}`;
+  const { rows: [known] } = await db.execute<{ list_id: string; present: boolean }>(recorded);
+  if (known) return known.present ? known.list_id : null;
+  return db.transaction(async tx => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${workspaceId},57900))`);
+    const { rows: [made] } = await tx.execute<{ list_id: string; present: boolean }>(recorded);
+    if (made) return made.present ? made.list_id : null;
+    if (!(await tx.execute(sql`SELECT FROM workspaces WHERE id=${workspaceId}`)).rowCount) return null;
+    const listId = id('lst');
+    await tx.execute(sql`INSERT INTO audience_lists(id,workspace_id,name,description) VALUES(${listId},${workspaceId},${CUSTOMERS_LIST_NAME},
+      ${`Kept by ${productName}: every account that owns a workspace, at its verified address. Rename it freely; deleted, it isn't made again.`})`);
+    await tx.execute(sql`INSERT INTO nightmail_customers_list(workspace_id,list_id) VALUES(${workspaceId},${listId})`);
+    log('info', { code: 'CUSTOMERS_LIST_CREATED', workspaceId, listId });
+    return listId;
+  });
+}
+/**
+ * The notice a "Nightmail account" record rests on, as its policy version: the Privacy Policy and Terms that say customers
+ * get product news and service status emails, and the line under every sign-in button, published together on that date
+ * (app/src/features/legal/content, their `updated`); change it with them. A record is dated when the account signed up or
+ * was made, so one dated before the notice is someone who signed up before it existed: the record doesn't claim they saw
+ * it, and signed_up_at is what a send filters on.
+ */
+export const CUSTOMERS_NOTICE = 'Privacy Policy and Terms of 26 November 2026';
+const customerConsent = (occurredAt: string) => ({ source: `${productName} account`, occurredAt, policyVersion: CUSTOMERS_NOTICE,
+  evidence: `Account holder: owns a ${productName} workspace with this verified address. Product news and service status emails, on legitimate interests; not an opt-in. Dated when the account was created, which can be before the notice.` });
+type Written = { workspace_id: string; list_id: string; email: string };
+// One account at a time, so a run never writes an account twice or takes back what another just wrote.
+const lockAccount = (tx: DbExecutor, userId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId},57901))`);
+/** Takes the address a row names off its list, unless another account's row holds it there now. */
+async function takeBack(tx: DbExecutor, userId: string, written: Written) {
+  const { removeListContact } = await import('./audience.js');
+  if ((await tx.execute(sql`SELECT FROM nightmail_customers WHERE user_id<>${userId} AND workspace_id=${written.workspace_id} AND list_id=${written.list_id} AND email=${written.email}`)).rowCount) return false;
+  return removeListContact(tx, { workspaceId: written.workspace_id }, written.list_id, written.email);
+}
+/** One account's contact, from where it stands now, and the row that says so. Reads the account without locking it. */
+async function writeCustomer(db: Database, workspaceId: string, listId: string, userId: string): Promise<ListContactResult | 'skipped'> {
+  const { upsertListContact } = await import('./audience.js');
+  return db.transaction(async tx => {
+    await lockAccount(tx, userId);
+    const { rows: [account] } = await tx.execute<{ email: string; name: string; created_at: string; signed_up: string | null; signup_name: string | null }>(sql`SELECT
+        lower(u.email) AS email,u.name,to_json(u.created_at) AS created_at,to_json(s.at) AS signed_up,s.name AS signup_name
+      FROM nightmail_users u LEFT JOIN nightmail_signups s ON s.user_id=u.id WHERE u.id=${userId} AND ${customerAccount(sql`u`)}`);
+    const { rows: [written] } = await tx.execute<Written>(sql`SELECT workspace_id,list_id,email FROM nightmail_customers WHERE user_id=${userId}`);
+    // No longer qualifies (taken off as one that left), or written meanwhile.
+    if (!account || (written?.workspace_id === workspaceId && written.list_id === listId && written.email === account.email)) return 'skipped';
+    const since = iso(account.signed_up ?? account.created_at);
+    const result = await upsertListContact(tx, { workspaceId }, listId, { email: account.email, name: contactName(account.signup_name ?? account.name), consentAgain: true,
+      properties: { ...await addressProperties(account.email), signed_up_at: since, joined_via: account.signed_up ? 'sign-up' : 'admitted' }, consent: customerConsent(since) });
+    if (result === 'no_list') return result;
+    if (written) await takeBack(tx, userId, written);
+    await tx.execute(sql`INSERT INTO nightmail_customers(user_id,workspace_id,list_id,email) VALUES(${userId},${workspaceId},${listId},${account.email})
+      ON CONFLICT(user_id) DO UPDATE SET workspace_id=excluded.workspace_id,list_id=excluded.list_id,email=excluded.email,written_at=now()`);
+    return result;
+  });
+}
+/** An account that left: its address comes off the list and its row goes. */
+async function takeOffCustomer(db: Database, userId: string): Promise<'removed' | 'skipped'> {
+  return db.transaction(async tx => {
+    await lockAccount(tx, userId);
+    const { rows: [written] } = await tx.execute<Written>(sql`SELECT c.workspace_id,c.list_id,c.email FROM nightmail_customers c WHERE c.user_id=${userId} AND ${customerLeft}`);
+    if (!written) return 'skipped';
+    await takeBack(tx, userId, written);
+    await tx.execute(sql`DELETE FROM nightmail_customers WHERE user_id=${userId}`);
+    return 'removed';
+  });
+}
+/**
+ * The customers list's part of a run: due accounts, then rows whose account left, 100 at a time, until `until`.
+ * holdSignups: the sign-ups list is on and wrote everything due, so an account whose sign-up arrived since waits for it
+ * (its contact's first consent is the sign-up's own).
+ */
+async function syncCustomers(runtime: Runtime, workspaceId: string, holdSignups: boolean, until: number): Promise<'done' | 'more'> {
+  const listId = await customersList(runtime.db, workspaceId);
+  const hold = holdSignups ? sql`AND NOT EXISTS (SELECT FROM nightmail_signups s WHERE s.user_id=u.id AND s.list_synced_at IS NULL AND s.email IS NOT NULL)` : sql``;
+  const counts: Counts = {};
+  try {
+    for (;;) {
+      const { rows: due } = listId ? await runtime.db.execute<{ id: string }>(sql`SELECT u.id FROM nightmail_users u WHERE ${customerAccount(sql`u`)} AND NOT ${customerWritten(workspaceId)} ${hold}
+        ORDER BY u.created_at,u.id LIMIT ${BATCH}`) : { rows: [] };
+      const { rows: left } = due.length ? { rows: [] } : await runtime.db.execute<{ user_id: string }>(sql`SELECT c.user_id FROM nightmail_customers c WHERE ${customerLeft} ORDER BY c.user_id LIMIT ${BATCH}`);
+      if (!due.length && !left.length) return 'done';
+      for (const row of due) {
+        const result = await writeCustomer(runtime.db, workspaceId, listId!, row.id);
+        count(counts, result);
+        if (result === 'no_list') return 'done';
+      }
+      for (const row of left) count(counts, await takeOffCustomer(runtime.db, row.user_id));
+      if (Date.now() > until) return 'more';
+    }
+  } finally { if (Object.keys(counts).length) log('info', { code: 'CUSTOMERS_LIST_SYNCED', workspaceId, ...listId ? { listId } : {}, ...counts }); }
+}
+
+export const signupJobs: Record<string, JobHandler> = {
+  // The sign-ups list's due rows, then the customers list's, 100 at a time, for up to ten seconds a run; it comes back
+  // while more are due. A missing sign-ups list stops only its own part.
+  'signups.sync': retryDatabaseFailures(async (runtime, _payload, job) => {
+    const list = listOf(runtime, job.workspaceId), customers = customersWorkspace(runtime.config) === job.workspaceId, until = Date.now() + RUN_MS;
+    const signups = list ? await syncSignupsList(runtime, list, until) : null;
+    if (signups === 'more') throw more();
+    if (customers && await syncCustomers(runtime, job.workspaceId, signups === 'done', until) === 'more') throw more();
   }),
   // Contacts still waiting or let in whose address left the waitlist without a sign-up, because an invitation, staff or
   // an operator's binding let its account in: status admitted, and nothing else about them changes.

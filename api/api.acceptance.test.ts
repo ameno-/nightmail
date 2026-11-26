@@ -2024,6 +2024,136 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.deepEqual(await links(full2),[]);
 });
 
+// The customers list (signups.ts): every account that owns a workspace, at its verified address, is a contact of one list
+// in the platform workspace that nobody sets up. The minute tick queues a run while anything is due; the runs are done
+// here by hand, as the runner would, until nothing is due.
+test('Nightmail customers: every account that owns a workspace joins one list in the platform workspace, made once by two runs at once and found by ID after a rename, at its verified address with when it signed up; written as an account holder without touching opt-outs, suppression or deleted contacts; a deleted account and an old address come off, and a deleted list is not made again', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {signupJobs, signupsTick, CUSTOMERS_LIST_NAME, CUSTOMERS_NOTICE} = await import('./src/signups.js'), {JobDeferred} = await import('./src/jobs.js'), {recordUnsubscribe} = await import('./src/audience.js');
+  const db = await fixtureDatabase(t);
+  const pool = new pg.Pool({connectionString:FIXTURE_DATABASE_URL, max:6, connectionTimeoutMillis:5_000}); cleanup(t,()=>pool.end());
+  const runtime: import('./src/core.js').Runtime = { db:drizzle(pool), config:loadConfig({...process.env, PUBLIC_URL:'https://customers.example.org', MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', NIGHTMAIL_HOSTED_SCREEN:'false', BANE_HOSTED_SCREEN:'false'}),
+    snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+  const platform = `ws_${randomUUID().replaceAll('-','')}`, owned = `ws_${randomUUID().replaceAll('-','')}`, tag = randomUUID().slice(0,8), jobId = `signups.sync:${platform}`;
+  runtime.config.platformDomainWorkspace = platform;
+  runtime.config.signupsListId = undefined;
+  const users: string[] = [], waiting: string[] = [];
+  cleanup(t,async()=>{
+    for (const table of ['audience_list_members','audience_consent_audit','audience_contacts','audience_list_counts','audience_lists','nightmail_customers','nightmail_customers_list','jobs']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[platform]);
+    await db.query('DELETE FROM nightmail_users WHERE id=ANY($1)',[users]);
+    await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[waiting]);
+    await db.query('DELETE FROM workspaces WHERE id=ANY($1)',[[platform,owned]]);
+  });
+  await db.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'Platform',$1),($2,'Customers fixture',$2)",[platform,owned]);
+  const signedUpAt = '2026-11-25T12:00:00.000Z', createdAt = '2026-11-01T10:00:00.000Z';
+  // signedUp: 'address' took a place with its mailbox recorded, 'none' before sign-ups recorded one; otherwise an
+  // invitation or staff let it in.
+  const person = async (name: string, o: { verified?: boolean; role?: 'owner' | 'member'; signedUp?: 'address' | 'none' } = {}) => {
+    const id = `customer-${randomUUID()}`, email = `${name}-${tag}@customers.example.com`;
+    users.push(id);
+    await db.query('INSERT INTO nightmail_users(id,name,email,email_verified,created_at) VALUES($1,$2,$3,$4,$5)',[id,`Account ${name}`,email,o.verified ?? true,createdAt]);
+    await db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)',[randomUUID(),id,owned,o.role ?? 'owner']);
+    if (o.signedUp) await db.query("INSERT INTO nightmail_signups(user_id,via,at,email,name) VALUES($1,'open',$2,$3,$4)",[id,signedUpAt,o.signedUp === 'address' ? email : null,`Signed ${name}`]);
+    return { id, email };
+  };
+  const listId = async () => (await db.query('SELECT list_id FROM nightmail_customers_list WHERE workspace_id=$1',[platform])).rows[0]?.list_id ?? null;
+  const named = async () => (await db.query('SELECT id FROM audience_lists WHERE workspace_id=$1 AND name=$2',[platform,CUSTOMERS_LIST_NAME])).rows.map(r=>r.id);
+  const contactOf = async (email: string) => (await db.query(`SELECT c.name,c.properties,c.marketing_consent AS consent,c.suppressed,c.deleted_at IS NOT NULL AS deleted,
+      EXISTS (SELECT FROM audience_list_members m JOIN nightmail_customers_list r ON r.workspace_id=m.workspace_id AND r.list_id=m.list_id WHERE m.workspace_id=c.workspace_id AND m.contact_id=c.id) AS listed,
+      ARRAY(SELECT a.status||' '||a.source FROM audience_consent_audit a WHERE a.workspace_id=c.workspace_id AND a.contact_id=c.id ORDER BY a.created_at,a.id) AS consents
+    FROM audience_contacts c WHERE c.workspace_id=$1 AND c.email=lower($2)`,[platform,email])).rows[0] ?? null;
+  const stage = async (email: string) => { const c = await contactOf(email); return c && [c.consent,c.listed]; };
+  // Whether the minute tick queues a run now (the job row is made or made due again only then).
+  const queued = async () => { await db.query('DELETE FROM jobs WHERE id=$1',[jobId]); await signupsTick(runtime); return (await db.query('SELECT FROM jobs WHERE id=$1',[jobId])).rowCount === 1; };
+  const run = async () => { for (let again = true; again;) again = await signupJobs['signups.sync']!(runtime,{},{id:jobId,workspaceId:platform,attempts:1}).then(()=>false,(error:unknown)=>{ if (error instanceof JobDeferred) return true; throw error; }); };
+  const contact = async (email: string, set: { consent?: string; suppressed?: boolean; deleted?: boolean }) => {
+    const id = `con_${randomUUID().replaceAll('-','')}`;
+    await db.query('INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed,deleted_at) VALUES($1,$2,$3,$4,$5,$6)',[id,platform,email,set.consent ?? 'unknown',set.suppressed ?? false,set.deleted ? new Date().toISOString() : null]);
+    if (set.consent === 'subscribed') await db.query("INSERT INTO audience_consent_audit(id,workspace_id,contact_id,email,status,source,occurred_at) VALUES($1,$2,$3,$4,'subscribed','Nightmail waitlist',now())",[`cns_${randomUUID().replaceAll('-','')}`,platform,id,email]);
+  };
+
+  const signup = await person('signup',{signedUp:'address'}), early = await person('early',{signedUp:'none'}), invited = await person('invited');
+  const teammate = await person('teammate',{role:'member'}), unverified = await person('unverified',{verified:false});
+  const onlyWaited = `waited-${tag}@customers.example.com`;
+  waiting.push(onlyWaited);
+  await db.query('INSERT INTO nightmail_waitlist(email,name) VALUES($1,$2)',[onlyWaited,'Only waited']);
+  const optedOut = await person('opted-out'), suppressed = await person('suppressed'), deleted = await person('deleted'), waitlisted = await person('waitlisted',{signedUp:'address'});
+  assert.equal((await recordUnsubscribe(runtime,platform,optedOut.email,'footer-confirm')).changed,true);
+  await contact(suppressed.email,{suppressed:true});
+  await contact(deleted.email,{deleted:true});
+  await contact(waitlisted.email,{consent:'subscribed'});
+
+  // The backfill: the first run makes the list. Two at once make one, and write each account once.
+  assert.equal(await listId(),null);
+  assert.equal(await queued(),true);
+  await Promise.all([run(),run()]);
+  const first = await listId();
+  assert.match(first,/^lst_[0-9a-f]{32}$/);
+  assert.deepEqual(await named(),[first]);
+  assert.deepEqual(await contactOf(signup.email),{name:'Signed signup',properties:{signed_up_at:signedUpAt,joined_via:'sign-up',email_domain:'customers.example.com',mailbox:'company'},
+    consent:'subscribed',suppressed:false,deleted:false,listed:true,consents:['subscribed Nightmail account']});
+  // Signed up before sign-ups recorded an address: the account's address, with the sign-up's time.
+  assert.deepEqual((await contactOf(early.email)).properties,{signed_up_at:signedUpAt,joined_via:'sign-up',email_domain:'customers.example.com',mailbox:'company'});
+  // Let in by an invitation or staff: when the account was made.
+  assert.deepEqual(await contactOf(invited.email).then(c=>[c.name,c.properties,c.consents,c.listed]),['Account invited',{signed_up_at:createdAt,joined_via:'admitted',email_domain:'customers.example.com',mailbox:'company'},['subscribed Nightmail account'],true]);
+  // A teammate who owns no workspace, an unverified address and an address that only waited aren't on it.
+  for (const email of [teammate.email,unverified.email,onlyWaited]) assert.equal(await contactOf(email),null,email);
+  // An opt-out stays an opt-out, suppression is untouched, a deleted contact stays deleted; a contact already subscribed
+  // gets the account holder's record beside its own.
+  assert.deepEqual(await contactOf(optedOut.email).then(c=>[c.consent,c.listed,c.consents]),['unsubscribed',true,['unsubscribed footer-confirm']]);
+  assert.deepEqual(await contactOf(suppressed.email).then(c=>[c.consent,c.suppressed,c.listed,c.consents]),['unknown',true,true,[]]);
+  assert.deepEqual(await contactOf(deleted.email).then(c=>[c.deleted,c.listed,c.consents]),[true,false,[]]);
+  assert.deepEqual(await contactOf(waitlisted.email).then(c=>[c.consent,c.listed,c.consents]),['subscribed',true,['subscribed Nightmail waitlist','subscribed Nightmail account']]);
+  // Each account holder's record names the notice it rests on.
+  assert.deepEqual((await db.query("SELECT DISTINCT policy_version FROM audience_consent_audit WHERE workspace_id=$1 AND source='Nightmail account'",[platform])).rows.map(r=>r.policy_version),[CUSTOMERS_NOTICE]);
+  assert.equal(await queued(),false);
+
+  // Renamed in the dashboard, it is still the list: a new sign-up joins it within the minute, and no list is made.
+  await db.query("UPDATE audience_lists SET name='Customers (renamed)' WHERE id=$1",[first]);
+  const later = await person('later',{signedUp:'address'});
+  assert.equal(await queued(),true);
+  await run();
+  assert.deepEqual(await stage(later.email),['subscribed',true]);
+  assert.deepEqual([await listId(),await named(),(await db.query('SELECT count(*)::int AS n FROM audience_lists WHERE workspace_id=$1',[platform])).rows[0].n],[first,[],1]);
+
+  // A deleted account comes off (the contact and its consent stay); a changed address moves.
+  await db.query('DELETE FROM nightmail_users WHERE id=$1',[signup.id]);
+  const moved = `invited-new-${tag}@customers.example.com`;
+  await db.query('UPDATE nightmail_users SET email=$2 WHERE id=$1',[invited.id,moved]);
+  assert.equal(await queued(),true);
+  await run();
+  assert.deepEqual(await stage(signup.email),['subscribed',false]);
+  assert.deepEqual([await stage(invited.email),await stage(moved)],[['subscribed',false],['subscribed',true]]);
+  assert.equal(await queued(),false);
+
+  // Deleted by staff (as DELETE /v1/lists/{id} does), it stays deleted: nothing is written or made, and a deleted
+  // account's row still goes.
+  await db.query('DELETE FROM audience_list_members WHERE workspace_id=$1 AND list_id=$2',[platform,first]);
+  await db.query('DELETE FROM audience_lists WHERE workspace_id=$1 AND id=$2',[platform,first]);
+  const afterDelete = await person('after-delete');
+  assert.equal(await queued(),false);
+  await run();
+  assert.deepEqual([await contactOf(afterDelete.email),await named(),await listId()],[null,[],first]);
+  await db.query('DELETE FROM nightmail_users WHERE id=$1',[early.id]);
+  assert.equal(await queued(),true);
+  await run();
+  assert.equal((await db.query('SELECT FROM nightmail_customers WHERE user_id=$1',[early.id])).rowCount,0);
+  assert.equal(await queued(),false);
+
+  // Made again only by deleting its row (a migration): a new list, and everyone is written to it.
+  await db.query('DELETE FROM nightmail_customers_list WHERE workspace_id=$1',[platform]);
+  assert.equal(await queued(),true);
+  await run();
+  const second = await listId();
+  assert.ok(second && second !== first);
+  assert.deepEqual(await named(),[second]);
+  for (const email of [afterDelete.email,later.email,moved]) assert.deepEqual(await stage(email),['subscribed',true],email);
+  assert.deepEqual(await stage(optedOut.email),['unsubscribed',true]);
+  assert.deepEqual(await contactOf(deleted.email).then(c=>[c.deleted,c.listed]),[true,false]);
+  for (const email of [signup.email,early.email,invited.email]) assert.equal((await stage(email))?.[1] ?? false,false,email);
+});
+
 // Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as
 // exactly one of them (X-Bane-Account, else the browser default), and nothing of one account reaches another.
 test('Account switcher: two accounts in one browser switch, stay apart on every route and sign out alone', async t => {
