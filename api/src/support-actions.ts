@@ -5,7 +5,7 @@ import { placementRoot } from './domain-registry.js';
 import { auditContext, auditInsert, systemContext, type AuditContext, type AuditEvent } from './audit.js';
 import { productName } from './brand.js';
 import type { EndpointRecord } from './db/mailbox.js';
-import { AGENT_KINDS, KINDS as APPROVALS, propose as proposeApproval } from './support-approvals.js';
+import { AGENT_KINDS, cappedCredit, CREDIT_CAP_CENTS, KINDS as APPROVALS, propose as proposeApproval } from './support-approvals.js';
 import { event } from './support-inbox.js';
 
 // Support actions (api/README.md "Support integration"). A support conversation proposes one of a few fixed changes for
@@ -404,15 +404,19 @@ export function registerSupportActions(app: App) {
     kind: z.enum(AGENT_KINDS as [string, ...string[]]).describe(AGENT_KINDS.map(k => `${k}: ${APPROVALS[k].label}`).join('; ')),
     reason: z.string().trim().min(10).max(400).describe('Why, in plain words, for staff: what the customer asked and what the reads showed.'),
     daily: z.number().int().optional().describe('raise_daily_limit: the daily limit to set.'), limit: z.number().int().optional().describe('raise_domain_limit: the domain limit to set.'),
-    campaignId: Id.optional().describe('release_campaign: the paused campaign.'), amountCents: z.number().int().optional().describe('grant_credit: the promotional credit, in cents.'),
+    campaignId: Id.optional().describe('release_campaign: the paused campaign.'),
+    amountCents: z.number().int().optional().describe('grant_credit: the promotional credit asked for, in cents. A proposal grants at most 10,000 ($100): a larger ask, up to 100,000, is capped, and staff see the ask. One credit proposal waits per conversation at a time.'),
   }).strict().openapi('SupportApprovalProposal');
   const Proposed = z.object({ id: z.string(), kind: z.string(), label: z.string(), summary: z.string(), state: z.literal('proposed'), expiresAt: z.string() }).openapi('SupportApprovalProposed');
   app.openapi(createRoute({ hide: true, method: 'post', path: '/v1/support/approvals', operationId: 'proposeSupportApproval', tags, security,
-    description: describe(`Propose a risky change to ${productName} staff for the conversation's workspace (an owner or admin's): a limit, a pause or resume, the marketing hold's or a campaign's release, or promotional credit. Nothing runs here: it waits for a signed-in operator's approval in the dashboard, from the staff email, for 72 hours; the conversation gets a ticket if it has none open. At most ${OPEN_PROPOSALS} open per conversation; the same proposal again answers the open one.`),
+    description: describe(`Propose a risky change to ${productName} staff for the conversation's workspace (an owner or admin's): a limit, a pause or resume, the marketing hold's or a campaign's release, or promotional credit (at most $100 a proposal, one waiting per conversation; a larger ask is capped and shown). Nothing runs here: it waits for a signed-in operator's approval in the dashboard, from the staff email, for 72 hours; the conversation gets a ticket if it has none open. At most ${OPEN_PROPOSALS} open per conversation; the same proposal again answers the open one.`),
     request: { body: json(ProposalBody) }, responses: { 200: response(Proposed), 201: response(Proposed), ...errors } }), async c => {
     const conversation = conversationOf(c), { kind: name, reason, ...fields } = c.req.valid('json'), kind = name as (typeof AGENT_KINDS)[number];
     if (conversation.workspaces.length !== 1) throw new ApiError(422, 'WORKSPACE_REQUIRED', 'A proposal is for one workspace: pass workspaceId.', 'workspaceId');
-    const wid = conversation.workspaces[0]!.id, parsed = APPROVALS[kind].payload!.safeParse({ workspaceId: wid, ...fields });
+    // Credit: one proposal grants at most CREDIT_CAP_CENTS; a larger ask (up to the console's own $1,000) is capped, and the
+    // ask is kept so staff see it. More is for a person to start themselves.
+    const credit = kind === 'grant_credit' && typeof fields.amountCents === 'number' && fields.amountCents <= 100_000 ? cappedCredit(fields.amountCents) : {};
+    const wid = conversation.workspaces[0]!.id, parsed = APPROVALS[kind].payload!.safeParse({ workspaceId: wid, ...fields, ...credit });
     if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', `${kind} takes ${Object.keys(APPROVALS[kind].payload!.shape).filter(k => k !== 'workspaceId').join(', ') || 'nothing but the reason'}, in range.`);
     const payload = parsed.data as Record<string, unknown>;
     if (kind === 'release_campaign' && !(await c.env.db.execute(sql`SELECT FROM sending_campaigns WHERE id = ${String(payload.campaignId)} AND workspace_id = ${wid}`)).rows.length) notFound('Campaign');
@@ -420,8 +424,10 @@ export function registerSupportActions(app: App) {
     const made = await c.env.db.transaction(async tx => {
       // Proposals for one conversation take turns: the count below sees every one proposed before it.
       await tx.execute(sql`SELECT id FROM support_conversations WHERE id = ${conversation.id} FOR UPDATE`);
-      const { rows: [open] } = await tx.execute<{ n: number; same: boolean }>(sql`SELECT count(*)::int AS n, bool_or(kind = ${kind} AND payload = ${JSON.stringify(payload)}::jsonb) AS same FROM support_approvals
+      const { rows: [open] } = await tx.execute<{ n: number; same: boolean; credit: boolean }>(sql`SELECT count(*)::int AS n, bool_or(kind = ${kind} AND payload = ${JSON.stringify(payload)}::jsonb) AS same,
+          bool_or(kind = 'grant_credit') AS credit FROM support_approvals
         WHERE conversation_id = ${conversation.id} AND proposed_by = 'agent' AND state = 'proposed' AND expires_at > now()`);
+      if (!open?.same && kind === 'grant_credit' && open?.credit) throw new ApiError(409, 'SUPPORT_CREDIT_PROPOSAL_OPEN', `This conversation already has a credit proposal waiting for staff: one at a time, and at most ${'$'}${CREDIT_CAP_CENTS / 100} each. More is for a person: file a ticket.`);
       if (!open?.same && open!.n >= OPEN_PROPOSALS) throw new ApiError(409, 'SUPPORT_PROPOSALS_OPEN', `This conversation already has ${OPEN_PROPOSALS} proposals waiting for staff.`);
       const approval = await proposeApproval(tx, { conversationId: conversation.id, kind, reason, proposedBy: 'agent', payload });
       if (approval.created) {

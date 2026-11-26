@@ -69,6 +69,24 @@ async function stillRaises(d: Deps, wid: string, kind: 'daily' | 'domains', to: 
   if (current === null || current >= to) throw new ApiError(409, 'SUPPORT_APPROVAL_TARGET_CHANGED', current === null
     ? 'The workspace has no daily limit now, so setting one would lower it.' : `The workspace’s ${kind === 'daily' ? 'daily' : 'domain'} limit is already ${count(current)}, at or above the ${count(to)} proposed.`);
 }
+/**
+ * The most promotional credit one agent proposal may grant, in cents ($100), and at most one waiting per conversation:
+ * more is for a person to start themselves. A larger ask is capped here, and the ask is kept so staff see it.
+ */
+export const CREDIT_CAP_CENTS = 10_000;
+/** A credit ask as the proposal keeps it: capped at CREDIT_CAP_CENTS, with what was asked when it was more. */
+export const cappedCredit = (askedCents: number) => askedCents > CREDIT_CAP_CENTS ? { amountCents: CREDIT_CAP_CENTS, askedCents } : { amountCents: askedCents };
+const cents = (n: unknown) => `$${(Number(n) / 100).toFixed(2)}`;
+/**
+ * A credit proposal still fits the rules when it runs: at most CREDIT_CAP_CENTS, and the only credit proposal of its
+ * conversation waiting (one made before the rules, or written by hand, is refused rather than granted).
+ */
+async function creditStillFits(d: Deps, conversationId: string, p: Record<string, unknown>) {
+  if (!(Number(p.amountCents) >= 1 && Number(p.amountCents) <= CREDIT_CAP_CENTS))
+    throw new ApiError(409, 'SUPPORT_APPROVAL_OVER_CAP', `A support proposal grants at most ${cents(CREDIT_CAP_CENTS)} of credit; this one is for ${cents(p.amountCents)}. Grant more from the workspace’s billing page yourself if it’s warranted.`);
+  const { rows: [other] } = await d.tx.execute(sql`SELECT FROM support_approvals WHERE conversation_id = ${conversationId} AND kind = 'grant_credit' AND state = 'proposed' AND expires_at > now() AND id <> ${d.approvalId} LIMIT 1`);
+  if (other) throw new ApiError(409, 'SUPPORT_APPROVAL_CREDIT_OPEN', 'Another credit proposal for this conversation is waiting: decline it first, so at most one is granted.');
+}
 const dollars = (uc: bigint) => (Number(uc / 1_000_000n) / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 /** How an approved proposal is recorded where the console records its reason: fixed words and the conversation, never the agent's. */
 const recorded = (d: Deps, conversationId: string) => ({ reason: `Support proposal ${d.approvalId}, approved in the support inbox.`, ticketRef: conversationId });
@@ -140,16 +158,19 @@ export const KINDS: Record<Name, ApprovalKind> = {
     run: async (d, conversationId, p) => { const wid = await ownWorkspace(d, p); return byConsole(d, wid, ops => ops.operatorChanges.releaseCampaign(d.tx, d.operator, String(p.campaignId), recorded(d, conversationId), wid), false); },
   },
   grant_credit: {
-    label: 'Grant promotional credit', risky: true, payload: z.object({ workspaceId: Workspace, amountCents: z.number().int().min(1).max(100_000) }).strict(),
-    effect: 'Promotional credit of the amount shown is added to the workspace’s balance (spent first, never refunded), as Grant credit on its billing page does. Once only.',
-    summary: p => `${(Number(p.amountCents) / 100).toFixed(2)} of promotional credit for workspace ${String(p.workspaceId)}`,
+    label: 'Grant promotional credit', risky: true,
+    payload: z.object({ workspaceId: Workspace, amountCents: z.number().int().min(1).max(CREDIT_CAP_CENTS), askedCents: z.number().int().min(CREDIT_CAP_CENTS + 1).max(100_000).optional() }).strict(),
+    effect: `Promotional credit of the amount shown (at most ${cents(CREDIT_CAP_CENTS)} from a support proposal) is added to the workspace’s balance (spent first, never refunded), as Grant credit on its billing page does. Once only.`,
+    summary: p => `${cents(p.amountCents)} of promotional credit for workspace ${String(p.workspaceId)}${p.askedCents ? `, capped; they asked for ${cents(p.askedCents)}` : ''}`,
     change: async (db, p) => {
       const { rows: [a] } = await db.execute<{ total: string }>(sql`SELECT (coalesce(sum(balance_uc), 0) + coalesce(sum(promo_uc), 0))::text AS total FROM billing_accounts WHERE workspace_id = ${String(p.workspaceId)}`);
       const now = BigInt(a?.total ?? '0');
       return { now: `${dollars(now)} balance`, after: `${dollars(now + BigInt(Number(p.amountCents)) * 1_000_000n)} balance` };
     },
     run: async (d, conversationId, p) => {
-      const wid = await ownWorkspace(d, p), billing = await wrapModuleLoad(() => import('./billing/routes.js'));
+      const wid = await ownWorkspace(d, p);
+      await creditStillFits(d, conversationId, p);
+      const billing = await wrapModuleLoad(() => import('./billing/routes.js'));
       const { result, audit } = await billing.grantPromoCredit(d.tx, d.operator, wid, { amountCents: Number(p.amountCents), ...recorded(d, conversationId) }, `approval:${d.approvalId}`);
       await billing.billingAudit(d.tx, d.c, d.operator, wid, audit);
       return { applied: result.applied ?? true, entryId: result.entryId ?? null };

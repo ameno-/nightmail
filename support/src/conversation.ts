@@ -1282,30 +1282,43 @@ export class SupportConversation extends DurableObject<Env> {
       return workspace;
     };
     /**
-     * The same thing two ways in one turn: a card the customer confirms to pause their campaign (propose_action
-     * pause_campaign) and a proposal asking the team to pause the workspace's sending (propose_to_staff pause_sending) both
-     * stop sending in the chat's one workspace. Whichever comes second in a turn is refused before it reaches Nightmail.
+     * The same thing two ways in one turn: a card the customer confirms against a proposal asking the team. Each is claimed
+     * for the turn before anything is awaited, so two calls in one model step can't both pass, and given back if its call
+     * fails, so a refused one blocks nothing. Whichever comes second in a turn is refused before it reaches Nightmail:
+     * - a card pausing a campaign (propose_action pause_campaign) and asking the team to pause the workspace's sending
+     *   (propose_to_staff pause_sending): both stop sending in the chat's one workspace;
+     * - a card pausing a campaign and asking the team to release that same campaign (release_campaign): opposite ways for one
+     *   campaign. The same campaign is the same campaign ID: both are sent for the chat's one workspace, where an ID names one.
      */
-    const pausing = { card: 0, staff: 0 };
-    /**
-     * Claims one pause path for the turn before anything is awaited, so two calls in one step can't both pass the check;
-     * answers how to give it back if the call fails, so a refused card doesn't block asking the team.
-     */
-    const claimPause = (mine: 'card' | 'staff') => {
-      if (pausing[mine === 'card' ? 'staff' : 'card']) throw new ToolFailure(PAUSE_TWICE[mine]);
-      pausing[mine]++;
-      return () => { pausing[mine]--; };
+    const claimed = new Map<string, number>();
+    type Claim = { mine: string; other: string; refusal: string };
+    const claim = (claims: Claim[]) => {
+      const conflict = claims.find(c => claimed.get(c.other));
+      if (conflict) throw new ToolFailure(conflict.refusal);
+      for (const c of claims) claimed.set(c.mine, (claimed.get(c.mine) ?? 0) + 1);
+      return () => { for (const c of claims) claimed.set(c.mine, claimed.get(c.mine)! - 1); };
     };
     const PAUSE_TWICE = {
       card: 'Refused: you already asked the team to pause this workspace’s sending in this answer, so don’t also offer a card to pause a campaign. Tell the customer you asked the team.',
       staff: 'Refused: you already offered the customer a card to pause their campaign in this answer, so don’t also ask the team to pause the workspace’s sending. Let them confirm the card first; ask the team in a later answer only if it isn’t enough.',
     } as const;
+    const RELEASE_AND_PAUSE = {
+      card: 'Refused: you already asked the team to release this campaign in this answer, so don’t also offer a card to pause it. Tell the customer you asked the team.',
+      staff: 'Refused: you already offered the customer a card to pause this campaign in this answer, so don’t also ask the team to release it. Let them decide on the card first.',
+    } as const;
+    /** What a pause card claims: the workspace's pause, and its campaign against a release of the same campaign. */
+    const cardClaims = (campaignId: string): Claim[] => [{ mine: 'pause:card', other: 'pause:staff', refusal: PAUSE_TWICE.card },
+      { mine: `campaign:${campaignId}:pause`, other: `campaign:${campaignId}:release`, refusal: RELEASE_AND_PAUSE.card }];
+    /** What a proposal to staff claims: a pause of the workspace's sending, or the release of one campaign. */
+    const staffClaims = (body: Record<string, unknown> | undefined): Claim[] => body?.kind === 'pause_sending' ? [{ mine: 'pause:staff', other: 'pause:card', refusal: PAUSE_TWICE.staff }]
+      : body?.kind === 'release_campaign' ? [{ mine: `campaign:${String(body.campaignId)}:release`, other: `campaign:${String(body.campaignId)}:pause`, refusal: RELEASE_AND_PAUSE.staff }] : [];
     /** Nightmail's refusal of a change, for the model; a refused stamp stops the turn. */
     const refusedChange = (reply: PlatformReply<unknown>, notFound: string): never => {
       const code = codeOf(reply.body);
       if (reply.status === 403 && code === 'PERMISSION_DENIED') throw new ToolFailure(ROLE_REFUSED);
       if (reply.status === 403) throw lost();
       if (reply.status === 409 && code === 'SUPPORT_ACTIONS_OPEN') throw new ToolFailure('This chat already has 3 changes waiting for the customer. Don’t propose another until they confirm or decline one (or it expires after 24 hours); tell them so if they ask for more.');
+      if (reply.status === 409 && code === 'SUPPORT_CREDIT_PROPOSAL_OPEN') throw new ToolFailure('This chat already has a credit proposal waiting for the team: one at a time. Don’t propose more credit; anything beyond it is for a person: file a ticket.');
       if (reply.status === 409 && code === 'SUPPORT_PROPOSALS_OPEN') throw new ToolFailure('This chat already has 3 proposals waiting for the team. Don’t propose another; tell the customer the team is looking at the earlier ones.');
       // A safe action's target takes turns (once a minute for a re-check, every 10 minutes for a resend): not the reads' budget.
       if (reply.status === 429 && code === 'SUPPORT_ACTION_TOO_SOON') throw new ToolFailure('That was just done for the same target. Don’t try again in this answer: tell the customer to give it a few minutes, then check again.');
@@ -1400,7 +1413,7 @@ export class SupportConversation extends DurableObject<Env> {
       // person's there, writes what they confirm, and runs it only on their own signed-in Confirm. Nothing here, and
       // nothing the customer types, confirms it. The model hears only the kind's fixed title, the status and the ID.
       propose: async (proposal: ActionProposal) => {
-        const giveBack = proposal.kind === 'pause_campaign' ? claimPause('card') : null;
+        const giveBack = proposal.kind === 'pause_campaign' ? claim(cardClaims(String(proposal.campaignId))) : null;
         try {
           const workspace = await mayChange();
           if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);
@@ -1422,7 +1435,7 @@ export class SupportConversation extends DurableObject<Env> {
       // own workspace, owners and admins only. Nightmail checks the target is the person's, takes the target's turn, records
       // it, and runs nothing risky: a proposal waits for an operator's approval.
       act: async (path: string, body: Record<string, unknown> | undefined, notFound: string) => {
-        const giveBack = path === '/v1/support/approvals' && body?.kind === 'pause_sending' ? claimPause('staff') : null;
+        const giveBack = path === '/v1/support/approvals' ? claim(staffClaims(body)) : null;
         try {
           const workspace = await mayChange();
           if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);

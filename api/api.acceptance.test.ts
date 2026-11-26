@@ -10819,6 +10819,61 @@ describe('Hosted MCP OAuth and tools', () => {
           for (const done of [own, memberChat]) ok(reply(await platform.closeConversation(done)));
         });
 
+        await t.test('15b credit proposals are capped: at most $100 a proposal, a larger ask capped with the ask in its wording, one waiting per conversation, and Approve checks both again', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const { approvalLink } = await import('./src/support-approvals.js');
+          const due = async () => ok(reply(await platform.staffMail())).data as Json[];
+          let n = 0;
+          const sent = async (mail: Json) => { n++; return ok(reply(await platform.staffMailSent(mail.key, { threadId: mail.threadId ?? `thr_credit_${n}`, messageId: `msg_credit_${n}` }))); };
+          const later = () => db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'; UPDATE support_staff_threads SET last_sent_at = last_sent_at - interval '2 hours', opened_at = opened_at - interval '2 hours'");
+          for (let i = 0; i < 30; i++) { const batch = await due(); if (!batch.length) break; for (const mail of batch) await sent(mail); await later(); }
+          const own = await chat(owner, acme), reason = 'Their first campaign failed on our side; they asked for credit to cover it.';
+          const proposeAs = (body: Json) => platform.request(own, 'POST', `/v1/support/approvals?workspaceId=${acme}`, { kind: 'grant_credit', reason, ...body });
+          const grants = async () => (await db.query(`SELECT coalesce(sum(promo_uc), 0)::bigint::text AS promo FROM billing_ledger WHERE workspace_id = $1 AND kind = 'grant'`, [acme])).rows[0].promo as string;
+          const decide = async (approval: Json) => {
+            const token = new URL(approvalLink(runtime.config, { id: approval.id, conversationId: own, expiresAt: new Date(approval.expiresAt) })).searchParams.get('token')!;
+            return ok(await send('POST', `${inbox}/${own}/approvals/${approval.id}`, keyed(operator), { token, decision: 'approve' }));
+          };
+          // A $250 ask is proposed as $100, and every place staff read it says it was capped and what they asked for.
+          const asked = reply(await proposeAs({ amountCents: 25000 }));
+          assert.equal(asked.status, 201, JSON.stringify(asked.body));
+          const wording = `$100.00 of promotional credit for workspace ${acme}, capped; they asked for $250.00`;
+          assert.deepEqual([asked.body.label, asked.body.summary], ['Grant promotional credit', wording]);
+          assert.deepEqual((await db.query('SELECT payload FROM support_approvals WHERE id = $1', [asked.body.id])).rows[0].payload, { workspaceId: acme, amountCents: 10000, askedCents: 25000 });
+          const mail = (await due()).find((m: Json) => m.text.includes(`/support/${own}`))!;
+          assert.ok(mail?.text.includes(`Approve or decline: Grant promotional credit (${wording}).`), mail?.text);
+          await sent(mail);
+          const token = new URL(approvalLink(runtime.config, { id: asked.body.id, conversationId: own, expiresAt: new Date(asked.body.expiresAt) })).searchParams.get('token')!;
+          const shown = ok(await send('GET', `${inbox}/${own}/approvals/${asked.body.id}?token=${token}`, session(reader)));
+          const usd = (text: string) => Number(text.replace(/[$, a-z]/g, ''));
+          assert.ok(shown.summary === wording && Math.abs(usd(shown.change.after) - usd(shown.change.now) - 100) < 0.001, JSON.stringify([shown.summary, shown.change]));
+          // One credit proposal waits at a time: another amount is refused; the same ask answers the waiting one.
+          error(reply(await proposeAs({ amountCents: 5000 })), 409, 'SUPPORT_CREDIT_PROPOSAL_OPEN');
+          assert.deepEqual([reply(await proposeAs({ amountCents: 25000 })).status, reply(await proposeAs({ amountCents: 25000 })).body.id], [200, asked.body.id]);
+          // Past the console's own $1,000 a grant, nothing is proposed.
+          error(reply(await proposeAs({ amountCents: 100001 })), 422, 'VALIDATION_FAILED');
+          // Approve checks the cap again: a payload over $100 (made before the cap, or by hand) fails and grants nothing.
+          const before = await grants();
+          await db.query(`UPDATE support_approvals SET payload = jsonb_set(payload, '{amountCents}', '25000') WHERE id = $1`, [asked.body.id]);
+          const over = await decide(asked.body);
+          assert.deepEqual([over.state, over.result.error, await grants()], ['failed', 'SUPPORT_APPROVAL_OVER_CAP', before]);
+          // And that it is the only credit proposal waiting: with a second one beside it (written by hand), approving fails.
+          const small = reply(await proposeAs({ amountCents: 5000 }));
+          assert.deepEqual([small.status, small.body.summary], [201, `$50.00 of promotional credit for workspace ${acme}`]);
+          const stray = `apr_${random(26)}`;
+          await db.query(`INSERT INTO support_approvals(id, conversation_id, kind, payload, proposed_by, reason, expires_at) VALUES ($1, $2, 'grant_credit', $3, 'agent', 'By hand.', now() + interval '1 day')`,
+            [stray, own, JSON.stringify({ workspaceId: acme, amountCents: 5000 })]);
+          const twice = await decide(small.body);
+          assert.deepEqual([twice.state, twice.result.error, await grants()], ['failed', 'SUPPORT_APPROVAL_CREDIT_OPEN', before]);
+          // With the stray one declined, a fresh proposal under the cap is granted once.
+          await db.query(`UPDATE support_approvals SET state = 'declined' WHERE id = $1`, [stray]);
+          const fresh = reply(await proposeAs({ amountCents: 6000 }));
+          assert.equal(fresh.status, 201, JSON.stringify(fresh.body));
+          const granted = await decide(fresh.body);
+          assert.deepEqual([granted.state, BigInt(await grants()) - BigInt(before)], ['approved', 6000n * 1_000_000n]);
+          ok(reply(await platform.closeConversation(own)));
+        });
+
         await t.test('15 the support AI\u2019s week on Glass: of the answerable conversations started in the last 7 days, those that ended with no person stepping in, beside the ones counted apart and anyone with no reply', async () => {
           ok(reply(await platform.pullOutbox()));
           const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString(), hour = 60, day = 24 * hour;

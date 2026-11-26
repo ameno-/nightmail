@@ -286,14 +286,14 @@ export const TOOLS: ToolSpec[] = [
     params: { forwardId: { type: 'string', description: 'The forward ID (id) from pending_verifications', max: 120, pattern: ACTION_ID } },
     label: fixed('Resending the forward confirmation…', 'Resent the forward confirmation'),
     execute: async (a, h) => toolResult(await h.act(`/v1/support/receiving/forwards/${encodeURIComponent(actionId(a.forwardId))}/resend`, undefined, 'Use a forward ID from pending_verifications.'), h.hidden()) },
-  { name: 'propose_to_staff', description: `Ask ${productName}'s team to approve a risky change for this customer's workspace that you can never make yourself: raise_daily_limit (daily), raise_domain_limit (limit), lift_growth_pace, pause_sending, resume_sending, release_marketing, release_campaign (campaignId of a paused campaign), grant_credit (amountCents of promotional credit). Use it only when your reads show it is warranted and the customer wants it; give the numbers and your reason. Nothing changes until a person on the team approves it; the team replies in this conversation. Refunds, deleting anything, members, roles, keys, MCP grants and content access aren't here: file a ticket for those. At most 3 waiting per conversation.`,
+  { name: 'propose_to_staff', description: `Ask ${productName}'s team to approve a risky change for this customer's workspace that you can never make yourself: raise_daily_limit (daily), raise_domain_limit (limit), lift_growth_pace, pause_sending, resume_sending, release_marketing, release_campaign (campaignId of a paused campaign; never in the same answer as a card to pause that campaign), grant_credit (amountCents of promotional credit: at most 10,000, $100, per proposal; a larger ask is capped at $100 and the team sees what they asked; one credit proposal waits at a time, and more is for a person: file a ticket). Use it only when your reads show it is warranted and the customer wants it; give the numbers and your reason. Nothing changes until a person on the team approves it; the team replies in this conversation. Refunds, deleting anything, members, roles, keys, MCP grants and content access aren't here: file a ticket for those. At most 3 waiting per conversation.`,
     params: {
       kind: { type: 'enum', values: STAFF_KINDS, description: 'The change' },
       reason: { type: 'string', description: 'For staff: what the customer asked and what your reads showed, in a few sentences', max: 400 },
       daily: { type: 'number', description: 'raise_daily_limit: the daily limit to set', optional: true, min: 1, max: 10_000_000 },
       limit: { type: 'number', description: 'raise_domain_limit: the domain limit to set', optional: true, min: 1, max: 10_000 },
       campaignId: { type: 'string', description: 'release_campaign: the paused campaign', optional: true, max: 120, pattern: ACTION_ID },
-      amountCents: { type: 'number', description: 'grant_credit: promotional credit in cents', optional: true, min: 1, max: 100_000 },
+      amountCents: { type: 'number', description: 'grant_credit: the promotional credit they asked for, in cents (at most 10,000 is proposed; a larger ask is capped)', optional: true, min: 1, max: 100_000 },
     },
     label: fixed('Asking the team to approve a change…', 'Asked the team to approve a change'),
     execute: async (a, h) => {
