@@ -1,5 +1,5 @@
 import { queueListRisk } from './list-risk-lines.js';
-import { blocklistPause, campaignBlocklistReplies, planWindowHealthy, stopDeadDomains, stoppedDomains } from './send-guards.js';
+import { blocklistPause, blocklistWindow, campaignBlocklistReplies, planWindowHealthy, stopDeadDomains, stoppedDomains } from './send-guards.js';
 import { cachedDashboardRead, mailRevision } from './dashboard-cache.js';
 import { talliesEnabled } from './sending-tallies.js';
 import { boundRequestBody } from './request-body.js';
@@ -2878,8 +2878,8 @@ export function registerSending(app: App) {
       throw new ApiError(409, 'QUARANTINE_REVIEW_REQUIRED', 'This campaign was quarantined twice for list quality. An operator reviews it before it sends again: ask for a review from the dashboard.');
     // Paused for blocklist replies: the sender resumes once none has arrived for the window; an operator can release it any time.
     if (campaign.state === 'paused' && campaign.pauseReason?.code === 'BLOCKLISTED') {
-      const window = rampLines(c.env.config.rampLines).blocklistPause.windowMinutes;
-      if (await campaignBlocklistReplies(db, a.workspaceId, campaign.id, { minutes: window }))
+      const window = blocklistWindow(rampLines(c.env.config.rampLines));
+      if ((await campaignBlocklistReplies(db, a.workspaceId, campaign.id, { minutes: window })).emails)
         throw new ApiError(409, 'BLOCKLIST_REPLIES_ARRIVING', 'Replies naming a blocklist are still arriving for this campaign. Fix the listed domain or link and resume once they stop, or ask for a review.');
     }
     await requiredNoticesAllowed(db, campaign.draft, a.workspaceId);
@@ -4396,6 +4396,11 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (screened <= 0) return 'again';
   }
   const draft = row.reviewDraft!, limits_ = limitsTable(runtime);
+  // A plan opens its next batch only after a healthy day (src/send-guards.ts, when the setting turns it on). Judged here,
+  // before the send locks: the release below holds the workspace's admission row, which every send waits on. Judged a few
+  // minutes early too, so a day that ends while this step runs still has its judgement.
+  const judged = guardLines.planHealth && row.pacePlan?.length && row.windowStartedAt && Date.now() - Date.parse(row.windowStartedAt) >= DAY_MS - 10 * 60_000
+    ? { window: row.windowStartedAt, healthy: await planWindowHealthy(runtime.db, a.workspaceId, row.id, row.windowStartedAt) } : null;
   const released = await runtime.db.transaction(async db => {
     const held = await lockSendScope(db, a.workspaceId, { campaignId: row.id });
     const campaign = await findCampaign(db, a, row.id, true);
@@ -4415,8 +4420,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     // A capped campaign opens a new 24-hour window when the previous one has elapsed (or on its first release); with a
     // plan, each window after the first is its next batch.
     const opening = dailyCap(campaign) !== null && (!campaign.windowStartedAt || Date.now() - Date.parse(campaign.windowStartedAt) >= DAY_MS);
-    // A plan opens its next batch only after a healthy day (src/send-guards.ts); otherwise the same batch again.
-    const grows = !(opening && campaign.windowStartedAt && campaign.pacePlan?.length) || await planWindowHealthy(db, a.workspaceId, campaign.id, campaign.windowStartedAt);
+    // A plan opens its next batch only after a healthy day (judged above); otherwise the same batch again. A window another
+    // run opened meanwhile isn't opening here, so the judgement always matches the window it opens after.
+    const grows = !(opening && campaign.windowStartedAt && campaign.pacePlan?.length) || !guardLines.planHealth || (judged?.window === campaign.windowStartedAt ? judged.healthy : true);
     if (!grows) log('info', { code: 'CAMPAIGN_PLAN_HELD', campaignId: campaign.id, batch: campaign.windowIndex + 1 });
     const windowStart = opening ? now() : campaign.windowStartedAt, windowIndex = opening && campaign.windowStartedAt ? campaign.windowIndex + (grows ? 1 : 0) : campaign.windowIndex;
     const windowUsed = opening ? 0 : campaign.windowExpanded, dayCap = dailyCap(campaign, windowIndex);

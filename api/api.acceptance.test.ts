@@ -32779,7 +32779,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // A brand-new domain's first campaign: the young plan, required.
       const fresh = judgeReadiness({ ...facts, recipients: 60_000, registeredDays: 5, domainAgeDays: 2, largestSend: 0, largestCleanSend: 0 });
       assert.deepEqual([fresh.verdict, fresh.requiredBy, fresh.reasons.slice(0, 2)], ['ramp_required', 'NEW_REGISTRATION', ['NEW_REGISTRATION', 'NO_HISTORY']]);
-      const youngLines = { newRegistrationDays: 30, usualJump: 10, minimumSplit: 2_000, young: { first: 500, cleanFactor: 2, growth: 2, maxBatches: 8 }, established: { first: 10_000, cleanFactor: 2, growth: 4, maxBatches: 5 }, firstBatch: { size: 5_000, waitMinutes: 120 }, blocklistPause: { replies: 3, windowMinutes: 30 }, domainStop: { sent: 20, bouncedShare: 0.8, windowMinutes: 120 } };
+      const youngLines = { newRegistrationDays: 30, usualJump: 10, minimumSplit: 2_000, young: { first: 500, cleanFactor: 2, growth: 2, maxBatches: 8 }, established: { first: 10_000, cleanFactor: 2, growth: 4, maxBatches: 5 }, firstBatch: { size: 5_000, waitMinutes: 120 }, blocklistPause: { replies: 3, windowMinutes: 30 }, domainStop: { sent: 20, bouncedShare: 0.8, windowMinutes: 120 }, planHealth: true };
       assert.deepEqual(judgeReadiness({ ...facts, recipients: 60_000, registeredDays: 5, domainAgeDays: 2, largestSend: 0, largestCleanSend: 0, lines: youngLines }).plan, [500, 1_000, 2_000, 4_000, 8_000, 16_000, 28_500]);
       // An established domain at its usual volume: ready. A small sender's 500-recipient list: ready.
       assert.equal(judgeReadiness({ ...established, recipients: 90_000, largestSend: 100_000, largestCleanSend: 100_000, usualDay: 30_000 }).verdict, 'ready');
@@ -32873,8 +32873,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   test('send guards: a recipient domain where the campaign\'s mail mostly bounced is skipped for the rest of it; replies naming a blocklist pause the campaign, with one operator alert, and the sender resumes only once they stop; a plan opens its next batch only after a healthy day', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
       const ws = runtime.config.workspaceId, tag = unique('guard').toLowerCase().replace(/[^a-z0-9]/g, ''), dead = tag + '-dead.example';
-      const { planWindowHealthy, blocklistPause } = await import('./src/send-guards.js');
+      const { planWindowHealthy, blocklistPause, stopDeadDomains } = await import('./src/send-guards.js');
       const { rampLines } = await import('./src/standing-model.js');
+      // The guards are off until NIGHTMAIL_RAMP names them (unset, campaigns send as before); this test turns all three on.
+      const unset = rampLines(null);
+      assert.deepEqual([unset.blocklistPause, unset.domainStop, unset.planHealth], [null, null, false]);
+      const original = runtime.config.rampLines;
+      runtime.config.rampLines = { blocklistPause: {}, domainStop: {}, planHealth: true };
+      t.after(() => { runtime.config.rampLines = original; });
       const list = ok(await local('POST', '/v1/lists', { name: unique('guards') }), 201);
       // 150 subscribers at a domain that no longer takes mail, and 600 elsewhere.
       const join = async (where: string) => db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1 AND ${where}`, [ws, list.id]);
@@ -32914,7 +32920,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query("UPDATE sending_emails SET status = 'delayed', updated_at = now() WHERE id = ANY($1)", [listed.map(r => r.id)]);
       for (const { id } of listed) await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, data, simulated, created_at) VALUES ($1, $2, $3, 'non_permanent_bounce', $4, false, now())",
         [unique('event'), ws, id, JSON.stringify({ bounceType: 'Transient', bounceSubType: 'General', diagnosticCode: '554 5.7.1 An URL in this email is listed by Spamhaus DBL' })]);
-      assert.equal((await blocklistPause(runtime.db, ws, campaign.id, rampLines(null)))?.code, 'BLOCKLISTED');
+      // Three replies from one receiving organisation pause nothing: one recipient's server can't pause someone's campaign.
+      const on = rampLines(runtime.config.rampLines);
+      assert.equal(await blocklistPause(runtime.db, ws, campaign.id, on), null);
+      // From three organisations (a listing shows at many), they do; with the guard off, never.
+      for (const [i, domain] of [[1, 'example.org'], [2, 'example.com']] as const) await db.query("UPDATE sending_emails SET to_addresses = jsonb_build_array('p@' || $2::text) WHERE id = $1", [listed[i]!.id, domain]);
+      assert.equal((await blocklistPause(runtime.db, ws, campaign.id, unset)), null);
+      assert.deepEqual(await stopDeadDomains(runtime.db, ws, campaign.id, unset), []);
+      assert.equal((await blocklistPause(runtime.db, ws, campaign.id, on))?.code, 'BLOCKLISTED');
       await nextWindow();
       const paused = await view();
       assert.deepEqual([paused.state, paused.delivery.pauseReason.code], ['paused', 'BLOCKLISTED']);

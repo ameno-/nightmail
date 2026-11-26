@@ -7,7 +7,7 @@ const FirstBatch = z.object({ size: z.number().int().positive(), waitMinutes: z.
 const BlocklistPause = z.object({ replies: z.number().int().min(1), windowMinutes: z.number().int().min(5).max(24 * 60) }).partial().strict();
 const DomainStop = z.object({ sent: z.number().int().min(5), bouncedShare: z.number().gt(0).max(1), windowMinutes: z.number().int().min(15).max(24 * 60) }).partial().strict();
 export const RampLinesOverride = z.object({ newRegistrationDays: z.number().int().nonnegative(), usualJump: z.number().positive(), minimumSplit: z.number().int().nonnegative(), young: Plan, established: Plan, firstBatch: FirstBatch,
-  blocklistPause: BlocklistPause, domainStop: DomainStop }).partial().strict();
+  blocklistPause: BlocklistPause, domainStop: DomainStop, planHealth: z.boolean() }).partial().strict();
 export type RampLinesOverride = z.infer<typeof RampLinesOverride>;
 export function parseRampLines(raw: unknown): RampLinesOverride | null {
   if (typeof raw !== 'string' || !raw.trim()) return null;
