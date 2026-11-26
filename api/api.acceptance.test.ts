@@ -5911,31 +5911,110 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(!JSON.stringify(unnamed).includes(name));
   });
 
-  test('an MCP session is tied to the tools its own credential is listed, not the whole catalog', async t => {
-    const db = await fixtureDatabase(t);
+  test('legacy MCP sessions survive cold replacement and cosmetic releases; only held contracts and changed access refresh', async t => {
+    if (!LOCAL_API || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname)) return t.skip('Cold replacement needs a local API and fixture database.');
     const manage = await keyFixture(t), read = await keyFixture(t, { permissions: ['read'] });
-    const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } } };
-    const start = async (key: string, path: string) => { const reply = await http('POST', path, key, init, rpcHeaders); assert.equal(reply.status, 200, diagnostic(reply)); return reply.headers.get('mcp-session-id')!; };
-    const list = (key: string, session: string, path: string) => http('POST', path, key, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { ...rpcHeaders, 'mcp-session-id': session });
-    const fingerprint = (tools: Json) => createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16);
-    for (const path of ['/mcp?codemode=true', '/mcp']) {
-      const readSession = await start(read.secret, path), manageSession = await start(manage.secret, path);
-      // The session names exactly the listing this key is shown, so a release that changes only tools hidden from it
-      // (here the manage-only operations) leaves it valid, and one that changes a tool it lists ends it.
-      const readTools = ok(await list(read.secret, readSession, path)).result.tools;
-      assert.equal(readSession.split('.')[0], fingerprint(readTools));
-      assert.equal(manageSession.split('.')[0], fingerprint(ok(await list(manage.secret, manageSession, path)).result.tools));
-      assert.notEqual(readSession.split('.')[0], manageSession.split('.')[0]);
-      const stale = await list(read.secret, manageSession, path);
-      assert.equal(stale.status, 404, diagnostic(stale));
+    const db = await fixtureDatabase(t);
+    const { createOpenApiApp } = await import('./src/app.js'), { nodeRuntime } = await import('./src/adapters/node.js');
+    const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, ENABLE_LIVE_SES: 'false' });
+    cleanup(t, instance.close);
+    const path = '/mcp?codemode=false';
+    const init = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } };
+    const contact = { name: 'listContacts', arguments: {} };
+    const release = async (revision: 'original' | 'copy' | 'contract') => {
+      const app = await createOpenApiApp();
+      const document = app.getOpenAPI31Document.bind(app);
+      t.mock.method(app, 'getOpenAPI31Document', (...args: Parameters<typeof document>) => {
+        const spec = document(...args);
+        assert.ok(spec.paths);
+        const post = spec.paths['/v1/domains']!.post!;
+        if (revision !== 'original') {
+          spec.paths = Object.fromEntries(Object.entries(spec.paths).reverse());
+          post.summary = 'Reworded create domain';
+          post.description = 'A different description.';
+        } else delete spec.paths['/v1/newsletters']!.get; // published in the next release
+        if (revision === 'contract') post.parameters = [...post.parameters ?? [], { name: 'mode', in: 'query', required: true, schema: { type: 'string' } }];
+        return spec;
+      });
+      return (key: string, method: string, params: Json, session?: string, headers = rpcHeaders as Record<string, string>) =>
+        http('POST', path, key, { jsonrpc: '2.0', id: 1, method, params },
+          { ...headers, ...(session ? { 'mcp-session-id': session } : {}) }, 10_000, BASE, request => app.fetch(request, instance.runtime));
+    };
+    const original = await release('original');
+    const start = async (server: typeof original, key: string) => {
+      const response = await server(key, 'initialize', init);
+      ok(response);
+      const id = response.headers.get('mcp-session-id');
+      assert.ok(id); return id;
+    };
+    const reader = await start(original, read.secret), writer = await start(original, manage.secret);
+    const names = async (server: typeof original, key: string, id: string) =>
+      ok(await server(key, 'tools/list', {}, id)).result.tools.map((tool: Json) => tool.name);
+    const before = await names(original, manage.secret, writer);
+    assert.ok(before.includes('createDomain') && !before.includes('listNewsletters'));
+    const copy = await release('copy');
+    assert.equal(ok(await copy(manage.secret, 'tools/call', contact, writer)).result.isError, false);
+    assert.deepEqual((await names(copy, manage.secret, writer)).sort(), [...before, 'listNewsletters'].sort());
+
+    // Carry this same ID into a brand-new Node process running the ordinary app and no patched schema.
+    const child = (await import('node:child_process')).spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+      import { app } from './src/app.ts'; import { nodeRuntime } from './src/adapters/node.ts';
+      import { readFileSync } from 'node:fs';
+      const input = JSON.parse(readFileSync(0, 'utf8')), instance = nodeRuntime({ ...process.env, ENABLE_LIVE_SES: 'false' });
+      try {
+        const reply = await app.fetch(new Request(input.url, { method:'POST', headers:input.headers, body:JSON.stringify(input.body) }), instance.runtime);
+        if (reply.status !== 200 || (await reply.json()).result?.isError !== false) process.exitCode = 1;
+      } finally { await instance.close(); }
+    `], { cwd: new URL('./', import.meta.url), timeout: 30_000, env: { ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL },
+      input: JSON.stringify({ url: BASE + path, headers: { ...rpcHeaders, 'content-type': 'application/json', authorization: 'Bearer ' + manage.secret, 'mcp-session-id': writer },
+        body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: contact } }) });
+    assert.equal(child.status, 0, redact(child.stderr?.toString() ?? child.error?.message));
+
+    const changed = await release('contract');
+    const warnings: string[] = [];
+    const capture = t.mock.method(console, 'warn', (line: string) => warnings.push(line));
+    try {
+      const parallel = () => Promise.all(Array.from({ length: 3 }, () => changed(manage.secret, 'tools/call', contact, writer)));
+      for (const denied of await parallel()) assert.deepEqual([denied.status, (denied.body as Json).error.code], [404, -32001]);
+      assert.equal(ok(await changed(read.secret, 'tools/call', contact, reader)).result.isError, false);
+      const fresh = await start(changed, manage.secret);
+      const calls = await Promise.all(Array.from({ length: 3 }, () => changed(manage.secret, 'tools/call', contact, fresh)));
+      assert.ok(calls.every(answer => ok(answer).result.isError === false));
+      const modern = await changed(manage.secret, 'tools/list', { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} } }, undefined,
+        { ...rpcHeaders, 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/list' });
+      assert.ok(ok(modern).result.tools.length); assert.equal(modern.headers.get('mcp-session-id'), null);
+
+      await db.query(`UPDATE api_keys SET permissions='["read"]' WHERE id=$1`, [manage.id]);
+      assert.equal((await changed(manage.secret, 'tools/call', contact, fresh)).status, 404);
+      const narrow = await start(changed, manage.secret);
+      await db.query(`UPDATE api_keys SET permissions='["read","send","manage"]' WHERE id=$1`, [manage.id]);
+      assert.equal((await changed(manage.secret, 'tools/call', contact, narrow)).status, 404);
+      for (const obsolete of ['0'.repeat(16) + '.' + 'f'.repeat(32), 'invalid-id']) {
+        assert.equal((await changed(read.secret, 'tools/list', {}, obsolete)).status, 404);
+      }
+      const reasons = warnings.map(line => JSON.parse(line)).filter(line => line.staleReason);
+      assert.deepEqual(reasons.map(line => [line.protocolEra, line.staleReason]), ['contract_changed','access_changed','access_changed','version_bumped','malformed_id'].map(reason => ['legacy', reason]));
+      assert.ok(warnings.every(line => ![writer, fresh, read.secret, manage.secret, 'invalid-id'].some(secret => line.includes(secret))));
+    } finally { capture.mock.restore(); }
+  });
+
+  test('legacy MCP contract fingerprints preserve input semantics in schema and literal positions', async () => {
+    const { toolSnapshot, staleLegacySession, issueLegacySession } = await import('./src/mcp-session.js');
+    const schema = { type: 'object' as const, properties: { description: { type: 'string', enum: ['a','b'], format: 'email' }, title: { const: { description: ['x','y'] } } }, required: ['description','title'] };
+    const snapshot = (inputSchema: Json, name = 'tool') => toolSnapshot([{ name, inputSchema: inputSchema as import('@modelcontextprotocol/server').Tool['inputSchema'] }]);
+    const held = issueLegacySession('a'.repeat(16), snapshot(schema));
+    const reason = (inputSchema: Json, name?: string) => staleLegacySession(held, 'a'.repeat(16), snapshot(inputSchema, name));
+    assert.equal(reason({ ...schema, title: 'New title', required: [...schema.required].reverse(), properties: {
+      title: schema.properties.title, description: { description: 'New advice', ...schema.properties.description, enum: ['b','a'] } } }), undefined);
+    for (const changed of [{ properties: { title: schema.properties.title } }, { required: ['description','title','other'] },
+      ...[{ type: 'integer' }, { enum: ['b'] }, { format: 'uuid' }].map(change => ({ properties: { ...schema.properties, description: { ...schema.properties.description, ...change } } })),
+      { properties: { ...schema.properties, title: { const: { description: ['y','x'] } } } }]) {
+      assert.equal(reason({ ...schema, ...changed }), 'contract_changed');
     }
-    // The credential's own access changes mid-session: its next request is told to start over and list again.
-    const session = await start(manage.secret, '/mcp?codemode=true');
-    await db.query(`UPDATE api_keys SET permissions='["read"]'::jsonb WHERE id=$1`, [manage.id]);
-    const changed = await list(manage.secret, session, '/mcp?codemode=true');
-    assert.equal(changed.status, 404, diagnostic(changed));
-    assert.equal((changed.body as Json).error.code, -32001);
-    assert.equal(ok(await list(manage.secret, await start(manage.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length, ok(await list(read.secret, await start(read.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length);
+    assert.equal(reason(schema, 'renamed'), 'contract_changed');
+    assert.equal(staleLegacySession(held, 'a'.repeat(16), ''), 'contract_changed');
+    assert.equal(staleLegacySession(issueLegacySession('a'.repeat(16), ''), 'a'.repeat(16), snapshot(schema)), undefined);
+    assert.equal(staleLegacySession(held.replace(/^m1\.\d+/, 'm1.0'), 'a'.repeat(16), snapshot(schema)), 'version_bumped');
   });
 
   test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
@@ -5948,7 +6027,7 @@ describe('Hosted MCP OAuth and tools', () => {
     // tools answers it 404, which tells the client to initialize again and list the new tools.
     const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } } };
     const sessionId = (await http('POST', '/mcp?codemode=true', token, init, rpcHeaders)).headers.get('mcp-session-id');
-    assert.match(sessionId ?? '', /^[0-9a-f]{16}\.[0-9a-f]{32}$/);
+    assert.ok(sessionId);
     const listed = (session: string) => http('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { ...rpcHeaders, 'mcp-session-id': session });
     const current = await listed(sessionId!);
     assert.equal(current.status, 200, diagnostic(current));
@@ -6463,6 +6542,8 @@ describe('Hosted MCP OAuth and tools', () => {
     const event = (await signedIn.next())!;
     assert.deepEqual([event.method, event.params.data.messageId, event.params.data.subject, subscriptionOf(event)], ['notifications/events/event', followed, 'Followed', signedIn.id]);
     assert.match(event.params.cursor, /^\d+\.\d+$/);
+    const session = (await http('POST', '/mcp', issued.token, { jsonrpc: '2.0', id: 1, method: 'initialize', params: initialize }, rpcHeaders)).headers.get('mcp-session-id');
+    assert.ok(session);
     const revokedAt = Date.now();
     ok(await http('POST', `/v1/agents/${agentId}/revoke`, MANAGER));
     let ended = (await signedIn.next(5000))!;
@@ -6472,18 +6553,49 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal((await signedIn.next(5000))?.result?.resultType, 'complete');
     assert.equal(await signedIn.next(5000), null);
 
+    const cannotResume = async (token: string, id: string) => {
+      for (const [method, params] of [
+        ['events/stream', { name: 'message.received', arguments: { addressIds: [a.id] }, cursor: event.params.cursor }],
+        ['tools/call', { name: 'inboxes', arguments: { action: 'list' } }],
+      ] as const) {
+        const denied = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 2, method, params }, { ...rpcHeaders, 'mcp-session-id': id });
+        assert.ok([401, 403].includes(denied.status), diagnostic(denied));
+      }
+    };
+    await cannotResume(issued.token, session);
+
     // A revoked key's stream ends the same way; a client that goes away releases its lease.
+    const keySession = (await http('POST', '/mcp', manager.secret, { jsonrpc: '2.0', id: 1, method: 'initialize', params: initialize }, rpcHeaders)).headers.get('mcp-session-id');
+    assert.ok(keySession);
     const streamed = await open(manager.secret, {});
     assert.equal(streamed.refused, null); assert.equal((await streamed.next())!.method, 'notifications/events/active');
     ok(await http('POST', `/v1/api-keys/${manager.id}/revoke`, MANAGER), [200, 204]);
     assert.equal((await streamed.next(5000))!.method, 'notifications/events/terminated');
+    await cannotResume(manager.secret, keySession);
     const left = await open(inboxKey, {});
-    assert.equal(left.refused, null); assert.equal((await left.next())!.method, 'notifications/events/active');
+    assert.equal(left.refused, null); const checkpoint = (await left.next())!;
+    assert.equal(checkpoint.method, 'notifications/events/active');
     const holder = (await db.query('SELECT holder FROM mcp_event_streams ORDER BY created_at DESC LIMIT 1')).rows[0].holder;
     assert.equal(await leases(holder), 1);
     left.close();
     for (let i = 0; i < 50 && await leases(holder); i++) await new Promise(resolve => setTimeout(resolve, 100));
     assert.equal(await leases(holder), 0, 'The stream gave back its lease when its client went away.');
+
+    const missed = await simulate(a, 'While disconnected');
+    const resumed = await open(inboxKey, {}, { cursor: checkpoint.params.cursor });
+    assert.equal((await resumed.next())!.params.truncated, false);
+    const replay = (await resumed.next())!;
+    assert.deepEqual([replay.method, replay.params.data.messageId], ['notifications/events/event', missed]);
+    const gap = await poll(inboxKey, {}, checkpoint.params.cursor);
+    assert.deepEqual(gap.events.map((entry: Json) => entry.eventId), [replay.params.eventId]);
+    assert.deepEqual((await poll(inboxKey, {}, replay.params.cursor)).events, []);
+    resumed.close();
+    const expired = await open(inboxKey, {}, { cursor: checkpoint.params.cursor.split('.')[0] + '.1' });
+    const reset = (await expired.next())!;
+    assert.deepEqual([reset.method, reset.params.truncated], ['notifications/events/active', true]);
+    expired.close();
+    for (let i = 0; i < 50 && await leases(holder); i++) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(await leases(holder), 0);
 
     // Ten open streams per credential: an eleventh ends its oldest (which says so at its next read), so streams a client
     // lost without the server noticing never lock it out. Fifty per workspace: past that a new stream is refused.
@@ -8567,6 +8679,24 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual(done(await call(memberSignIn.token, 'listWorkspaceInvitations', { workspace: other })).data, []);
       refused(await call(memberSignIn.token, 'revokeWorkspaceInvitation', { workspace: other, email: peer.email, confirm: true }), 404, 'NOT_FOUND');
       refused(await call(adminSignIn.token, 'listWorkspaceMembers', { workspace: other }), 403, 'WORKSPACE_ACCESS_DENIED');
+      // Keep the same owner-level listing through another workspace; access to the removed
+      // workspace still ends, even with a current session and a cursor issued before removal.
+      const legacyPath = '/mcp?codemode=false';
+      const held = (await request('POST', legacyPath, memberSignIn.token, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+        protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'membership', version: '1' } } }, rpcHeaders)).headers.get('mcp-session-id');
+      assert.ok(held);
+      const headers = { ...rpcHeaders, 'mcp-session-id': held };
+      const heldCall = async (method: string, params: Json) => ok(await request('POST', legacyPath, memberSignIn.token, { jsonrpc: '2.0', id: 2, method, params }, headers));
+      const cursor = (await heldCall('events/poll', { name: 'message.received', arguments: { workspace: other }, cursor: null })).result.cursor;
+      // Move the owner membership to a different workspace: the effective tool list stays identical.
+      const backup = unique('backup-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [backup]);
+      await db.query("UPDATE workspace_members SET workspace_id=$1 WHERE workspace_id=$2 AND user_id=$3", [backup, other, member.userId]);
+      const missing = await heldCall('tools/call', { name: 'listWorkspaceMembers', arguments: { workspace: other } });
+      refused(missing.result, 403, 'WORKSPACE_ACCESS_DENIED');
+      assert.equal((await heldCall('events/stream', { name: 'message.received', arguments: { workspace: other }, cursor })).error.code, -32024);
+      await db.query("UPDATE workspace_members SET workspace_id=$1 WHERE workspace_id=$2 AND user_id=$3", [other, backup, member.userId]);
+
 
       // API keys (a person's, and one the owner's approval made) and agent tokens: refused over REST, never listed over MCP.
       const personKey = ok(await local('POST', '/v1/api-keys', { name: unique('members-key'), permissions: ['read', 'send', 'manage'] }), 201).secret as string;

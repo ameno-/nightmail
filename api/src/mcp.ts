@@ -1,10 +1,11 @@
 import { createMcpHandler, Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { bearerActor, dispatchAsActor, dispatchAsMailboxAccess, workspaceBearer } from './auth.js';
-import { agentSetupRefusal, agentTokenMintRefusal, denied, digest, keyAdminRefusal, requiredFor, type Required, lastingRefusal, memberAdminManage, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
+import { agentSetupRefusal, agentTokenMintRefusal, denied, keyAdminRefusal, requiredFor, type Required, lastingRefusal, memberAdminManage, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type Ctx, type Runtime } from './core.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
 import { buildMcpCatalog, TOOLSETS, ALWAYS_LISTED, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, FEEDBACK_INSTRUCTIONS, type McpOperation } from './mcp-catalog.js';
+import { fingerprintTag, issueLegacySession, staleLegacySession, toolSnapshot } from './mcp-session.js';
 import { describeAction, describeTool, listedTool, resourceActions, resourceTools } from './mcp-resources.js';
 import { mcpServerName, productName } from './brand.js';
 import { setResponseByteLimit, withMemory } from './isolate-memory.js';
@@ -195,14 +196,9 @@ function refusal(op: McpOperation, actor: Actor): Required | null {
 }
 const authorized = (op: McpOperation, actor: Actor) => !refusal(op, actor);
 
-/**
- * The hash of one listing: exactly the tools tools/list returns to this credential, in this mode and toolset. /mcp keeps
- * no session state, so it cannot push tools/list_changed; instead each legacy session ID carries the listing it started
- * on, and a request whose listing has since changed (a release, or the credential's own access) is answered 404, which a
- * client must meet by initializing again and listing the tools anew. The catalog is fixed for an isolate's life, so a
- * listing is a pure function of its kind, mode and visible operations: hash each one once per isolate.
- */
-type Listings = { versions: Map<string, Promise<string>>; json: Map<string, string>; chars: number };
+// Immutable listings. A separate bounded diagnostic cache suppresses repeated reports of the
+// same rejected ID on this isolate; neither a hit nor an eviction affects any response.
+type Listings = { snapshots: Map<string, string>; json: Map<string, string>; chars: number; reported: Set<string> };
 function listing(cache: Listings, shape: string, tools: () => Tool[]) {
   const serialize = () => {
     const cached = cache.json.get(shape);
@@ -221,16 +217,30 @@ function listing(cache: Listings, shape: string, tools: () => Tool[]) {
     }
     return json;
   };
-  let version = cache.versions.get(shape);
-  if (!version) {
-    if (cache.versions.size >= 256) cache.versions.clear();
-    version = digest(serialize()).then(hash => hash.slice(0, 16));
-    cache.versions.set(shape, version);
-  }
-  return { version, serialize };
+  const snapshot = () => {
+    const cached = cache.snapshots.get(shape);
+    if (cached !== undefined) return cached;
+    const value = toolSnapshot(JSON.parse(serialize()));
+    if (cache.snapshots.size >= 256) cache.snapshots.clear();
+    cache.snapshots.set(shape, value);
+    return value;
+  };
+  return { snapshot, serialize };
 }
 
-async function serve(app: App, request: Request, runtime: Runtime, principal: Principal, catalog: ReadonlyMap<string, McpOperation>, listings: Listings, origin: RequestOrigin): Promise<Response> {
+// Only the listing policy's inputs, never an ID, bearer, workspace name or domain. This
+// distinguishes newly granted tools from newly published tools. Identical listings always
+// remain compatible even if two roles or scopes produce them.
+function listingAccess(principal: Principal) {
+  if ('inbox' in principal) return fingerprintTag(JSON.stringify(['inbox', [...principal.inbox.permissions].sort()]));
+  const actor = 'connection' in principal ? principal.connection.listing : principal.key;
+  return fingerprintTag(JSON.stringify([actor.credential, [...actor.permissions].sort(), actor.role,
+    !!actor.domains.length, !!actor.grantId, !!actor.receivingConsent, !!actor.agentSetup,
+    'connection' in principal && principal.connection.operator === true]));
+}
+
+async function serve(app: App, c: Ctx, principal: Principal, catalog: ReadonlyMap<string, McpOperation>, listings: Listings): Promise<Response> {
+  const request = c.req.raw, runtime = c.env, origin = requestOrigin(c);
   const session = request.headers.get('mcp-session-id');
   const base = new URL(runtime.config.publicUrl);
   const inbox = 'inbox' in principal ? principal.inbox : null;
@@ -265,10 +275,18 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
     return [...tools, ...support ? supportTools : []].map(listedTool);
   }
   const catalogListing = listing(listings, `${connection ? 'connection' : 'key'}|${codeMode}|${[...visible.keys()].join(',')}${support ? '|support' : ''}`, listTools);
-  const version = await catalogListing.version;
-  if (session !== null && !session.startsWith(`${version}.`)) {
-    await request.body?.cancel();
-    return rpcError(404, -32001, 'Session not found: the tools this connection can use changed. Initialize a new session and list the tools again.');
+  if (session !== null) {
+    const reason = staleLegacySession(session, listingAccess(principal), catalogListing.snapshot());
+    if (reason) {
+      const key = fingerprintTag(session);
+      if (!listings.reported.has(key)) {
+        if (listings.reported.size >= 1024) listings.reported.delete(listings.reported.values().next().value!);
+        listings.reported.add(key);
+        c.set('failure', { code: 'MCP_HTTP_404', mcpStale: reason });
+      }
+      await request.body?.cancel();
+      return rpcError(404, -32001, 'Session not found. Initialize a new session and list the tools again.');
+    }
   }
   /** The workspaces tool: the person's workspaces, this connection's access in each, and the default. */
   function workspaceList() {
@@ -572,10 +590,10 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
     if (response.status === 405) headers.set('Allow', 'POST, OPTIONS');
     if (!response.body) return new Response(null, { status: response.status, headers });
     const text = await boundedText(response, WIRE_LIMIT);
-    // A legacy session starts on this catalog (catalogVersion). Requests without a session ID still work.
+    // Only a successful legacy handshake mints an ID. Modern requests need no snapshot.
     const started = (message: unknown) => {
       if (session === null && object(parsedBody) && parsedBody.method === 'initialize' && object(message) && Object.hasOwn(message, 'result'))
-        headers.set('Mcp-Session-Id', `${version}.${crypto.randomUUID().replaceAll('-', '')}`);
+        headers.set('Mcp-Session-Id', issueLegacySession(listingAccess(principal), catalogListing.snapshot()));
     };
     if (headers.get('content-type')?.split(';')[0]?.trim() !== 'text/event-stream') {
       if (object(parsedBody) && parsedBody.method === 'initialize') { try { started(JSON.parse(text)); } catch { /* not a result */ } }
@@ -610,7 +628,7 @@ export function registerMcp(app: App): void {
   // This app-local cache contains only immutable schemas/validators, never actors,
   // bearer credentials, runtimes, database pools or active protocol servers.
   let catalog: ReadonlyMap<string, McpOperation> | undefined;
-  const listings: Listings = { versions: new Map(), json: new Map(), chars: 0 };
+  const listings: Listings = { snapshots: new Map(), json: new Map(), chars: 0, reported: new Set() };
   app.all('/mcp', async c => {
     const origin = c.req.header('origin');
     const canonicalOrigin = new URL(c.env.config.publicUrl).origin;
@@ -623,7 +641,7 @@ export function registerMcp(app: App): void {
       c.set('principal', 'connection' in principal ? { type: 'mcp', workspace: principal.connection.defaultWorkspace?.id }
         : 'key' in principal ? { type: principal.key.credential!, workspace: principal.key.workspaceId } : { type: 'inboxKey', workspace: principal.inbox.workspaceId });
       catalog ??= buildMcpCatalog(app);
-      return serve(app, c.req.raw, c.env, principal, catalog, listings, requestOrigin(c));
+      return serve(app, c, principal, catalog, listings);
     };
     // Three kinds of bearer: a key limited to addresses or an inbox, a workspace API key or agent token (authenticated
     // exactly as REST authenticates it: the /mcp request counts against its minute budget, and so does each tool call,
