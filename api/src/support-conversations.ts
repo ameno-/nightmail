@@ -541,7 +541,7 @@ export function registerSupportConversations(app: App) {
 
   const LinkRequested = z.object({ requested: z.literal(true), address: z.string().describe('Where the link goes, as getSupportConversationClaim’s 403 shows it.') });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/sign-in-link', operationId: 'sendSupportSignInLink',
-    description: `The way through 403 MAILBOX_SIGN_IN_REQUIRED on one email's Continue page: emails a sign-in link to the address that email came from (never another: the body names only the message, and anything else in it is ignored). Following the link and signing in with the account for that address proves its mailbox, and the page opens again to confirm the email. Signed in, from the dashboard. The answer is the same 202 whether or not a link went out (one is made and sent only when an account has that address; otherwise nothing is); at most ${SUPPORT_LINKS.perConversation} a day per conversation and ${SUPPORT_LINKS.perAddress} per address, and as many as pending sign-ins per network, past which it is 429. An email that waits for nobody gets 404.`,
+    description: `The way through 403 MAILBOX_SIGN_IN_REQUIRED on one email's Continue page: emails a sign-in link to the address that email came from (never another: the body names only the message, and anything else in it is ignored). Following the link and signing in with the account for that address proves its mailbox, and the page opens again to confirm the email. Signed in, from the dashboard. The answer is the same 202 whether or not a link went out (one is made and sent only when an account has that address; otherwise nothing is); at most ${SUPPORT_LINKS.perConversation} a day per conversation and ${SUPPORT_LINKS.perAddress} per address, and as many as pending sign-ins per network, past which it is 429. Presses from the account the link would be for (signed in to it with a sign-in that proves no mailbox, the person the email came from) neither count against those daily limits nor are refused by them, so a leaked Continue link can't use them up and lock that person out; everyone else's presses count the same whether or not an account has the address. An email that waits for nobody gets 404.`,
     request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the Continue page is for.') })) },
     responses: { 202: response(LinkRequested), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -550,7 +550,7 @@ export function registerSupportConversations(app: App) {
     // this email's link. Never a bearer credential.
     const [{ LINK_ANSWER_MS, requireDashboardOrigin }, { verifiedDashboardUser }] = await Promise.all([import('./account-login.js'), import('./dashboard-auth.js')]);
     requireDashboardOrigin(c.env, c.req.raw);
-    await verifiedDashboardUser(c.env, c.req.raw.headers);
+    const presser = await verifiedDashboardUser(c.env, c.req.raw.headers);
     // Every network's allowance of sign-in links (account-login.ts /api/auth/sign-in/link), before anything is looked up.
     const slots = await c.env.db.execute(sql`SELECT reserve_auth_state(${await digest(`signin-link:${c.req.header(clientIpHeader) ?? 'unknown'}`)}) AS ok`);
     if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
@@ -562,24 +562,32 @@ export function registerSupportConversations(app: App) {
         WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND si.created_at > now() - make_interval(days => ${SIGNIN_DAYS}::int)`);
       if (!target) return null;
       const email = target.address.toLowerCase();
-      // One request per address at a time (the waitlist's links take the same lock), so both counts hold. Every request
-      // counts, whether or not a link is made, so a refusal never says whether an account has the address.
+      // The account a link is for (`u`): its verified address is this one and it can confirm this email (nobody else bound it).
+      const forAccount = sql`u.email_verified AND lower(u.email) = ${email} AND (${target.user_id}::text IS NULL OR u.id = ${target.user_id})
+        AND (${target.signed_by}::text IS NULL OR u.id = ${target.signed_by})`;
+      // One request per address at a time (the waitlist's links take the same lock), so both counts hold.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${email},46400))`);
-      const today = sql`link_window_at > now() - interval '1 day'`;
-      const { rows: [asked] } = await tx.execute<{ conversation: number; address: number }>(sql`SELECT
-        (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE conversation_id = ${conversationId} AND ${today}) AS conversation,
-        (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE address = ${target.address} AND ${today}) AS address`);
-      if (asked!.conversation >= SUPPORT_LINKS.perConversation || asked!.address >= SUPPORT_LINKS.perAddress)
-        throw new ApiError(429, 'SIGN_IN_LINK_LIMIT', 'Too many sign-in links were asked for today. Use one already sent, or try again tomorrow.');
-      await tx.execute(sql`UPDATE support_email_signins SET link_requests = CASE WHEN ${today} THEN link_requests + 1 ELSE 1 END,
-        link_window_at = CASE WHEN ${today} THEN link_window_at ELSE now() END WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
-      // A link, and its email, only for an account's verified address that can confirm this email (nobody else bound it):
-      // a link to anyone else would prove nothing. Otherwise nothing is made or sent, and the answer is the same.
+      // That account's own presses, from a session that proves no mailbox, are the person the email came from asking: they
+      // neither count nor are refused, so someone holding a leaked link can't use up the day's links and lock them out. Every
+      // other press counts, whether or not a link is made, so a refusal never says whether an account has the address (only
+      // the account itself is told apart, and it knows its own address).
+      const { rows: [own] } = await tx.execute<{ is: boolean }>(sql`SELECT EXISTS (SELECT FROM nightmail_users u WHERE u.id = ${presser.userId} AND ${forAccount}) AS is`);
+      if (!own!.is) {
+        const today = sql`link_window_at > now() - interval '1 day'`;
+        const { rows: [asked] } = await tx.execute<{ conversation: number; address: number }>(sql`SELECT
+          (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE conversation_id = ${conversationId} AND ${today}) AS conversation,
+          (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE address = ${target.address} AND ${today}) AS address`);
+        if (asked!.conversation >= SUPPORT_LINKS.perConversation || asked!.address >= SUPPORT_LINKS.perAddress)
+          throw new ApiError(429, 'SIGN_IN_LINK_LIMIT', 'Too many sign-in links were asked for today. Use one already sent, or try again tomorrow.');
+        await tx.execute(sql`UPDATE support_email_signins SET link_requests = CASE WHEN ${today} THEN link_requests + 1 ELSE 1 END,
+          link_window_at = CASE WHEN ${today} THEN link_window_at ELSE now() END WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+      }
+      // A link, and its email, only for that account: a link to anyone else would prove nothing. Otherwise nothing is made or
+      // sent, and the answer is the same.
       const workspaceId = c.env.config.platformDomainWorkspace, id = newLinkId();
       const { rows: [link] } = workspaceId ? await tx.execute<{ id: string }>(sql`INSERT INTO nightmail_signin_links(id, email, conversation_id, message_id, expires_at)
         SELECT ${id}, ${email}, ${conversationId}, ${messageId}, now() + make_interval(mins => ${LINK_MINUTES}::int)
-        WHERE EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email) = ${email}
-          AND (${target.user_id}::text IS NULL OR u.id = ${target.user_id}) AND (${target.signed_by}::text IS NULL OR u.id = ${target.signed_by}))
+        WHERE EXISTS (SELECT FROM nightmail_users u WHERE ${forAccount})
         RETURNING id`) : { rows: [] };
       if (link) await tx.execute(signinLink(workspaceId!, link.id));
       return target.address;
@@ -593,7 +601,7 @@ export function registerSupportConversations(app: App) {
   });
 
   const AnsweredByEmail = z.object({
-    outcome: z.enum(['released', 'already_released', 'already_answered']).describe('released: support answers by email now; already_released: it was asked before, nothing new; already_answered: support already answered that email, nothing new.'),
+    outcome: z.enum(['released', 'already_released', 'answered', 'already_answered']).describe('released: support answers by email now; already_released: it was asked before and the answer hasn\u2019t gone yet, nothing new; answered: it was asked before and the answer has gone since, nothing new; already_answered: support answered that email before anyone asked, nothing new.'),
     address: z.string().describe('Where the answer goes: the address the email came from, as getSupportConversationClaim’s 403 shows it.'),
   });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: [], method: 'post', path: '/v1/support-conversations/{id}/answer-by-email', operationId: 'answerSupportConversationByEmail',
@@ -613,8 +621,16 @@ export function registerSupportConversations(app: App) {
     // Nobody is acting as a person here: the trail names the request, internal, with no person.
     const context = { ...auditContext(c), actor: { type: 'system' as const, id: null, via: 'dashboard' as const, label: 'Answer me by email instead' } };
     const answered = await c.env.db.transaction(async tx => {
-      const outcome = await releaseGeneralAnswer(tx, conversationId, messageId);
+      let outcome: GeneralAnswerRelease | 'answered' = await releaseGeneralAnswer(tx, conversationId, messageId);
       if (outcome === 'not_waiting') return null;
+      // Asked before: whether the answer has actually gone out since (an agent's answer or a staff reply, sent; not a held
+      // draft, a queued reply or a notice). The presser holds the link mailed to that address, where it went.
+      if (outcome === 'already_released') {
+        const { rows: [since] } = await tx.execute<{ went: boolean }>(sql`SELECT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = ${conversationId}
+            AND o.author IN ('agent', 'staff') AND o.kind IS DISTINCT FROM 'held' AND o.delivery = 'sent'
+            AND o.created_at > (SELECT min(r.general_answer_requested_at) FROM support_email_signins r WHERE r.conversation_id = ${conversationId})) AS went`);
+        if (since!.went) outcome = 'answered';
+      }
       const { rows: [row] } = await tx.execute<{ address: string }>(sql`SELECT address FROM support_email_signins WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
       // A trail row needs a workspace or a person: it is the support address's workspace's (Nightmail's own), internal.
       if (outcome === 'released') await tx.execute(auditInsert(context, { action: 'support.answer_by_email', workspaceId: sql`w.id`, target: { type: 'support_conversation', id: conversationId }, details: { message: messageId }, ticketRef: conversationId, internal: true },

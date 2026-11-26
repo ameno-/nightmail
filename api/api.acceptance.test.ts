@@ -2278,7 +2278,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
 // Production (Nov 2026): a member of a new workspace opened a support email's Continue link while signed in with GitHub
 // and got a bare 403 MAILBOX_SIGN_IN_REQUIRED five times. Claiming needs a sign-in that proves the mailbox; the refusal now
 // says the way through, an emailed sign-in link to the address the email came from (support-conversations.ts).
-test('Support email Continue: a sign-in that proves no mailbox gets 403 and two choices: a sign-in link to the email’s own address only, made only when an account has it, limited per conversation, address and network, with one answer whether or not it went out, whose following proves the mailbox, keeps another account signed in, and confirms the email; or, signed in as anyone or not at all, a general answer by email to the stored address, once, attached to nobody, never on GET', async t => {
+test('Support email Continue: a sign-in that proves no mailbox gets 403 and two choices: a sign-in link to the email’s own address only, made only when an account has it, limited per conversation, address and network for everyone but that account (so a leaked link can’t lock its sender out), with one answer whether or not it went out, whose following proves the mailbox, keeps another account signed in, and confirms the email; or, signed in as anyone or not at all, a general answer by email to the stored address, once, attached to nobody, never on GET, that says when it has gone', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
   const {createApp} = await import('./src/app.js');
@@ -2379,6 +2379,8 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 and two 
   const ada = await account(`ada-${hex().slice(0,8)}@example.net`), bob = await account(`bob-${hex().slice(0,8)}@example.org`);
   assert.equal((await signIn(ada)).account,ada.id);
   assert.deepEqual(await proof(ada),{mailbox_proved:null,verified_email:null});
+  // Bob, another account, is signed in too, in the same browser: here he is anyone else holding Ada's link.
+  assert.equal((await signIn(bob)).account,bob.id);
   const mine = await waiting(ada.email), masked = 'a•••@e•••.net';
   // The refusal keeps its code, is not retryable as it is, and names the way through: the address the email came from,
   // masked, and the request that emails a sign-in link there.
@@ -2398,14 +2400,14 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 and two 
   assert.equal((await ask({id:`conv_${'b'.repeat(26)}`,message:mine.message},{},as(ada))).status,404);
   assert.deepEqual(await links(mine),[]);
 
-  // The button: one link, to the email's own address, whatever else the body says.
+  // The button, pressed by Ada: one link, to the email's own address, whatever else the body says.
   const started = Date.now(), [status, sent] = await answer(await ask(mine,{email:'mallory@evil.example',address:'mallory@evil.example',to:['mallory@evil.example']},as(ada)));
   assert.ok(Date.now() - started >= 450,'The answer waits for its fixed time.');
   assert.deepEqual([status,sent],[202,{requested:true,address:masked}]);
   const [first] = await links(mine);
   assert.deepEqual(await links(mine),[{id:first!.id,email:ada.email,message_id:mine.message,emailed:true}]);
   assert.equal((await db.query("SELECT count(*)::int AS n FROM nightmail_signin_links WHERE email LIKE 'mallory%'")).rows[0].n,0);
-  assert.equal(await emails(),1,'One email, for that one link.');
+  assert.deepEqual([await emails(),await asked(mine)],[1,0],'One email, for that one link; Ada’s own press counts against no limit.');
   // Signed in as Ada, an email from an address no account has (tonight's "No account linked"): the same answer, and the
   // request counts the same, but no link is made and nothing is sent.
   const nobodyAddress = `ann-${hex().slice(0,8)}@elsewhere.net`, nobody = await waiting(nobodyAddress);
@@ -2413,30 +2415,46 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 and two 
   assert.deepEqual([await links(nobody),await emails(),await asked(nobody)],[[],1,1]);
 
   // Limits on top of each network's: a day, three per conversation, then five per address over its conversations, each
-  // refusal a plain 429. Every request counts whether or not a link was made, so the address without an account is
-  // refused exactly as Ada's is.
+  // refusal a plain 429, for every press but the account's own. From anyone else (Bob) every press counts whether or not a
+  // link was made, so an address with an account (Ada's) and one without answer alike: the same body, padded to 500 ms,
+  // and the same 429 once three are counted.
+  const seen: Record<string, Json[]> = {};
   for (const c of [mine, nobody]) {
-    for (let i = 1; i < SUPPORT_LINKS.perConversation; i++) assert.equal((await ask(c,{},as(ada))).status,202);
-    const [over, refusal] = await answer(await ask(c,{},as(ada)));
-    assert.deepEqual([over,refusal.error.code,refusal.error.retryable,await asked(c)],[429,'SIGN_IN_LINK_LIMIT',false,SUPPORT_LINKS.perConversation]);
+    seen[c.id] = [];
+    while (await asked(c) < SUPPORT_LINKS.perConversation) {
+      const at = Date.now(), [s2, b2] = await answer(await ask(c,{},as(bob)));
+      seen[c.id]!.push([s2, b2, Date.now() - at >= 450]);
+    }
+    const [over, refusal] = await answer(await ask(c,{},as(bob)));
+    seen[c.id]!.push([over,refusal.error.code,refusal.error.retryable]);
   }
-  assert.deepEqual([(await links(mine)).map(l=>l.emailed),await links(nobody),await emails()],[Array(SUPPORT_LINKS.perConversation).fill(true),[],SUPPORT_LINKS.perConversation]);
+  assert.deepEqual(seen[mine.id]!.at(-1),[429,'SIGN_IN_LINK_LIMIT',false]);
+  assert.deepEqual([...new Set(Object.values(seen).flatMap(list => list.slice(0, -1).map(x => JSON.stringify(x))))],[JSON.stringify([202,{requested:true,address:masked},true])]);
+  assert.deepEqual(seen[nobody.id]!.at(-1),seen[mine.id]!.at(-1));
+  // A leaked link (Bob used up the day's three on Ada's email): Ada, signed in to her own account, still gets a link at
+  // once, and again; her presses count against nothing and lift nobody else's limit.
+  for (let i = 0; i < 2; i++) assert.deepEqual(await answer(await ask(mine,{},as(ada))),[202,{requested:true,address:masked}]);
+  assert.deepEqual([await asked(mine),(await answer(await ask(mine,{},as(bob))))[0]],[SUPPORT_LINKS.perConversation,429]);
+  assert.deepEqual([(await links(mine)).map(l=>l.emailed),await links(nobody),await emails()],[Array(1+SUPPORT_LINKS.perConversation+2).fill(true),[],1+SUPPORT_LINKS.perConversation+2]);
+  // Per address over its conversations: Bob's three on Ada's first email and two on another use up its five; Ada's own
+  // still go.
   const again = await waiting(ada.email);
-  for (let i = SUPPORT_LINKS.perConversation; i < SUPPORT_LINKS.perAddress; i++) assert.equal((await ask(again,{},as(ada))).status,202);
-  assert.deepEqual(await answer(await ask(again,{},as(ada))).then(([s,b])=>[s,b.error.code]),[429,'SIGN_IN_LINK_LIMIT']);
-  assert.equal((await links(again)).length,SUPPORT_LINKS.perAddress-SUPPORT_LINKS.perConversation);
+  for (let i = SUPPORT_LINKS.perConversation; i < SUPPORT_LINKS.perAddress; i++) assert.equal((await ask(again,{},as(bob))).status,202);
+  assert.deepEqual(await answer(await ask(again,{},as(bob))).then(([s,b])=>[s,b.error.code]),[429,'SIGN_IN_LINK_LIMIT']);
+  assert.equal((await ask(again,{},as(ada))).status,202);
+  assert.equal((await links(again)).length,SUPPORT_LINKS.perAddress-SUPPORT_LINKS.perConversation+1);
   // Per network: its pending sign-ins (eight), whatever the conversation, before anything is looked up.
   const network = {'x-nightmail-client-ip':`2001:db8:${net}:77::1`}, lost = {id:`conv_${'c'.repeat(26)}`,message:mine.message};
   for (let i = 0; i < 8; i++) assert.equal((await ask(lost,{},{...as(ada),...network})).status,404);
   assert.deepEqual(await answer(await ask(again,{},{...as(ada),...network})).then(([s,b])=>[s,b.error.code]),[429,'AUTH_STATE_LIMIT']);
 
-  // Bob is signed in too, in the same browser. The emailed link opens the page, which signs in with the account
-  // service's chooser, the link in its return URL. Signed in as Bob (another account), it proves nothing and stays unspent.
-  assert.equal((await signIn(bob)).account,bob.id);
+  // The emailed link opens the page, which signs in with the account service's chooser, the link in its return URL. Signed
+  // in as Bob (another account), it proves nothing and stays unspent.
+  const linksBefore = (await links(mine)).length;
   const url = new URL(supportLinkUrl(runtime.config,first!.id,mine.id,mine.message));
   assert.equal(url.pathname,`/support/continue/${mine.id}/${mine.message}`);
   assert.deepEqual(await signIn(bob,url.href,true),{landed:`/support/continue/${mine.id}/${mine.message}?account=${bob.id}`,account:bob.id},'The page opens without the link.');
-  assert.deepEqual([await proof(bob),(await links(mine)).length],[{mailbox_proved:null,verified_email:null},SUPPORT_LINKS.perConversation]);
+  assert.deepEqual([await proof(bob),(await links(mine)).length],[{mailbox_proved:null,verified_email:null},linksBefore]);
   // As Ada, still with GitHub: the link proves her mailbox, her session in this browser is replaced by one that says so,
   // and Bob's stays.
   assert.deepEqual(await signIn(ada,url.href,true),{landed:`/support/continue/${mine.id}/${mine.message}?account=${ada.id}`,account:ada.id});
@@ -2510,12 +2528,20 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 and two 
   assert.deepEqual(await signedOut(rhys).then(async r => [r.status,await r.json()]),[200,{outcome:'already_released',address:rhysMask}]);
   assert.deepEqual(await answer(await answerAs(rhys,as(ada))),[200,{outcome:'already_released',address:rhysMask}]);
   assert.deepEqual([wakes.length,(await trail(rhys)).length],[1,1]);
+  // A held draft is no answer: still "we'll answer".
+  assert.equal((await binding.mirrorMessages(rhys.id,[{id:mid(),author:'agent',kind:'held',text:'Synthetic held draft.',delivery:'held',reason:'gate'} as never])).status,200);
+  assert.deepEqual(await signedOut(rhys).then(async r => [r.status,await r.json()]),[200,{outcome:'already_released',address:rhysMask}]);
   // The general answer is mirrored, and the conversation leaves the due list. (What that turn can do, with no account tools
   // and no reads even when the email asks for account data, is the support platform's: #929, support/test/support.test.ts
   // "an email that failed verification, … released from its sign-in link …" and api 13d.)
   // Mirrored without a time of its own: the database's, after the release (and, below, after the email's sign-in reply).
   assert.equal((await binding.mirrorMessages(rhys.id,[{id:mid(),author:'agent',kind:'reply',text:'Synthetic general answer.',delivery:'sent'} as never])).status,200);
   assert.deepEqual(await due(rhys),[]);
+  // Pressing again now that it went says so ("answered"), signed out or in, padded the same, and does nothing new.
+  const againAt = Date.now(), went = await signedOut(rhys);
+  assert.deepEqual([went.status,await went.json(),Date.now() - againAt >= 450],[200,{outcome:'answered',address:rhysMask},true]);
+  assert.deepEqual(await answer(await answerAs(rhys,as(ada))),[200,{outcome:'answered',address:rhysMask}]);
+  assert.deepEqual([wakes.length,(await trail(rhys)).length,await due(rhys)],[1,1,[]]);
   // A verified sender whose email nobody claims is answered in general at 8 minutes without pressing anything: #929's 13b
   // and 13c (the support platform's CLAIM_WAIT_MS). Pressing then does nothing new.
   const answeredAlready = await waiting(`una-${hex().slice(0,8)}@elsewhere.test`);
@@ -2529,8 +2555,9 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 and two 
   assert.deepEqual([await due(nobody),await bound(nobody),wakes.at(-1)],[[[nobody.id,nobody.message]],{user_id:null,mode:'pending_signin',pending_address:nobodyAddress},wakeOf(nobody)]);
 
   // Limits: per conversation and per network, as many as pending sign-ins in 11 minutes, each refusal a plain 429.
-  // Rhys's conversation has had four (a guessed message, the release, and two presses again).
-  for (let i = 4; i < 8; i++) assert.equal((await signedOut(rhys)).status,200);
+  // Rhys's conversation has had seven (a guessed message, the release, two presses again, one after the held draft and two
+  // after the answer).
+  for (let i = 7; i < 8; i++) assert.equal((await signedOut(rhys)).status,200);
   assert.deepEqual(await signedOut(rhys).then(async r => [r.status,((await r.json()) as Json).error.code]),[429,'ANSWER_BY_EMAIL_LIMIT']);
   const one = {'x-nightmail-client-ip':`2001:db8:${net2}:88::1`}, unknownLink = {id:`conv_${'e'.repeat(26)}`,message:`msg_${hex()}`};
   for (let i = 0; i < 8; i++) assert.equal((await signedOut({...unknownLink,id:`conv_${'e'.repeat(25)}${base32[i]}`},{},one)).status,404);

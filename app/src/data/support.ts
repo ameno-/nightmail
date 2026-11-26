@@ -28,7 +28,7 @@ export const supportApi = {
   signInLink: (conversationId: string, messageId: string) => request<{ requested: true; address: string }>(`/v1/support-conversations/${encodeURIComponent(conversationId)}/sign-in-link`, { method: 'POST', body: { messageId } }),
   /** A general answer by email, with no account access, to the address that email came from, once: whoever holds the
    *  link may ask, signed in or not. address as signInLink shows it. */
-  answerByEmail: (conversationId: string, messageId: string) => request<{ outcome: 'released' | 'already_released' | 'already_answered'; address: string }>(`/v1/support-conversations/${encodeURIComponent(conversationId)}/answer-by-email`, { method: 'POST', body: { messageId } }),
+  answerByEmail: (conversationId: string, messageId: string) => request<{ outcome: 'released' | 'already_released' | 'answered' | 'already_answered'; address: string }>(`/v1/support-conversations/${encodeURIComponent(conversationId)}/answer-by-email`, { method: 'POST', body: { messageId } }),
 }
 
 /** A change support proposed to the signed-in person (api/src/support-actions.ts): its sentence is
