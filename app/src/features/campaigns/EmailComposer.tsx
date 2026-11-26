@@ -1,14 +1,16 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ComponentProps } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { EmailEditor, type EmailEditorRef } from '@react-email/editor'
 import type {} from '@react-email/editor/extensions'
 import { defaultSlashCommands, Inspector } from '@react-email/editor/ui'
 import { AlignCenter, AlignLeft, AlignRight, Bold, Box, Braces, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, LoaderCircle, Minus, MousePointer2, Paperclip, Plus, Redo2, Shapes, SlidersHorizontal, Type, Undo2, UserRound, X, type LucideIcon } from 'lucide-react'
-import { Button, DropdownMenu, Icon, IconButton, SkeletonText, Tooltip, type MenuItem } from '../../components/ui'
+import { Button, DropdownMenu, Icon, IconButton, Tooltip, type MenuItem } from '../../components/ui'
 import { modKey, useMediaQuery } from '../../lib/media'
 import { useApi } from '../../data/context'
 import type { Attachment, AttachmentApi } from '../../data/types'
 import { attachmentLimit, composerLoading, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } from './copy'
-import { prepareLocalImage, inlineImageSources, inlineImageHash, replaceEditorImageSources, loadInlineAttachments, cidImageSources, type ComposedDraft } from './composer-content'
+import { attachmentKind, cachedInlineAttachments, cidImageSources, fetchAttachmentMetadata, inlineImageHash, inlineImageSources, loadInlineAttachments, pendingCidPlaceholder, prepareLocalImage, rememberInlineAttachment, replaceEditorImageSources, type ComposedDraft } from './composer-content'
+import { StaticEmailBody } from './composer-preview'
 import { blockHtmlToDocument, documentToBlockHtml, isBlockDocumentEmpty, type EditorNode } from './block-content'
 import '@react-email/editor/themes/default.css'
 import './composer.css'
@@ -67,20 +69,56 @@ if (!defaultSlashCommands.some(item => item.title === 'Image')) {
     command: ({ editor: value, range }) => { value.chain().focus().deleteRange(range).run(); pickImage?.() },
   })
 }
+function buildInitialDocument(html: string, resolved: ReadonlyMap<string, string>) {
+  const doc = blockHtmlToDocument(html)
+  const placeholders = new Map<string, string>()
+  const walk = (node: EditorNode) => {
+    if (node.type === 'image' && node.attrs && typeof node.attrs.src === 'string' && node.attrs.src.startsWith('cid:')) {
+      const cidRef = node.attrs.src
+      const hit = resolved.get(cidRef)
+      if (hit) {
+        node.attrs = { ...node.attrs, src: hit }
+      } else {
+        const placeholder = pendingCidPlaceholder(cidRef.slice(4), node.attrs.width, node.attrs.height)
+        placeholders.set(placeholder, cidRef)
+        node.attrs = { ...node.attrs, src: placeholder }
+      }
+    }
+    node.content?.forEach(walk)
+  }
+  walk(doc)
+  return { doc, placeholders }
+}
+
 export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], knownAttachmentIds = [], attachmentApi: providedAttachmentApi, initialHtml, disabled = false, personalize = false, onReady, onDirty, onAttach, onBusy }, ref) {
   const api = useApi()
+  const cache = useQueryClient()
   const attachmentApi = providedAttachmentApi ?? api.attachments
+  const kind = attachmentKind(api, providedAttachmentApi)
   const preparing = useRef<Promise<Draft> | null>(null)
-  const [initialSnapshot] = useState(() => { const known = [...new Set([...attachmentIds, ...knownAttachmentIds])]; return { html: initialHtml, attachmentIds: [...attachmentIds], hydrate: known.length > MAX_ATTACHMENTS ? [...attachmentIds] : known } })
+  const [initialSnapshot] = useState(() => {
+    const known = [...new Set([...attachmentIds, ...knownAttachmentIds])]
+    const hydrate = known.length > MAX_ATTACHMENTS ? [...attachmentIds] : known
+    const needed = cidImageSources(initialHtml)
+    const cached = cachedInlineAttachments(kind, hydrate, needed)
+    const { doc, placeholders } = buildInitialDocument(initialHtml, cached.sources)
+    return { html: initialHtml, attachmentIds: [...attachmentIds], hydrate, cached, doc, placeholders }
+  })
   // Inline attachments open as data URLs and save back as their cid references.
-  const cidBySource = useRef(new Map<string, string>())
+  const cidBySource = useRef(new Map<string, string>([...initialSnapshot.cached.sources].map(([cid, url]) => [url, cid])))
   // Inline images uploaded or opened here, by source: an upload must survive a failed prepare/save before its ID
   // reaches attachmentIds, and an image removed by a save and then restored by undo must be attached again.
-  const uploadedInline = useRef(new Map<string, Attachment>())
-  const needsHydration = useRef(cidImageSources(initialHtml).size > 0).current
-  const [hydrating, setHydrating] = useState(needsHydration)
-  const [content, setContent] = useState<EditorNode>(() => blockHtmlToDocument(needsHydration ? '' : initialHtml))
-  const [generation, setGeneration] = useState(0)
+  const uploadedInline = useRef(new Map<string, Attachment>(initialSnapshot.cached.items))
+  // Pending cid: placeholders waiting for uncached inline images to arrive and swap in-place (no editor remount).
+  const placeholderToCid = useRef(new Map<string, string>(initialSnapshot.placeholders))
+  const resolvedSourcesRef = useRef(new Map<string, string>(initialSnapshot.cached.sources))
+  const [resolvedSources, setResolvedSources] = useState<ReadonlyMap<string, string>>(() => initialSnapshot.cached.sources)
+  const hydrationPromise = useRef<Promise<void> | null>(null)
+  const suppressUpdate = useRef(false)
+  const clickedBeforeReady = useRef(false)
+  const [content, setContent] = useState<EditorNode>(() => initialSnapshot.doc)
+  // Paint the static body on frame 1 (<16 ms), then mount ProseMirror on the next frame and swap in place.
+  const [editorMounted, setEditorMounted] = useState(false)
   const [ready, setReady] = useState(false)
   const [busy, setBusy] = useState(false)
   const busyListener = useRef(onBusy)
@@ -101,7 +139,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const fileInput = useRef<HTMLInputElement>(null)
   const changed = useRef(false)
   const uploads = useRef(0)
-  const locked = disabled || busy || hydrating
+  const locked = disabled || busy
   const [theme] = useState(() => {
     const tokens = getComputedStyle(document.documentElement)
     const fontFamily = tokens.getPropertyValue('--font-email').trim()
@@ -258,22 +296,89 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   })
 
   useEffect(() => {
-    const needed = cidImageSources(initialSnapshot.html)
-    if (!needed.size) return
+    const frame = requestAnimationFrame(() => setEditorMounted(true))
+    return () => cancelAnimationFrame(frame)
+  }, [])
+
+  const applyHydratedImages = useCallback((instance: NonNullable<EmailEditorRef['editor']>, map: ReadonlyMap<string, string>) => {
+    if (!map.size || instance.isDestroyed) return
+    const { state } = instance
+    let tr = state.tr
+    let updated = false
+    state.doc.descendants((node, pos) => {
+      if (node.type.name === 'image' && typeof node.attrs.src === 'string') {
+        const cidRef = placeholderToCid.current.get(node.attrs.src)
+        const nextSrc = cidRef ? map.get(cidRef) : undefined
+        if (nextSrc && nextSrc !== node.attrs.src) {
+          tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: nextSrc })
+          updated = true
+        }
+      }
+    })
+    if (updated) {
+      tr.setMeta('addToHistory', false)
+      suppressUpdate.current = true
+      try { instance.view.dispatch(tr) } finally { suppressUpdate.current = false }
+    }
+  }, [])
+
+  useEffect(() => {
+    const missing = initialSnapshot.cached.missing
+    if (!missing.size) return
     const controller = new AbortController()
-    setHydrating(true)
-    loadInlineAttachments(attachmentApi, initialSnapshot.hydrate, needed, controller.signal).then(result => {
+    const run = loadInlineAttachments(attachmentApi, initialSnapshot.hydrate, missing, controller.signal, { cache, kind }).then(result => {
       if (controller.signal.aborted) return
-      cidBySource.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
+      result.sources.forEach((url, cid) => {
+        cidBySource.current.set(url, cid)
+        resolvedSourcesRef.current.set(cid, url)
+      })
       result.items.forEach((item, url) => uploadedInline.current.set(url, item))
-      setContent(replaceEditorImageSources(blockHtmlToDocument(initialSnapshot.html), result.sources) as EditorNode)
-      setHydrating(false); setReady(false); setGeneration(value => value + 1)
-    }).catch(cause => { if (!controller.signal.aborted) { setError(errorText(cause, 'Couldn’t load inline images.')); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
+      setResolvedSources(new Map(resolvedSourcesRef.current))
+      const live = editor.current?.editor
+      if (live && !live.isDestroyed) {
+        applyHydratedImages(live, resolvedSourcesRef.current)
+      } else {
+        const replacements = new Map<string, string>()
+        placeholderToCid.current.forEach((cidRef, placeholder) => {
+          const url = resolvedSourcesRef.current.get(cidRef)
+          if (url) replacements.set(placeholder, url)
+        })
+        if (replacements.size) setContent(current => replaceEditorImageSources(current as Record<string, unknown>, replacements) as EditorNode)
+      }
+    }).catch(cause => {
+      if (controller.signal.aborted) return
+      setError(errorText(cause, 'Couldn’t load inline images.'))
+      // Restore original cid: references so a later save never drops inline images that failed to preview.
+      const fallback = new Map<string, string>()
+      placeholderToCid.current.forEach((cidRef, placeholder) => fallback.set(placeholder, cidRef))
+      const live = editor.current?.editor
+      if (live && !live.isDestroyed && fallback.size) {
+        const { state } = live
+        let tr = state.tr
+        let updated = false
+        state.doc.descendants((node, pos) => {
+          if (node.type.name === 'image' && typeof node.attrs.src === 'string') {
+            const cidRef = fallback.get(node.attrs.src)
+            if (cidRef) { tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: cidRef }); updated = true }
+          }
+        })
+        if (updated) {
+          tr.setMeta('addToHistory', false)
+          suppressUpdate.current = true
+          try { live.view.dispatch(tr) } finally { suppressUpdate.current = false }
+        }
+      } else if (fallback.size) {
+        setContent(current => replaceEditorImageSources(current as Record<string, unknown>, fallback) as EditorNode)
+      }
+    }).finally(() => {
+      if (hydrationPromise.current === run) hydrationPromise.current = null
+    })
+    hydrationPromise.current = run
     return () => controller.abort()
-  }, [attachmentApi, initialSnapshot])
+  }, [applyHydratedImages, attachmentApi, cache, initialSnapshot, kind])
 
   async function prepareContent(): Promise<Draft> {
-    if (hydrating) throw new Error('Wait for inline images to finish loading before saving.')
+    if (hydrationPromise.current) await hydrationPromise.current
     if (uploads.current) throw new Error('Wait for your image to finish loading before continuing.')
     const instance = editor.current
     if (!instance?.editor) throw new Error(composerLoading)
@@ -281,7 +386,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     const empty = isBlockDocumentEmpty(document)
     const currentInline: string[] = []
     const allIds = new Set(attachmentIds)
-    let metadata = await Promise.all([...allIds].map(id => attachmentApi.get(id)))
+    let metadata = await Promise.all([...allIds].map(id => fetchAttachmentMetadata(cache, attachmentApi, kind, id)))
     const inlineSources = empty ? [] : inlineImageSources(document as Record<string, unknown>)
     for (const source of inlineSources) {
       const cached = uploadedInline.current.get(source)
@@ -311,7 +416,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         const item = await attachmentApi.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
         cid = `cid:${contentId}`
         covered.add(contentId)
-        cidBySource.current.set(source, cid); uploadedInline.current.set(source, item); allIds.add(item.id); totalSize += item.size
+        cidBySource.current.set(source, cid); uploadedInline.current.set(source, item); rememberInlineAttachment(kind, item, source, cache); allIds.add(item.id); totalSize += item.size
         currentInline.push(item.id)
       } else {
         const owner = metadata.find(item => item.contentId && `cid:${item.contentId}` === cid)
@@ -484,10 +589,14 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     </div>}
     {error && <p className="campaign-note composer-error" data-tone="danger" role="alert">{error}</p>}
     {!railed && panelShown && <div className="composer-inspector-backdrop" data-closing={closing || undefined} aria-hidden="true" onClick={closePanel} />}
+    {!editorMounted && panelShown && <div className="composer-inspector composer-skeleton-panel" data-docked={docked || undefined} aria-hidden="true">
+      <div className="composer-inspector-header"><span className="composer-inspector-title">Style</span><span className="composer-skeleton-tool composer-skeleton-tool--sm"><Icon icon={X} /></span></div>
+      <p className="composer-inspector-hint">Select a block to style it.</p>
+    </div>}
     <div className="composer-visual">
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
-        {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /><span className="sr-only">Loading visual composer</span></div>}
-        <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write, or type / for blocks…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) { console.info(`[${productName} timing] campaign editor ready`, { navigationMs: Number(performance.now().toFixed(1)) }); onReady() } }} onUpdate={() => { changed.current = true; onDirty() }}>
+        {!ready && <div className="composer-starting composer-static-preview" role="status"><StaticEmailBody html={initialSnapshot.html} attachmentIds={initialSnapshot.hydrate} kind={kind} resolvedSources={resolvedSources} onInteract={() => { clickedBeforeReady.current = true }} /><span className="sr-only">Loading visual composer</span></div>}
+        {editorMounted && <EmailEditor ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write, or type / for blocks…" onUploadImage={upload} className={ready ? 'composer-document' : 'composer-document composer-document--mounting'} onReady={instance => { synchronizeEditor(instance); trackCaret(instance); if (instance.editor && resolvedSourcesRef.current.size) applyHydratedImages(instance.editor, resolvedSourcesRef.current); setReady(true); console.info(`[${productName} timing] campaign editor ready`, { navigationMs: Number(performance.now().toFixed(1)) }); onReady(); if (clickedBeforeReady.current) { clickedBeforeReady.current = false; instance.editor?.commands.focus() } }} onUpdate={() => { if (suppressUpdate.current) return; changed.current = true; onDirty() }}>
           <Inspector.Root ref={inspector} className="composer-inspector" hidden={!panelShown} data-docked={docked || undefined} data-closed={panelShown ? undefined : ''} data-closing={closing || undefined}>
             <div className="composer-inspector-header"><span className="composer-inspector-title">Style</span><IconButton size="sm" label="Close style" onClick={closePanel}><Icon icon={X} /></IconButton></div>
             <Inspector.Breadcrumb />
@@ -496,7 +605,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
             <Inspector.Node />
             <Inspector.Text>{() => <Inspector.Breadcrumb>{segments => { const block = segments.at(-1); return block && block.node.nodeType !== 'body' ? <Button size="sm" variant="secondary" className="composer-inspector-action" onClick={block.focus}>Style this block</Button> : null }}</Inspector.Breadcrumb>}</Inspector.Text>
           </Inspector.Root>
-        </EmailEditor>
+        </EmailEditor>}
       </div>
     </div>
   </div>

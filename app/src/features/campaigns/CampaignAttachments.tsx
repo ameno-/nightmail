@@ -1,10 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Image, Paperclip, X } from 'lucide-react'
 import { IconButton, SkeletonText, useToast } from '../../components/ui'
 import { useApi, useApiQuery } from '../../data/context'
 import { errorText, type Attachment, type AttachmentApi } from '../../data/types'
 import { attachmentLimit, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } from './copy'
-import { cidImageSources, isRasterType } from './composer-content'
+import { attachmentKind, cidImageSources, fetchAttachmentMetadata, isRasterType } from './composer-content'
 import { fileSize, number } from '../../lib/format'
 import './attachments.css'
 
@@ -13,17 +14,18 @@ const THUMBNAIL_BYTES = 2 * 1024 * 1024
 const useAttachmentApi = (provided?: AttachmentApi) => {
   const api = useApi()
   const attachmentApi = provided ?? api.attachments
-  return { attachmentApi, kind: attachmentApi === api.templateAssets ? 'templates' : 'campaigns' }
+  return { attachmentApi, kind: attachmentKind(api, provided) }
 }
 const useAttachmentMetadata = (ids: string[], provided?: AttachmentApi) => {
+  const cache = useQueryClient()
   const { attachmentApi, kind } = useAttachmentApi(provided)
-  return useApiQuery(['attachments', kind, ids], async (_api, signal) => Promise.all(ids.map(id => attachmentApi.get(id, signal))))
+  return useApiQuery(['attachments', kind, ids], async (_api, signal) => Promise.all(ids.map(id => fetchAttachmentMetadata(cache, attachmentApi, kind, id, signal))), { staleTime: Infinity })
 }
 
 function Thumbnail({ item, attachmentApi }: { item?: Attachment; attachmentApi?: AttachmentApi }) {
   const { attachmentApi: source, kind } = useAttachmentApi(attachmentApi)
   const image = Boolean(item && isRasterType(item.contentType)), small = Boolean(image && item!.size <= THUMBNAIL_BYTES)
-  const content = useApiQuery(['attachment-content', kind, item?.id], (_api, signal) => source.content(item!.id, signal), { enabled: small })
+  const content = useApiQuery(['attachment-content', kind, item?.id], (_api, signal) => source.content(item!.id, signal), { enabled: small, staleTime: Infinity })
   const data = content.data && isRasterType(content.data.contentType) ? `data:${content.data.contentType.toLowerCase()};base64,${content.data.content}` : ''
   return <span className="campaign-file-thumb" aria-hidden="true">{data ? <img src={data} alt="" /> : !item || (small && !content.isError) ? null : image ? <Image size={16} /> : <Paperclip size={16} />}</span>
 }

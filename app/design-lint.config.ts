@@ -20,7 +20,7 @@ const ignore: Allow[] = [
 
 // The campaign composer's sheet shows the email as it is delivered: mail clients get the email's own literal styles
 // (colours, px, fonts, its divider block), not the dashboard's custom properties.
-const email: Allow = { selector: /\.composer-document\b/, reason: 'the email itself, styled as delivered (mail clients get no tokens)' }
+const email: Allow = { selector: /\.composer-(?:document|static-doc)\b/, reason: 'the email itself, styled as delivered (mail clients get no tokens)' }
 
 
 const config = {
