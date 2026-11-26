@@ -24,7 +24,8 @@ export type Table = {
   numeric: number[]
 }
 export type Block = { kind: 'p'; text: Text } | { kind: 'list'; items: Text[] } | Table
-/** quiet: its title is for screen readers only (the price table straight under the verdict: page.tsx). */
+/** quiet: its title is for screen readers only (the price table straight under the verdict: page.tsx); a page whose
+ *  only section is a table has it so without saying. */
 export type Section = { id: string; title: string; blocks: Block[]; quiet?: boolean }
 /** A question the page answers, word for word as the page shows it and its FAQPage carries it (pricing/questions.ts). */
 export type Question = { id: string; question: string; answer: string }

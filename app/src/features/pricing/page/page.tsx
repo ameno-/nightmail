@@ -100,7 +100,8 @@ export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNo
         <Way start={start} />
       </section>
       {doc.sections.map((section, i) => <section key={section.id} id={section.id} className="pp-section" aria-labelledby={`${section.id}-title`}>
-        <h2 id={`${section.id}-title`} className={section.quiet ? 'sr-only' : 'pp-h2'}>{section.title}</h2>
+        {/* Quiet, or a page's only section and a table (a vendor's price page): its title for screen readers only. */}
+        <h2 id={`${section.id}-title`} className={section.quiet || (doc.sections.length === 1 && section.blocks[0]?.kind === 'table') ? 'sr-only' : 'pp-h2'}>{section.title}</h2>
         {section.blocks.map((block, j) => <BlockView key={j} block={block} />)}
       </section>)}
       {doc.questions.length > 0 && <section id="questions" className="pp-section" aria-labelledby="questions-title">
