@@ -1,8 +1,11 @@
 import { recentFailedRequestIds, request } from './live'
 
-// The in-app support handoff (hosted): POST /v1/contact-support opens a support conversation for this workspace.
-// `url` is the support platform's page for it, when one is configured; otherwise the reference `id` goes in an email.
-export type SupportHandoff = { id: string; url: string | null; token: string | null; expiresAt: string; shareContent: boolean }
+// The support chat's handoff (hosted): POST /v1/contact-support signs who is asking, in which workspace, from which page
+// and after which failed requests; the Help panel opens or resumes its conversation with `token` (features/support/socket.ts),
+// and files a message the chat can't take as a ticket with the same call.
+export type SupportHandoff = { id: string; url: string | null; token: string | null; expiresAt: string; shareContent: boolean
+  /** A message filed as a ticket (`ticket` in the request): the chat that holds it, its ID there, and where the team replies. */
+  ticket?: { conversationId: string; messageId: string; replyTo: string | null } | null }
 /** The signed-in person's open chat conversation in the current workspace, from GET /v1/support-conversations/current. */
 export type CurrentSupportConversation = { id: string; status: 'open' | 'ticketed'; createdAt: string; lastMessageAt: string | null }
 /** One email waiting for its sender's sign-in, as GET /v1/support-conversations/{id}/claim shows it to that sender. */
@@ -10,11 +13,13 @@ export type SupportPendingEmail = { id: string; messageId: string; subject: stri
 export const supportApi = {
   /** The open support chat conversation for this person and workspace, or null when none is open. */
   current: () => request<{ conversation: CurrentSupportConversation | null }>('/v1/support-conversations/current'),
-  contact: (input: { shareContent: boolean; message?: string }) => {
+  /** A handoff for the chat, carrying the page this person is on and the last failed requests' IDs; with `ticket`, a
+   *  message the chat couldn't take, filed for the team instead (in this person's chat, with the same page and IDs). */
+  contact: (input: { shareContent: boolean; ticket?: string }) => {
     const requestIds = recentFailedRequestIds()
     return request<SupportHandoff>('/v1/contact-support', { method: 'POST', body: {
-      kind: 'support', page: window.location.pathname.slice(0, 200), shareContent: input.shareContent,
-      ...(requestIds.length ? { requestIds } : {}), ...(input.message ? { message: input.message } : {}),
+      kind: 'support', page: window.location.pathname.slice(0, 200), shareContent: input.shareContent, ...(requestIds.length ? { requestIds } : {}),
+      ...(input.ticket ? { ticket: { message: input.ticket } } : {}),
     } })
   },
   /** The chat's own person lets support read message content in its workspace (support/PROTOCOL.md §4.3). */

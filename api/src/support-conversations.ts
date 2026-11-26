@@ -142,6 +142,7 @@ const openCount = (userId: unknown, channel: 'chat' | 'email') => sql`(SELECT co
  * any conversation or handoff row, so its count is a later statement that sees every admission committed before it.
  */
 const admit = (tx: DbExecutor, userId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 39601))`);
+export const admitPerson = admit;
 
 /** Printable ASCII: only such an address is compared for an account (a Unicode one never binds; it can sign in). */
 const ASCII = /^[\x21-\x7e]+$/;
@@ -320,6 +321,54 @@ export async function releaseGeneralAnswer(tx: DbExecutor, conversationId: strin
   if (row.answered) return 'already_answered';
   await tx.execute(sql`UPDATE support_email_signins SET general_answer_requested_at = clock_timestamp() WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
   return 'released';
+}
+
+const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
+const random32 = (n: number) => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => BASE32[b & 31]).join('');
+/**
+ * The support chat couldn't take a message (it couldn't start, its service couldn't be reached, or it dropped after the
+ * person sent it), so the dashboard filed it (POST /v1/contact-support with ticket). It goes into this person's open chat
+ * in this workspace, the one the Help panel continues, or opens one from the handoff (evidence.filed), as a customer
+ * message of kind filed, with a ticket of type staff (Needs you) unless one is open, and the agent paused for it. The
+ * same words again within the hour are the same message (a retry, or the support platform mirrored it before the chat
+ * dropped): not stored twice, but back in Needs you all the same. In the caller's transaction, after the handoff row,
+ * which it marks used for that conversation.
+ *
+ * Nothing calls the support platform from here, so it works while the platform is down: the inbox is Nightmail's own, and
+ * a staff reply waits in the outbox. The platform adopts a conversation it doesn't hold and takes the filed messages into
+ * its transcript from GET /v1/operator/support/conversations/{id}/filed (when the panel resumes it, or a staff reply
+ * wakes it).
+ */
+export async function fileChatTicket(tx: DbExecutor, input: { userId: string; workspaceId: string; handoffId: string; text: string }) {
+  await admit(tx, input.userId);
+  const { rows: [open] } = await tx.execute<{ id: string; messages: number }>(sql`SELECT id, messages FROM support_conversations
+    WHERE channel = 'chat' AND user_id = ${input.userId} AND workspace_id = ${input.workspaceId} AND status <> 'closed'
+    ORDER BY coalesce(last_message_at, created_at) DESC, created_at DESC, id DESC LIMIT 1 FOR NO KEY UPDATE`);
+  let conversation = open;
+  if (!conversation) {
+    if ((await tx.execute<{ n: number }>(sql`SELECT ${openCount(input.userId, 'chat')} AS n`)).rows[0]!.n >= OPEN_CONVERSATIONS) throw limitReached('chat');
+    conversation = { id: `conv_${random32(26)}`, messages: 0 };
+    await tx.execute(sql`INSERT INTO support_conversations(id, channel, user_id, verification, evidence, mode, workspace_id)
+      VALUES (${conversation.id}, 'chat', ${input.userId}, 'handoff', ${JSON.stringify({ handoff: input.handoffId, filed: true })}::jsonb, 'member', ${input.workspaceId})`);
+  }
+  const { rows: [same] } = await tx.execute<{ id: string }>(sql`SELECT id FROM support_messages WHERE conversation_id = ${conversation.id} AND author = 'customer'
+    AND text = ${input.text} AND created_at > now() - interval '1 hour' ORDER BY seq DESC LIMIT 1`);
+  let messageId = same?.id;
+  if (!messageId) {
+    messageId = `msg_${random32(16)}`;
+    await tx.execute(sql`INSERT INTO support_messages(id, conversation_id, seq, author, kind, text) VALUES (${messageId}, ${conversation.id}, ${conversation.messages + 1}, 'customer', 'filed', ${input.text})`);
+    await tx.execute(sql`UPDATE support_conversations SET messages = messages + 1, last_message_at = now() WHERE id = ${conversation.id}`);
+  }
+  // Every filing brings a conversation staff marked done back to them, the same words again included: the person was
+  // told it was filed.
+  await tx.execute(sql`UPDATE support_conversations SET done_at = NULL, done_by = NULL WHERE id = ${conversation.id} AND done_at IS NOT NULL`);
+  const [{ openStaffTicket }, { event }] = await Promise.all([import('./support-staff-mail.js'), import('./support-inbox.js')]);
+  await openStaffTicket(tx, conversation.id, 'P2', true, { reason: 'chat_unavailable' });
+  // The agent stops for the ticket, as after an emailed one: a person answers it, here or when the chat is back.
+  const { rows: [paused] } = await tx.execute(sql`UPDATE support_conversations SET agent_state = 'paused', paused_by = 'ticket', paused_at = now() WHERE id = ${conversation.id} AND agent_state = 'active' RETURNING id`);
+  if (paused) await tx.execute(event(conversation.id, 'paused', null, { by: 'ticket' }));
+  await tx.execute(sql`UPDATE support_handoffs SET used_at = now(), conversation_id = ${conversation.id} WHERE id = ${input.handoffId}`);
+  return { conversationId: conversation.id, messageId };
 }
 
 export function registerSupportConversations(app: App) {
@@ -731,7 +780,7 @@ export function registerSupportConversations(app: App) {
         (SELECT json_build_object('id', id, 'name', name, 'role', role) FROM memberships WHERE id = s.workspace_id) AS workspace,
         coalesce((SELECT json_agg(json_build_object('id', id, 'name', name, 'role', role) ORDER BY name, id) FROM memberships WHERE s.workspace_id IS NULL OR s.channel = 'email' OR id = s.workspace_id), '[]') AS workspaces,
         (SELECT id FROM memberships WHERE id = s.content_workspace_id) AS "contentWorkspaceId",
-        (SELECT page FROM support_handoffs WHERE conversation_id = s.id) AS page,
+        (SELECT page FROM support_handoffs WHERE conversation_id = s.id ORDER BY created_at LIMIT 1) AS page,
         EXISTS (SELECT FROM audit_events v WHERE v.action = 'support.view' AND v.actor_id = s.id AND v.workspace_id IS NOT NULL AND v.workspace_id NOT IN (SELECT id FROM memberships)) AS shrunk,
         s.workspace_id FROM s`);
     const { workspace_id: _w, ...scope } = row!;

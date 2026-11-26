@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
 description: How Anomaly handles personal data in Nightmail: what we collect about customers, how we process the mail customers send and receive, screening and AI, retention, and your rights.
-updated: 21 November 2026
+updated: 26 November 2026
 effective: 20 November 2026
 ---
 
@@ -133,7 +133,7 @@ The classifier is **Jev**, from **TypeSafe AI**. Nightmail calls TypeSafe's API 
 - **An AI agent answers first.** Mail to [support@nightmail.dev](mailto:support@nightmail.dev) and the dashboard's **Help** chat go first to our AI support agent ([section 5.6](#ai-support-agent)).
 - **It confirms who you are first.** In the dashboard, Help knows you're signed in. By email, it checks that the message really came from your account's address. Until then, it looks at no account.
 - **It works with your own access.** It sees only the workspaces you belong to, never another customer's, and only while your conversation is open. It reads; it never changes anything in your workspace on its own. A change happens only after you confirm it, signed in to the dashboard.
-- **Message content only with your permission.** A checkbox in "Contact support", or a prompt in the Help chat, lets support read message content for that one conversation, in that one workspace. Both are off until you choose. A request by email never includes message content.
+- **Message content only with your permission.** A prompt in the Help chat lets support read message content for that one conversation, in that one workspace. It's off until you choose. A request by email never includes message content.
 - Without your permission, support sees settings, domains, the addresses, subjects and status of mail, delivery events, error codes and failed API requests, webhook delivery status (not payloads or URLs), standing, billing, campaigns (not their content) and your workspace's activity trail. Never keys, passwords or webhook secrets.
 - **People at Anomaly.** Support staff can read support conversations and the notes support keeps, and can step in to answer you themselves. A staff member who needs to look at your workspace gets read-only access for your request, limited to the workspaces you belong to, that expires within **2 hours**.
 - Your workspace's **Activity** page shows "Nightmail support viewed this workspace" with the request. Every support read is logged and kept 90 days.

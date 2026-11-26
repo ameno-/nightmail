@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, LifeBuoy, LogOut, Plus, StickyNote, UserPlus } from 'lucide-react'
+import { Check, ChevronDown, LogOut, MessageCircleQuestionMark, Plus, StickyNote, UserPlus } from 'lucide-react'
 import { sectionPath, useApiMutation, useSession } from '../data/context'
 import { isAbortError } from '../data/live'
 import { accountApi, accountsKey, initials, useAccounts, withOwnAccount, type ConnectedAccount } from '../data/accounts'
@@ -9,14 +9,13 @@ import { useMembershipCache, workspaceApi } from '../data/workspaces'
 import { usePhone } from '../lib/media'
 import { PrivateAddress } from './PrivateAddress'
 import { Button, Dialog, Field, Input, Sheet, useToast, fieldError, MutationError } from './ui'
-import { ContactSupportDialog } from './ContactSupport'
 import { toggleUiNotesMode, useUiNotesMode } from '../lib/ui-notes-mode'
 import { errorText } from '../data/types'
 
 // One menu for who and where: the accounts this browser connected, each with its workspaces, then Add account and Sign
 // out, which stay in view below the list however long it gets. Picking a workspace of another account switches account
 // and workspace together. Multi-tenant only; shown in the dashboard sidebar, the phone's top bar (as a sheet) and the
-// onboarding header, which alone adds Contact support: in the dashboard (`shell`) Help is in the sidebar and More.
+// onboarding header, which alone adds Help (`help` opens the support chat): in the dashboard Help is in the sidebar and More.
 type Entry = { key: string; label: ReactNode; text: string; icon?: ReactNode; checked?: boolean; disabled?: boolean; destructive?: boolean; heading?: boolean; onSelect: () => void }
 export function AccountAvatar({ name, email, size = 'md' }: { name: string | null | undefined; email?: string | null; size?: 'sm' | 'md' }) {
   return <span className={`account-avatar account-avatar--${size}`} aria-hidden="true">{initials(name, email)}</span>
@@ -24,7 +23,7 @@ export function AccountAvatar({ name, email, size = 'md' }: { name: string | nul
 function Who({ account }: { account: Pick<ConnectedAccount, 'name' | 'email'> }) {
   return <span className="account-menu__who"><span className="account-menu__name">{account.name || account.email || 'Account'}</span>{account.email && <PrivateAddress className="account-menu__email" value={account.email} />}</span>
 }
-export function AccountSwitcher({ shell = false }: { shell?: boolean } = {}) {
+export function AccountSwitcher({ help = null }: { help?: (() => void) | null } = {}) {
   const session = useSession()
   const toast = useToast()
   const phone = usePhone()
@@ -34,8 +33,9 @@ export function AccountSwitcher({ shell = false }: { shell?: boolean } = {}) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [creating, setCreating] = useState(false)
-  const [support, setSupport] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  // Help leaves focus to the chat it opens: the menu doesn't hand it back to its trigger as it closes.
+  const helping = useRef(false)
   const list = useAccounts(open)
   // The menu itself takes focus when it opens, and an address reveals while focus is on anything that holds it: focus
   // the current workspace instead, so the account's address stays masked until its own row is pointed at or highlighted.
@@ -85,7 +85,7 @@ export function AccountSwitcher({ shell = false }: { shell?: boolean } = {}) {
     // Nightmail staff: UI notes mode, for leaving design and bug notes on the dashboard (⇧N anywhere).
     ...identity.uiNotes === true ? [{ key: 'ui-notes', text: `UI notes ${notesOn ? 'on' : 'off'}`, icon: <StickyNote />, onSelect: () => { setOpen(false); toggleUiNotesMode() },
       label: <span className="account-menu__toggle">UI notes<span className="account-menu__toggle-state">{notesOn ? 'On' : 'Off'}{!phone && <kbd>⇧N</kbd>}</span></span> }] : [],
-    ...shell ? [] : [{ key: 'support', text: 'Contact support…', label: 'Contact support…', icon: <LifeBuoy />, onSelect: () => { setOpen(false); setSupport(true) } }],
+    ...help ? [{ key: 'help', text: 'Help', label: 'Help', icon: <MessageCircleQuestionMark />, onSelect: () => { helping.current = true; setOpen(false); help() } }] : [],
     // At the limit, Add account says why it can't, only when it is chosen.
     // With one workspace per account, Add account says it signs in to an account that exists, not a new workspace.
     { key: 'add', text: 'Add account', label: oneWorkspace ? <span className="account-menu__who"><span>Add account</span><span className="account-menu__note">For an account you already have</span></span> : 'Add account', icon: <UserPlus />, onSelect: () => { setOpen(false); if (full) toast(`Up to ${limit} accounts. Sign out of one first.`, 'error'); else session!.addAccount() } },
@@ -103,7 +103,6 @@ export function AccountSwitcher({ shell = false }: { shell?: boolean } = {}) {
   const refocus = () => requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus())
   const create = <>
     {creating && <CreateWorkspaceDialog onClose={() => { setCreating(false); refocus() }} onCreated={id => void run(() => session!.switchWorkspace(id, '/overview'), 'Couldn’t switch workspace.')} />}
-    {support && <ContactSupportDialog onClose={() => { setSupport(false); refocus() }} />}
   </>
   // A phone gets a sheet: full-width rows at the bottom of the screen, in thumb reach, and Cancel.
   if (phone) return <>
@@ -121,10 +120,12 @@ export function AccountSwitcher({ shell = false }: { shell?: boolean } = {}) {
     </Sheet>
     {create}
   </>
+  // Near the window's edge (Get started's menu, at the right) the menu keeps the header's own inset from it.
   return <>
     <DropdownPrimitive.Root open={open} onOpenChange={next => { setOpen(next); if (next) intent() }}>
       <DropdownPrimitive.Trigger asChild>{trigger}</DropdownPrimitive.Trigger>
-      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces" data-private>
+      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} collisionPadding={12} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces" data-private
+        onCloseAutoFocus={event => { if (helping.current) { helping.current = false; event.preventDefault() } }}>
         <div className="ui-popover-scroll">{sections.slice(0, -1).map((section, index) => <MenuGroup key={index} entries={section} named={named} />)}</div>
         <MenuGroup entries={sections[sections.length - 1]} named={named} className="account-menu__actions" />
       </DropdownPrimitive.Content></DropdownPrimitive.Portal>

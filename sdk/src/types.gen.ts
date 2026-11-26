@@ -6933,6 +6933,23 @@ export type SupportHandoff = {
      */
     expiresAt: string;
     shareContent: boolean;
+    /**
+     * The message filed as a ticket (ticket in the request), or null.
+     */
+    ticket: {
+        /**
+         * Your support chat that now holds the message: the Help panel continues it.
+         */
+        conversationId: string;
+        /**
+         * The message as the conversation holds it.
+         */
+        messageId: string;
+        /**
+         * Where the team replies by email: your account address.
+         */
+        replyTo: string | null;
+    } | null;
 };
 
 export type BillingSummary = {
@@ -26497,6 +26514,15 @@ export type ContactSupportData = {
          */
         shareContent?: boolean;
         message?: string;
+        /**
+         * The support chat couldn't take this message (it couldn't start, Nightmail support couldn't be reached, or it dropped after it was sent): file it as a ticket for the team instead. It goes into your open support chat in this workspace, or opens one, and the team replies by email to your account address, and in the chat. Counts against the same hourly limit. Send the words here, not in message.
+         */
+        ticket?: {
+            /**
+             * What the person wrote, as they wrote it in the chat.
+             */
+            message: string;
+        };
     };
     path?: never;
     query?: never;

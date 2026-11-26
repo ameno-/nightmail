@@ -347,7 +347,7 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
 /**
  * A failed API call. `message` is what to show a person: plain language with a next step, so any `error.message`
  * renders correctly. The server's own wording is `detail`; the code and request ID are `reference`, for support and
- * logs (Contact support also sends the last few failed request IDs).
+ * logs (the support chat also sends the last few failed request IDs).
  */
 export class ApiError extends Error {
   /** The server's own message. */

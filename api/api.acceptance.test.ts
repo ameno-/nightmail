@@ -12395,6 +12395,202 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Support chat tickets: a message the chat could not take goes to Needs you through Nightmail alone, within the hourly limit', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: supportSigningKey() } });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      const { supportPlatform, platformRuntime } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async (req, conversation) => app.fetch(req, { ...runtime, ...platformRuntime(conversation) }), () => runtime.config);
+      const operator = await sessionFixture(t, { staff: true });
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'support ticket acceptance fixture')`, [operator.userId]);
+      const file = (message: string) => local('POST', '/v1/contact-support', { page: '/logs', requestIds: [], ticket: { message } });
+      const inbox = async () => ok(await send('GET', '/v1/operator/support-inbox?view=needs_you&channel=chat', session(operator))).data as Json[];
+
+      // No chat yet, and the support platform is down: the message opens a chat of its own, with a ticket, in Needs you.
+      const first = ok(await file('Why did my import bounce?'), 201);
+      assert.deepEqual([first.token, first.url, first.ticket.replyTo], [null, null, manager!.email], 'A filed handoff is spent: nothing to sign.');
+      const id = first.ticket.conversationId;
+      const row = (await db.query('SELECT channel, user_id, workspace_id, status, ticket_type, agent_state, paused_by, evidence, messages FROM support_conversations WHERE id = $1', [id])).rows[0];
+      assert.deepEqual([row.channel, row.user_id, row.workspace_id, row.status, row.ticket_type, row.agent_state, row.paused_by, row.evidence.filed, row.messages], ['chat', manager!.userId, wid, 'ticketed', 'staff', 'paused', 'ticket', true, 1]);
+      const item = (await inbox()).find(c => c.id === id);
+      assert.ok(item, 'It needs staff at once.');
+      assert.deepEqual([item.needsYou.reasons, item.preview.text, item.customer.userId, item.workspace.id], [['ticket', 'paused'], 'Why did my import bounce?', manager!.userId, wid]);
+      // The panel told them it was filed and that the team replies by email: Needs you for its ticket, never No reply sent.
+      await db.query("UPDATE support_messages SET created_at = now() - interval '11 minutes' WHERE conversation_id = $1", [id]);
+      assert.deepEqual((await inbox()).find(c => c.id === id)?.needsYou.reasons, ['ticket', 'paused']);
+      const detail = ok(await send('GET', `/v1/operator/support-inbox/${id}`, session(operator)));
+      assert.deepEqual(detail.messages.map((m: Json) => [m.author, m.kind, m.text]), [['customer', 'filed', 'Why did my import bounce?']]);
+      assert.equal(detail.conversation.page, '/logs');
+      assert.ok(detail.events.some((e: Json) => e.kind === 'ticket' && e.details.reason === 'chat_unavailable' && e.details.by === 'nightmail'), JSON.stringify(detail.events));
+      // It is the person's chat now: the panel continues it.
+      assert.equal(ok(await local('GET', '/v1/support-conversations/current')).conversation.id, id);
+
+      // More from the panel goes into the same conversation; the same words again (a retry) are the same message.
+      const second = ok(await file('It was the CSV from Monday.'), 201), again = ok(await file('It was the CSV from Monday.'), 201);
+      assert.deepEqual([second.ticket.conversationId, again.ticket.messageId], [id, second.ticket.messageId]);
+      assert.equal((await db.query('SELECT messages FROM support_conversations WHERE id = $1', [id])).rows[0].messages, 2);
+      // A filed message is the next thing new: a conversation staff marked done comes back.
+      ok(await send('POST', `/v1/operator/support-inbox/${id}/done`, session(operator), {}));
+      assert.equal((await inbox()).some(c => c.id === id), false);
+      ok(await file('Still bouncing today.'), 201);
+      assert.equal((await inbox()).some(c => c.id === id), true);
+      // Review of #960: the same words again after Done are not stored twice, but come back to Needs you all the same.
+      ok(await send('POST', `/v1/operator/support-inbox/${id}/done`, session(operator), {}));
+      assert.equal((await inbox()).some(c => c.id === id), false);
+      ok(await file('Still bouncing today.'), 201);
+      assert.equal((await inbox()).some(c => c.id === id), true, 'The same words after Done reach Needs you.');
+      assert.equal((await db.query('SELECT messages FROM support_conversations WHERE id = $1', [id])).rows[0].messages, 3);
+
+      // The support platform reads what it needs to adopt it, through the binding only.
+      const filed = await platform.filedConversation(id);
+      assert.equal(filed.status, 200, JSON.stringify(filed.body));
+      assert.deepEqual([filed.body.filed, filed.body.user.id, filed.body.workspace?.id, filed.body.page, filed.body.messages.map(m => m.text)],
+        [true, manager!.userId, wid, '/logs', ['Why did my import bounce?', 'It was the CSV from Monday.', 'Still bouncing today.']]);
+      error(await local('GET', `/v1/operator/support/conversations/${id}/filed`), 403);
+
+      // A chat the support platform holds (it dropped after the person sent something): the message goes into that chat.
+      assert.equal((await platform.closeConversation(id)).status, 200);
+      const base32 = 'abcdefghijklmnopqrstuvwxyz234567', held = `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`;
+      assert.equal((await platform.registerConversation({ conversationId: held, evidence: { kind: 'handoff', token: ok(await local('POST', '/v1/contact-support', {}), 201).token } })).status, 201);
+      assert.equal((await platform.mirrorMessages(held, [{ id: 'msg_aaaaaaaaaaaaaaaa', author: 'customer', text: 'Can you check my DKIM?' }])).status, 200);
+      const dropped = ok(await file('Can you check my DKIM?'), 201);
+      assert.deepEqual([dropped.ticket.conversationId, dropped.ticket.messageId], [held, 'msg_aaaaaaaaaaaaaaaa'], 'The mirrored copy is the same message.');
+      const heldRow = (await db.query('SELECT ticket_type, status, messages, evidence FROM support_conversations WHERE id = $1', [held])).rows[0];
+      assert.deepEqual([heldRow.ticket_type, heldRow.status, heldRow.messages, heldRow.evidence.filed], ['staff', 'ticketed', 1, undefined]);
+      assert.equal((await platform.filedConversation(held)).body.filed, false);
+      assert.equal(ok(await send('GET', `/v1/operator/support-inbox/${held}`, session(operator))).conversation.page, null, 'Its page is the handoff that opened it.');
+
+      // A ticket's words go in ticket.message alone; and past the hourly limit nothing is filed.
+      error(await local('POST', '/v1/contact-support', { message: 'a', ticket: { message: 'b' } }), 422, 'VALIDATION_FAILED');
+      const used = (await db.query(`SELECT count(*)::int AS n FROM support_handoffs WHERE user_id = $1 AND created_at > now() - interval '1 hour'`, [manager!.userId])).rows[0].n;
+      for (let i = used; i < 10; i++) ok(await file(`More detail ${i}`), 201);
+      error(await file('One too many'), 429, 'SUPPORT_RATE_LIMITED');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM support_messages WHERE text = 'One too many'`)).rows[0].n, 0);
+    });
+  });
+
+  test('Support chat panel: a short drop waits for the chat, a refusal files at once, and words Nightmail could not take stay in the saved draft', async t => {
+    // The Help panel's store (app/src/features/support/store.ts) over a scripted transport, with the clock mocked.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const hadWindow = 'window' in globalThis;
+    if (!hadWindow) Object.assign(globalThis, { window: new EventTarget() });
+    t.after(() => { if (!hadWindow) delete (globalThis as { window?: unknown }).window; });
+    // Loaded by a path the API's type check doesn't follow: the dashboard's modules are checked by its own build.
+    const panel = (name: string) => import(`../app/src/features/support/${name}.ts`);
+    const [{ SupportStore }, { FileError }] = await Promise.all([panel('store'), panel('protocol')]);
+    type Store = { setDraft(text: string): void; send(): boolean; dispose(): void; getSnapshot(): { messages: Json[]; draft: string; fileProblem: string | null } };
+    const ticket = { conversationId: `conv_${'a'.repeat(26)}`, messageId: `msg_${'b'.repeat(16)}`, replyTo: 'ren@example.com' };
+    const settle = () => new Promise(resolve => setImmediate(resolve));
+    const transport = (file: (text: string) => Promise<typeof ticket>) => {
+      const listeners = new Set<(event: Json) => void>(), sent: Json[] = [], filed: string[] = [], connects: Json[] = [];
+      let open = false;
+      return { kind: 'live' as const, uploads: false, sent, filed, connects,
+        emit: (event: Json) => { for (const listener of listeners) listener(event); },
+        reconnected: () => { open = true; for (const event of [{ type: 'connection', state: 'open' }, { type: 'server', message: { v: 1, seq: 0, type: 'history', messages: [], pending: { consent: null, ticket: null } } }]) for (const listener of listeners) listener(event); },
+        connect: (options?: Json) => { connects.push(options ?? {}); },
+        send: (message: Json) => { if (!open) return false; sent.push(message); return true; },
+        file: async (text: string) => { filed.push(text); return file(text); },
+        allowContent: async () => {}, readAction: async () => { throw new Error('unused'); }, decideAction: async () => { throw new Error('unused'); },
+        restart: () => {}, upload: async () => ({ id: 'att_unused' }), dispose: () => {},
+        subscribe: (listener: (event: Json) => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; } };
+    };
+    const saved = () => { const slots = { draft: '', parked: '' }; return { slots, store: { read: () => slots.draft, write: (draft: string) => { slots.draft = draft; }, parked: { read: () => slots.parked, write: (text: string) => { slots.parked = text; } } } }; };
+    const say = (store: Store, text: string) => { store.setDraft(text); assert.equal(store.send(), true); };
+    const working = (store: Store) => store.getSnapshot().messages.some(m => m.role === 'assistant' && m.streaming);
+
+    // A short drop (a deploy, a phone changing networks): the message waits with "Working on it…", tries the chat again
+    // at once, and goes through the chat when it is back, never filed.
+    const blip = transport(async () => ticket), blipStore = <Store>new SupportStore(blip as never, saved().store);
+    blip.emit({ type: 'connection', state: 'offline' });
+    say(blipStore, 'Is sending paused?');
+    assert.deepEqual([blip.filed.length, working(blipStore), blip.connects.some(c => c.create === true)], [0, true, true]);
+    t.mock.timers.tick(7000); await settle();
+    assert.equal(blip.filed.length, 0, 'Not filed within the wait.');
+    blip.reconnected();
+    assert.deepEqual(blip.sent.map(m => m.text), ['Is sending paused?']);
+    t.mock.timers.tick(10_000); await settle();
+    assert.equal(blip.filed.length, 0, 'Not filed once the chat took it.');
+    blipStore.dispose();
+
+    // Still down after the wait: filed, shown as filed.
+    const down = transport(async () => ticket), downStore = <Store>new SupportStore(down as never, saved().store);
+    down.emit({ type: 'connection', state: 'offline' });
+    say(downStore, 'Sending is stuck.');
+    t.mock.timers.tick(8000); await settle();
+    assert.deepEqual(down.filed, ['Sending is stuck.']);
+    assert.ok(downStore.getSnapshot().messages.some(m => m.filed && m.filedId === ticket.messageId) && !working(downStore));
+    downStore.dispose();
+
+    // A refusal is no blip: filed at once.
+    const refused = transport(async () => ticket), refusedStore = <Store>new SupportStore(refused as never, saved().store);
+    refused.emit({ type: 'connection', state: 'unavailable', reason: 'NO_HANDOFF' });
+    say(refusedStore, 'How do I connect my agent?'); await settle();
+    assert.deepEqual(refused.filed, ['How do I connect my agent?']);
+    refusedStore.dispose();
+
+    // Nightmail itself out of reach: the words go back into the box and its saved draft, so a reload keeps them, and they
+    // go, unchanged, as soon as Nightmail answers.
+    let reachable = false;
+    const fileOrNot = async () => { if (!reachable) throw new FileError('unreachable'); return ticket; };
+    const lost = transport(fileOrNot), drafts = saved(), lostStore = <Store>new SupportStore(lost as never, drafts.store);
+    lost.emit({ type: 'connection', state: 'unavailable', reason: 'NO_HANDOFF' });
+    say(lostStore, 'Our domain stopped verifying.'); await settle();
+    assert.deepEqual([lostStore.getSnapshot().fileProblem, lostStore.getSnapshot().draft, drafts.slots.draft, drafts.slots.parked], ['waiting', 'Our domain stopped verifying.', 'Our domain stopped verifying.', 'Our domain stopped verifying.']);
+    assert.equal(lostStore.getSnapshot().messages.some(m => m.role === 'user'), false, 'Not shown as sent.');
+    lostStore.dispose();
+    const reload = transport(fileOrNot), reloaded = <Store>new SupportStore(reload as never, drafts.store);
+    reload.emit({ type: 'connection', state: 'unavailable', reason: 'NO_HANDOFF' });
+    assert.deepEqual([reloaded.getSnapshot().draft, reloaded.getSnapshot().fileProblem], ['Our domain stopped verifying.', 'waiting'], 'A reload keeps the words, and the promise.');
+    reachable = true;
+    t.mock.timers.tick(15_000); await settle();
+    assert.deepEqual(reload.filed, ['Our domain stopped verifying.']);
+    assert.deepEqual([reloaded.getSnapshot().draft, drafts.slots.draft, drafts.slots.parked, reloaded.getSnapshot().fileProblem], ['', '', '', null]);
+    assert.ok(reloaded.getSnapshot().messages.some(m => m.filed));
+    // Words the person changed meanwhile are theirs to send: never sent on their own.
+    reachable = false;
+    const edited = transport(fileOrNot), editedDrafts = saved(), editedStore = <Store>new SupportStore(edited as never, editedDrafts.store);
+    edited.emit({ type: 'connection', state: 'unavailable', reason: 'NO_HANDOFF' });
+    say(editedStore, 'First words.'); await settle();
+    editedStore.setDraft('First words, and more.');
+    reachable = true; t.mock.timers.tick(15_000); await settle();
+    assert.deepEqual([edited.filed, editedDrafts.slots.parked, editedStore.getSnapshot().fileProblem], [['First words.'], '', null]);
+    reloaded.dispose(); editedStore.dispose();
+
+    // Review of #960: sent while the chat reconnects, then the panel rebuilt from its saved state 3 s into the wait (a
+    // reload, a workspace switch). The words were saved from the moment of sending: back in the box, and they go once,
+    // through the chat when it is back, filed when it isn't. The panel taken down sends and files nothing.
+    for (const back of [true, false]) {
+      const first = transport(async () => ticket), slots = saved(), before = <Store>new SupportStore(first as never, slots.store);
+      first.emit({ type: 'connection', state: 'offline' });
+      say(before, 'Did my import finish?');
+      assert.deepEqual([slots.slots.draft, slots.slots.parked, working(before)], ['Did my import finish?', 'Did my import finish?', true], 'Saved while it waits.');
+      t.mock.timers.tick(3000); await settle();
+      before.dispose();
+      const next = transport(async () => ticket), after = <Store>new SupportStore(next as never, slots.store);
+      assert.deepEqual([after.getSnapshot().draft, after.getSnapshot().fileProblem], ['Did my import finish?', 'waiting'], 'Still in the box after the rebuild.');
+      if (back) { next.reconnected(); await settle(); }
+      else { next.emit({ type: 'connection', state: 'offline' }); t.mock.timers.tick(15_000); await settle(); t.mock.timers.tick(8000); await settle(); }
+      t.mock.timers.tick(40_000); await settle();
+      assert.deepEqual([first.sent, first.filed], [[], []], 'Nothing from the panel taken down.');
+      assert.deepEqual([next.sent.map(m => m.text), next.filed], back ? [['Did my import finish?'], []] : [[], ['Did my import finish?']], back ? 'Through the chat, once.' : 'Filed, once.');
+      assert.deepEqual([after.getSnapshot().draft, slots.slots.draft, slots.slots.parked, after.getSnapshot().fileProblem], ['', '', '', null], 'Nothing left to send, and no line saying it waits.');
+      after.dispose();
+    }
+    // The same while the chat comes back within the wait: through the chat, and no longer saved.
+    const quick = transport(async () => ticket), quickSlots = saved(), quickStore = <Store>new SupportStore(quick as never, quickSlots.store);
+    quick.emit({ type: 'connection', state: 'offline' });
+    say(quickStore, 'Is the queue moving?');
+    quick.reconnected(); t.mock.timers.tick(10_000); await settle();
+    assert.deepEqual([quick.sent.map(m => m.text), quick.filed, quickSlots.slots.draft, quickSlots.slots.parked], [['Is the queue moving?'], [], '', '']);
+    quickStore.dispose();
+  });
+
   test('Support request logs: Workers Logs lines of the conversation’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
     // One clock for the whole test, as Postgres's now() is one for its transaction: the default window ends at the next
     // whole minute and keys the 60-second cache, so two reads either side of a minute boundary missed it (dev, Nov 17).

@@ -207,6 +207,10 @@
   .onboarding-header .wordmark { margin-right: auto; }
   .onboarding-workspace { order: 1; flex: 1 0 100%; width: auto; max-width: none; padding-bottom: var(--space-4); }
   .onboarding-header .theme-toggle, .onboarding-header .onboarding-signout { width: 44px; height: 44px; padding: 0; }
+  /* An agent's waiting card sits at the bottom of the screen (app.css), clear of the header's controls; the page always
+     ends with room for it, so at the end of the page it covers nothing. Reserved whether or not one shows: the card comes
+     later, and making room then would move the page. */
+  .page-surface.onboarding-surface { padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-40) + var(--space-40)); }
   .onboarding-signout > svg { display: block; }
   .onboarding-signout-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
   .onboarding-surface .ui-button--md { height: 44px; }
