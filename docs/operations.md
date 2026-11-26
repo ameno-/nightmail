@@ -323,14 +323,17 @@ all, so look). A warning; **critical while a high alert is unposted**. The alert
    or a burst waiting for its level's hourly limit (3 review, 10 high).
 
 ### abuse-monitor-behind
-Abuse monitoring is behind: a sign-in has waited more than two hours to be read (the finding says how long, and how
-many wait), or the hourly abuse job ran out of time three runs in a row (`abuse_state.cut_runs`). Either way some of
-what it reads waits for later runs, so scores lag. The finding names the stages the last run stopped; each run's
-`ABUSE_HOURLY` log line has every stage's time, and each stop an `ABUSE_STEP_CUT` line.
+A sign-in, payment, pending link or cluster due for scoring has waited over two hours. Each finding names the stage and the age of its oldest outstanding work. It clears at 90 minutes or when none remains. An idle stage with no new observations is healthy.
 
 **An agent checks first**
-1. `SELECT last_run,cut_runs,cursors FROM abuse_state;`: which stage, and how far behind its cursor is.
-2. Workers Logs: `ABUSE_HOURLY` (`stages`, `cuts`) over the last few hours.
+1. Check the named stage’s job: `SELECT type,status,available_at,last_error FROM jobs WHERE starts_with(type,'abuse.stage.');`.
+2. Compare its `ABUSE_STAGE` duration, `ABUSE_STEP_CUT` reason and (for sign-ins) `ABUSE_SIGNIN_BATCH` time per item. A cut after progress requeues immediately. A sign-in job can advance discovery before folding a row: `signin_scan_block` in `abuse_state` is the next block of this pass; −1 means the indexed queue is draining. A full successful batch doubles its size back toward 16. With no progress the stage waits 30 s, 1, 2, 4, 8, then 15 minutes between tries (`ABUSE_STAGE_BACKOFF`).
+3. A database timeout, lost connection or serialization failure backs off the stage; it never marks the source version as failed.
+
+### abuse-item-failing
+An item could not be folded, grouped or scored because of its data. Health shows the current count and age since the first failure separately for each kind, even before the stage-lag threshold. If scoring or grouping fails, no new alert can be raised for that work until it succeeds.
+
+Inspect the SQLSTATE or validation class, attempt count and due time: `SELECT stage,failures,reason,first_failed_at,retry_after FROM abuse_work_versions WHERE failures>0 ORDER BY retry_after;` This table may retain historical versions; Health counts only current outstanding ones. A failed item becomes due after 15 minutes, then 30, then every hour. Under contention the oldest due retries share 32 reusable permits per stage (16 each for grouping and scoring), each usable once per 15 minutes. New work needs no permit. No manual reset or new sign-in is needed.
 
 ### support-ai-cost
 The support AI's model calls cost more than `SUPPORT_AI.dailyLineUsd` (`api/src/health-thresholds.ts`) since midnight UTC.

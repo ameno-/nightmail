@@ -33755,10 +33755,442 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       VALUES ($1,$2,'checkout',$3,0,$1,$4,'system',${at},${at})`, [unique('bpa'), workspaceId, status, fingerprint]);
     // The command's one transaction nests inside the fixture's, on the fixture's own database handle.
     const command = (...args: string[]) => abuseSubjectCommand(db, args, { PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: runtime.config.authSecret, ACCOUNT_ISSUER: issuer }, runtime.db);
-    const first = await abuse.abuseHourly(runtime);
-    return { abuse, issuer, topic, signals, kinds, attemptOf, user, workspace, signIn, offer, mail, payment, command, first, chrome, hourly: () => abuse.abuseHourly(runtime) };
+    const hourly = async () => {
+      if (!await abuse.abuseHourly(runtime)) return null;
+      const sign = await abuse.runAbuseStage(runtime,'signIns'), pay = await abuse.runAbuseStage(runtime,'payments');
+      const sample = await abuse.runAbuseStage(runtime,'sample');
+      await abuse.runAbuseStage(runtime,'clusters');
+      return { signIns: sign.items, payments: pay.items, sampled: sample.items, added: sign.added+pay.added+sample.added };
+    };
+    const first = await hourly();
+    return { abuse, issuer, topic, signals, kinds, attemptOf, user, workspace, signIn, offer, mail, payment, command, first, chrome, hourly };
   };
-  test('abuse monitoring: off until its activation time, then prospective only; a sign-in adds pseudonymised facts to its own log row and nothing else; only accepted Hosted mail made after activation is sampled; every value is a keyed hash or from a closed list; one leased, bounded writer; nothing runs on the send path', async t => {
+  test('abuse monitoring: committed source versions survive worker deaths, overlapping claims, privacy changes, replacements and deadlines; parallel folds converge on the ordered graph', async t => {
+    await simulatedSesFixture(t, async ({ runtime }) => {
+      const { drizzle } = await import('drizzle-orm/node-postgres'), { sql } = await import('drizzle-orm');
+      const { abuseHourly, runAbuseStage, abuseSubject, abuseLag } = await import('./src/abuse.js');
+      const { drainJobs } = await import('./src/dispatch.js');
+      const schema = 'abuse_test_'+randomUUID().replaceAll('-',''), control = await fixtureDatabase(t);
+      await control.query('CREATE SCHEMA '+schema);
+      cleanup(t, async () => { await control.query('DROP SCHEMA '+schema+' CASCADE'); });
+      const tables = ['jobs','abuse_retry_slots','abuse_work_versions','abuse_signin_queue','abuse_state','nightmail_signin_attempts','nightmail_oidc_identities','nightmail_users','billing_payment_attempts',
+        'workspaces','workspace_members','abuse_signals','abuse_alerts','identity_links','abuse_clusters','abuse_cluster_members','abuse_exclusions','abuse_floors','abuse_sampling',
+        'sending_emails','sending_email_events','provider_feedback_history'];
+      await control.query('SET search_path='+schema+',public');
+      for (const table of tables) await control.query(`CREATE TABLE ${table} (LIKE public.${table} INCLUDING ALL)`);
+      await control.query('INSERT INTO abuse_retry_slots SELECT * FROM public.abuse_retry_slots');
+      await control.query('CREATE TRIGGER reset_pending BEFORE UPDATE OF pending ON identity_links FOR EACH ROW EXECUTE FUNCTION abuse_link_pending()');
+      Object.assign(runtime.config, { multiTenant: true, abuseMonitoring: { since: '2020-01-01Z' } });
+      const on = (client: pg.Client) => ({ ...runtime, db: drizzle(client) });
+      const connect = async () => {
+        const c = await fixtureDatabase(t); c.on('error', () => {}); // A deliberate backend death closes this connection.
+        await c.query('SET search_path='+schema+',public'); return c;
+      };
+      const one = await connect(), two = await connect();
+      const seed = (n: number, prefix: string) => control.query(`INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,observed)
+        SELECT 'fixture',$2||i,'signed_in',jsonb_build_array(jsonb_build_object('kind','provider','value',md5($2||i))) FROM generate_series(1,$1::int)i`,[n,prefix]);
+      await abuseHourly(on(control));
+      await control.query("UPDATE jobs SET status='completed' WHERE type<>'abuse.stage.signIns'");
+      await t.test('crash recovery: 420 sign-ins survive three mid-batch backend deaths and clear via queued continuations', async () => {
+        await seed(420,'batch-');
+        // A nontransactional sequence chooses random stops inside the
+        // server-side fold, after some earlier batches committed. Terminate real connections.
+        await control.query(`CREATE SEQUENCE writes;
+          CREATE FUNCTION kill_fold() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN IF nextval('writes')=current_setting('test.kill_at',true)::bigint THEN PERFORM pg_terminate_backend(pg_backend_pid()); END IF; RETURN NEW; END $$;
+          CREATE TRIGGER die AFTER INSERT ON abuse_signals FOR EACH ROW EXECUTE FUNCTION kill_fold()`);
+        for (let i=0;i<3;i++) {
+          const worker = await connect();
+          await worker.query("SELECT set_config('test.kill_at',(last_value+1+floor(random()*30)::int)::text,false) FROM writes");
+          await assert.rejects(drainJobs(on(worker),1,1,1000,'work'));
+          assert.equal((await control.query("SELECT status FROM jobs WHERE type='abuse.stage.signIns'")).rows[0].status,'running');
+          await control.query("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE type='abuse.stage.signIns'");
+        }
+        await control.query('DROP TRIGGER die ON abuse_signals');
+        assert.ok(await drainJobs(on(one),1,1,1000,'work')>0);
+        assert.equal((await control.query("SELECT status FROM jobs WHERE type='abuse.stage.signIns'")).rows[0].status,'pending');
+        assert.ok(await drainJobs(on(one),10,1,5000,'work')>0);
+        assert.deepEqual((await control.query('SELECT count(*)::int AS n,min(seen) AS least,max(seen) AS most FROM abuse_signals')).rows,[{n:420,least:1,most:1}]);
+        assert.equal((await control.query("SELECT status FROM jobs WHERE type='abuse.stage.signIns'")).rows[0].status,'completed');
+      });
+
+      await t.test('same-stage claims: concurrent workers skip a held subject, then resume it exactly once', async () => {
+        await seed(36,'locked-');
+        await control.query("UPDATE jobs SET status='pending' WHERE type='abuse.stage.signIns'");
+        await control.query("BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('abuse:subject:fixture locked-1',0))");
+        try {
+          const together = await Promise.all([drainJobs(on(one),1,1,1000,'work'),drainJobs(on(two),1,1,1000,'work')]);
+          assert.ok(together.some(n => n===1));
+          const pending = await two.query("SELECT subject FROM nightmail_signin_attempts a WHERE NOT EXISTS (SELECT FROM abuse_work_versions v WHERE v.stage='signIns' AND v.source_key=abuse_key(a.issuer,a.subject) AND v.version_at=a.last_at AND v.version_count=a.attempts AND v.failures=0) ORDER BY subject");
+          assert.deepEqual(pending.rows,[{subject:'locked-1'}]);
+        } finally { await control.query('ROLLBACK'); }
+        assert.ok(await drainJobs(on(one),1,1,1000,'work')>0);
+        assert.deepEqual((await control.query('SELECT count(*)::int AS n,min(seen) AS least,max(seen) AS most FROM abuse_signals')).rows,[{n:456,least:1,most:1}]);
+      });
+
+      const lag = async () => (await drizzle(control).execute<{lag: Record<string,number|null>}>(sql`SELECT ${abuseLag} AS lag`)).rows[0]!.lag;
+      await t.test('privacy and replacement: re-read each candidate after erasure, exclusion and an overwrite', async () => {
+        // Let real privacy transactions and an ordinary source replacement commit after
+        // the candidate read returns but before this transaction takes any entity locks.
+        await seed(3,'race-');
+        const query = one.query.bind(one) as (...args: unknown[]) => Promise<pg.QueryResult>;
+        let raced = false;
+        const hook = t.mock.method(one,'query',async (...args: unknown[]) => {
+          const result = await query(...args);
+          if (!raced && result.rows.some(r => r.subject==='race-1')) {
+            raced = true;
+            await abuseSubject(on(two),{subject:{issuer:'fixture',subject:'race-1'}},'erase');
+            await abuseSubject(on(two),{subject:{issuer:'fixture',subject:'race-2'}},'exclude',{reason:'Synthetic privacy objection'});
+            await two.query(`UPDATE nightmail_signin_attempts SET last_at=clock_timestamp(),attempts=attempts+1,
+              observed=jsonb_build_array(jsonb_build_object('kind','provider','value',md5('replacement'))) WHERE subject='race-3'`);
+          }
+          return result;
+        });
+        await runAbuseStage(on(one),'signIns'); hook.mock.restore(); assert.equal(raced,true);
+        assert.deepEqual((await control.query("SELECT value=md5('replacement') AS latest,seen FROM abuse_signals WHERE value IN (md5('race-1'),md5('race-2'),md5('race-3'),md5('replacement'))")).rows,[{latest:true,seen:1}]);
+      });
+
+      await t.test('deadline: cancel a slow SQL statement and resume the uncommitted row', async () => {
+        await seed(1,'slow-');
+        await control.query(`CREATE FUNCTION slow_fold() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN NEW; END $$;
+          CREATE TRIGGER slow BEFORE INSERT ON abuse_signals FOR EACH ROW EXECUTE FUNCTION slow_fold()`);
+        const start = Date.now();
+        assert.equal((await runAbuseStage(on(one),'signIns',650)).cut,'time');
+        assert.ok(Date.now()-start<650,'A slow statement stopped within its job budget.');
+        assert.equal((await control.query("SELECT FROM abuse_work_versions WHERE source_key=abuse_key('fixture','slow-1') AND failures=0")).rowCount,0);
+        await control.query('DROP TRIGGER slow ON abuse_signals');
+        assert.equal((await runAbuseStage(on(one),'signIns')).items,1);
+        // Settlement is part of a worker's hold too: leave the recoverable running lease
+        // if its status update is stalled. Its durable receipt must survive that recovery.
+        await seed(1,'settle-');
+        await control.query(`UPDATE jobs SET status='pending' WHERE type='abuse.stage.signIns';
+          CREATE TRIGGER slow_settle BEFORE UPDATE ON jobs FOR EACH ROW
+          WHEN (OLD.status='running' AND NEW.status='completed') EXECUTE FUNCTION slow_fold()`);
+        const settling = Date.now();
+        await assert.rejects(drainJobs(on(one),1,1,1000,'work'));
+        assert.ok(Date.now()-settling < 2500);
+        await control.query("DROP TRIGGER slow_settle ON jobs; UPDATE jobs SET lease_until=now()-interval '1 second' WHERE type='abuse.stage.signIns'");
+        assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+        assert.deepEqual((await control.query("SELECT seen FROM abuse_signals WHERE value=md5('settle-1')")).rows,[{seen:1}]);
+        // A busy pool must not extend a five-second job by the pool's connection timeout.
+        const pool = new pg.Pool({connectionString:FIXTURE_DATABASE_URL, max:1, options:'-c search_path='+schema+',public'});
+        const held = await pool.connect();
+        try {
+          const start = Date.now();
+          assert.equal((await runAbuseStage({...runtime,db:drizzle(pool)},'signIns',250)).cut,'time');
+          assert.ok(Date.now()-start<650);
+        } finally { held.release(); await pool.end(); }
+      });
+
+      await t.test('concurrent stages: links, membership and scores converge to the ordered run', async () => {
+        // Same source records and times in both runs: linked users own the two card-sharing workspaces.
+        // Compare evidence, memberships and scores (cluster IDs are generated). Cluster work discovered
+        // after a concurrent scorer went idle must get its own queued turn.
+        await control.query(`INSERT INTO workspaces(id,name,slug) VALUES ('wa','wa','wa'),('wb','wb','wb');
+          INSERT INTO nightmail_users(id,name,email_verified) VALUES ('ua','ua',false),('ub','ub',false);
+          INSERT INTO nightmail_oidc_identities(issuer,subject,user_id) VALUES ('fixture','ua','ua'),('fixture','ub','ub');
+          INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ('ma','wa','ua','owner'),('mb','wb','ub','owner');
+          INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,observed) SELECT 'fixture',id,'signed_in',jsonb_build_array(jsonb_build_object('kind','provider','value',md5('same'))) FROM nightmail_users;
+          INSERT INTO billing_payment_attempts(id,workspace_id,kind,status,amount_uc,idempotency_key,card_fingerprint,created_by)
+          SELECT id,id,'checkout','succeeded',0,id,'synthetic-card','fixture' FROM workspaces;
+          INSERT INTO provider_feedback_history(topic_arn,region,aws_account_id,kind) VALUES ('fixture-topic','us-east-1','111122223333','shared');
+          INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated,feedback_topic_arn)
+          SELECT id,id,'us-east-1','fixture','sender@fixture.example.org','["reader@example.net"]','[]','[]','Example','delivered',id,'{}',false,'fixture-topic' FROM workspaces;
+          INSERT INTO sending_email_events(id,workspace_id,email_id,type,provider_id,simulated) SELECT id,id,id,'accepted',id,false FROM workspaces;`);
+        await control.query("UPDATE abuse_state SET active_since=now()-interval '1 day'; UPDATE billing_payment_attempts SET created_at=now()-interval '3 hours',updated_at=now()-interval '3 hours'");
+        assert.ok((await lag()).payments! >= 10800);
+        const snap = async () => ({
+          links:(await control.query('SELECT a_type,a_id,b_type,b_id,kind,shared,pending FROM identity_links ORDER BY 1,2,3,4,5')).rows,
+          groups:(await control.query('SELECT score,band,reasons,ARRAY(SELECT e->>\'id\' FROM jsonb_array_elements(members)e ORDER BY 1) AS members FROM abuse_clusters ORDER BY 4')).rows,
+        });
+        await runAbuseStage(on(one),'signIns'); await runAbuseStage(on(one),'payments');
+        assert.equal((await runAbuseStage(on(one),'sample')).items,2);
+        await runAbuseStage(on(one),'clusters');
+        const ordered = await snap();
+        assert.equal(ordered.groups.length,1); assert.equal(ordered.groups[0].members.length,4); assert.deepEqual(ordered.links.map(l=>l.kind).sort(),['card','provider','send_domain']);
+        assert.equal((await lag()).payments,null);
+        await control.query(`TRUNCATE abuse_signals,identity_links,abuse_clusters,abuse_cluster_members,abuse_sampling;
+          DELETE FROM abuse_work_versions WHERE stage='payments' OR source_key IN (abuse_key('fixture','ua'),abuse_key('fixture','ub'))`);
+        await abuseHourly(on(control));
+        const three = await connect(), four = await connect();
+        await Promise.all([runAbuseStage(on(one),'signIns'),runAbuseStage(on(two),'payments'),runAbuseStage(on(three),'sample'),runAbuseStage(on(four),'clusters')]);
+        await Promise.all([drainJobs(on(one),12,1,5000,'work'),drainJobs(on(three),5,1,5000,'abuseSample')]);
+        await drainJobs(on(one),4,1,5000,'work');
+        assert.deepEqual(await snap(),ordered);
+      });
+
+      await t.test('lag warning: the actual oldest outstanding row opens, persists through threshold jitter, and clears on catch-up', async () => {
+        const { evaluate,emptyMemory } = await import('./src/health.js');
+        const quiet = { queues: [], late: [], failed: [], campaigns: [], counters: [] };
+        const database = { connections: 1, maxConnections: 100, longTransactions: 0, oldestTransactionSeconds: 0, slowQueries: 0, lockWaits: 0, sizeBytes: 0 };
+        let memory=emptyMemory();
+        const warnings = async () => {
+          const result= evaluate({ ...quiet, database:{ ...database, abuseBehind:await lag() } },memory,Date.now()/1000,null);
+          memory=result.rollup.memory;
+          return result.findings.filter(f=>f.kind==='abuse-monitor-behind').map(f=>[f.key,f.words]).sort();
+        };
+        await seed(1,'lag-');
+        await control.query("UPDATE nightmail_signin_attempts SET last_at=now()-interval '119 minutes' WHERE subject='lag-1'");
+        assert.deepEqual(await warnings(),[]);
+        await control.query(`UPDATE nightmail_signin_attempts SET last_at=now()-interval '121 minutes' WHERE subject='lag-1';
+          UPDATE billing_payment_attempts SET updated_at=now()-interval '3 hours' + interval '1 second' WHERE id='wa';
+          UPDATE identity_links SET pending=true; UPDATE identity_links SET pending_since=now()-interval '4 hours';
+          UPDATE abuse_clusters SET scored_at=now()-interval '5 hours 30 minutes'`);
+        assert.deepEqual(await warnings(),[
+          ['abuse-monitor-behind:cluster scoring','cluster scoring: oldest outstanding work has waited 5 h.'],
+          ['abuse-monitor-behind:payments','payments: oldest outstanding work has waited 3 h.'],
+          ['abuse-monitor-behind:pending links','pending links: oldest outstanding work has waited 4 h.'],
+          ['abuse-monitor-behind:sign-ins','sign-ins: oldest outstanding work has waited 2 h.'],
+        ]);
+        await control.query("UPDATE nightmail_signin_attempts SET last_at=now()-interval '119 minutes' WHERE subject='lag-1'");
+        assert.equal((await warnings()).length,4);
+        for (const stage of ['signIns','payments','clusters'] as const) await runAbuseStage(on(one),stage);
+        assert.deepEqual(await warnings(),[]);
+        assert.deepEqual(await warnings(),[]);
+      });
+
+      await t.test('customer writes finish while the fold of the same version is still in flight', async () => {
+        const upsert = `INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,observed) VALUES ('fixture','overlap','signed_in',
+          jsonb_build_array(jsonb_build_object('kind','provider','value',md5($1)))) ON CONFLICT(issuer,subject) DO UPDATE
+          SET attempts=nightmail_signin_attempts.attempts+1,last_at=now(),observed=excluded.observed`;
+        await control.query(upsert,['before']);
+        await control.query(`INSERT INTO billing_payment_attempts(id,workspace_id,kind,status,amount_uc,idempotency_key,card_fingerprint,created_by)
+          VALUES ('overlap','wa','checkout','pending',0,'overlap','before','fixture');
+          CREATE FUNCTION hold_fold() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(1.2); RETURN NEW; END $$;
+          CREATE TRIGGER hold_fold BEFORE INSERT ON abuse_signals FOR EACH ROW EXECUTE FUNCTION hold_fold()`);
+        const pid = (await one.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        const asleep = async () => !!(await control.query("SELECT FROM pg_stat_activity WHERE pid=$1 AND wait_event='PgSleep'",[pid])).rowCount;
+        for (const stage of ['signIns','payments'] as const) {
+          const folding = runAbuseStage(on(one),stage);
+          try {
+            const deadline = Date.now()+3000;
+            while (!await asleep() && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,2));
+            assert.ok(await asleep());
+            if (stage==='signIns') await two.query(upsert,['after']);
+            else await two.query("UPDATE billing_payment_attempts SET updated_at=now(),status='succeeded',card_fingerprint='after' WHERE id='overlap'");
+            assert.ok(await asleep(),'The request committed before the fold released any locks.');
+          } finally { await folding; }
+        }
+        await control.query('DROP TRIGGER hold_fold ON abuse_signals');
+        for (const stage of ['signIns','payments'] as const) {
+          await runAbuseStage(on(one),stage);
+          assert.equal((await runAbuseStage(on(one),stage)).items,0);
+        }
+        assert.deepEqual((await control.query("SELECT seen FROM abuse_signals WHERE kind='provider' AND value IN (md5('before'),md5('after'))")).rows,[{seen:1},{seen:1}]);
+        assert.deepEqual((await control.query("SELECT stage,count(*)::int AS n FROM abuse_work_versions WHERE source_key IN (abuse_key('fixture','overlap'),abuse_key('overlap')) GROUP BY stage ORDER BY stage")).rows,
+          [{stage:'payments',n:2},{stage:'signIns',n:2}]);
+      });
+
+      await t.test('12 sign-ins survive seven timed-out queue claims and fold exactly once on the first recovered claim', async () => {
+        await seed(12,'slowdown-');
+        await control.query(`CREATE TRIGGER slowdown BEFORE INSERT ON abuse_signals FOR EACH ROW EXECUTE FUNCTION slow_fold();
+          UPDATE jobs SET status='completed';
+          UPDATE jobs SET status='pending',payload='{}',available_at=now() WHERE id='abuse.stage.signIns'`);
+        for (const delay of [30,60,120,240,480,900,900]) {
+          assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+          const row=(await control.query("SELECT extract(epoch FROM available_at-clock_timestamp()) AS delay FROM jobs WHERE id='abuse.stage.signIns' AND status='pending'")).rows[0];
+          assert.ok(row.delay>delay-2 && row.delay<=delay+1);
+          assert.equal((await control.query('SELECT FROM abuse_work_versions WHERE failures>0')).rowCount,0);
+          await control.query("UPDATE jobs SET available_at=now() WHERE id='abuse.stage.signIns'");
+        }
+        await control.query('DROP TRIGGER slowdown ON abuse_signals');
+        assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+        assert.equal((await control.query("SELECT FROM abuse_signals WHERE seen=1 AND value IN (SELECT md5('slowdown-'||i) FROM generate_series(1,12)i)")).rowCount,12);
+        assert.equal((await control.query("SELECT status FROM jobs WHERE id='abuse.stage.signIns'")).rows[0].status,'completed');
+      });
+
+      await t.test('a poisonous sign-in and cluster are isolated; healthy peers and their alert finish in the same run', async () => {
+        await seed(6,'isolate-');
+        await control.query(`UPDATE nightmail_signin_attempts SET last_at=now()-interval '3 hours' WHERE subject='isolate-1';
+          CREATE FUNCTION reject_item() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture data fault' USING ERRCODE='23514'; END $$;
+          CREATE TRIGGER reject_signal BEFORE INSERT ON abuse_signals FOR EACH ROW WHEN (NEW.value=md5('isolate-1')) EXECUTE FUNCTION reject_item()`);
+        const isolated = await runAbuseStage(on(one),'signIns');
+        assert.equal(isolated.items,5);
+        const failures = async (stage:string) => (await control.query(`SELECT failures::int,reason,
+          round(extract(epoch FROM retry_after-clock_timestamp())/60)::int AS minutes FROM abuse_work_versions WHERE stage=$1 AND failures>0`,[stage])).rows;
+        const {abuseFailures} = await import('./src/abuse.js'), {evaluate,emptyMemory} = await import('./src/health.js');
+        const warnings = async () => {
+          const [{f}] = (await drizzle(control).execute<{f:Record<string,{count:number;seconds:number}>}>(sql`SELECT ${abuseFailures} AS f`)).rows;
+          return evaluate({queues:[],late:[],failed:[],campaigns:[],counters:[],database:{connections:1,maxConnections:100,longTransactions:0,
+            oldestTransactionSeconds:0,slowQueries:0,lockWaits:0,sizeBytes:0,abuseFailures:f}},emptyMemory(),Date.now()/1000,null).findings.filter(x=>x.kind==='abuse-item-failing');
+        };
+        const due = (stage:string) => control.query("UPDATE abuse_work_versions SET retry_after=now()-interval '1 second' WHERE stage=$1 AND failures>0",[stage]);
+        const checkSchedule = async (stage:'signIns'|'links'|'scores') => {
+          const job=stage==='signIns' ? 'signIns' : 'clusters';
+          await control.query("UPDATE abuse_work_versions SET first_failed_at=now()-interval '12 minutes' WHERE stage=$1 AND failures>0",[stage]);
+          for (const [i,minutes] of [15,30,60,60,60].entries()) {
+            if (i) { await due(stage); await runAbuseStage(on(one),job); }
+            await runAbuseStage(on(one),job); // Not due: repeated starts don't consume an attempt.
+            assert.deepEqual(await failures(stage),[{failures:i+1,reason:'23514',minutes}]);
+            const finding=(await warnings()).find(x=>x.key==='abuse-item-failing:'+stage);
+            assert.equal(finding?.value,1); assert.match(finding!.words,/Oldest failure: 12 min/);
+            if (stage!=='signIns') assert.match(finding!.words,/no alert can be raised/);
+          }
+        };
+        await checkSchedule('signIns');
+        assert.ok((await lag())['sign-ins']!>=10800);
+        await control.query('DROP TRIGGER reject_signal ON abuse_signals');
+        await due('signIns');
+        assert.equal((await runAbuseStage(on(one),'signIns')).items,1);
+        assert.equal((await lag())['sign-ins'],null);
+        assert.deepEqual(await warnings(),[]);
+
+        // Two unrelated components, both at review. Reject only the first one's membership writes.
+        await control.query(`INSERT INTO abuse_signals(entity_type,entity_id,kind,value,first_at,last_at)
+          SELECT 'user',prefix||i,kind,CASE WHEN kind='flag' THEN 'disposable_email' ELSE md5(prefix) END,now(),now()
+          FROM unnest(ARRAY['broken','healthy']) prefix,generate_series(1,2)i,unnest(ARRAY['provider','email_alias','flag']) kind;
+          INSERT INTO identity_links(a_type,a_id,b_type,b_id,kind,shared,first_at,last_at,pending_since)
+          SELECT 'user',prefix||1,'user',prefix||2,kind,1,now(),now(),now()-age FROM
+          (VALUES ('broken',interval '3 hours'),('healthy',interval '1 hour')) p(prefix,age),unnest(ARRAY['provider','email_alias']) kind;
+          CREATE TRIGGER reject_component BEFORE INSERT ON abuse_cluster_members FOR EACH ROW WHEN (NEW.entity_id='broken1') EXECUTE FUNCTION reject_item()`);
+        assert.ok((await runAbuseStage(on(one),'clusters')).items>0);
+        await checkSchedule('links');
+        assert.ok((await lag())['pending links']!>=10800);
+        const jobsFor = async (member:string) => (await control.query(`SELECT a.id,count(j.id)::int AS jobs FROM abuse_alerts a LEFT JOIN jobs j
+          ON j.type='abuse.alert' AND j.payload->>'alertId'=a.id WHERE $1=ANY(a.members) GROUP BY a.id`,[member])).rows;
+        assert.deepEqual((await jobsFor('user:healthy1')).map(r=>r.jobs),[1]);
+        assert.deepEqual(await jobsFor('user:broken1'),[]);
+        await control.query("UPDATE jobs SET status='completed'; UPDATE jobs SET status='pending',available_at=now() WHERE id='abuse.stage.clusters'");
+        assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+        assert.equal((await control.query("SELECT FROM jobs WHERE id='abuse.stage.clusters' AND status='pending' AND available_at>now()+interval '59 minutes'")).rowCount,1);
+        await control.query("DROP TRIGGER reject_component ON abuse_cluster_members"); await due('links');
+        await control.query("UPDATE jobs SET available_at=now() WHERE id='abuse.stage.clusters'");
+        assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+        assert.equal((await control.query("SELECT status FROM jobs WHERE id='abuse.stage.clusters'")).rows[0].status,'completed');
+        assert.deepEqual((await jobsFor('user:broken1')).map(r=>r.jobs),[1]);
+        assert.equal((await lag())['pending links'],null);
+        assert.deepEqual(await warnings(),[]);
+        // Scoring an existing cluster, without new sign-ins or new edges.
+        await control.query(`UPDATE abuse_clusters SET score_requested_at=now()-interval '1 minute' WHERE members @> '[{"id":"broken1"}]';
+          CREATE TRIGGER reject_score BEFORE INSERT ON abuse_cluster_members FOR EACH ROW WHEN (NEW.entity_id='broken1') EXECUTE FUNCTION reject_item()`);
+        await runAbuseStage(on(one),'clusters');
+        await checkSchedule('scores');
+        await control.query('DROP TRIGGER reject_score ON abuse_cluster_members');
+        await due('scores'); await runAbuseStage(on(one),'clusters');
+        assert.deepEqual(await warnings(),[]);
+        assert.equal((await lag())['cluster scoring'],null);
+        // Once retention drops an erasure's floor and receipts, the financial row
+        // can still exist. Reading it cannot recreate the expired card evidence.
+        await control.query("UPDATE abuse_state SET active_since=now()-interval '1 year'");
+        await control.query(`INSERT INTO billing_payment_attempts(id,workspace_id,kind,status,amount_uc,idempotency_key,card_fingerprint,created_by,created_at,updated_at)
+          VALUES('aged','wa','checkout','succeeded',0,'aged','aged-card','fixture',now()-interval '92 days',now()-interval '91 days')`);
+        const aged = await runAbuseStage(on(one),'payments');
+        assert.equal(aged.items,1); assert.equal(aged.added,0);
+      });
+
+      await t.test('minute seeding, bounded no-progress retries and the reserved customer lane', async () => {
+        const { seedAbuseStages } = await import('./src/abuse.js');
+        await control.query('TRUNCATE jobs');
+        await Promise.all([seedAbuseStages(on(one)),seedAbuseStages(on(two))]);
+        assert.equal((await control.query("SELECT FROM jobs WHERE status='pending'")).rowCount,4);
+        assert.equal(await drainJobs(on(one),2,2,500,'customerWork'),0);
+        const { processJobs } = await import('./src/jobs.js');
+        let started!: () => void, finish!: () => void;
+        const held = new Promise<void>(resolve => { started=resolve; }), release = new Promise<void>(resolve => { finish=resolve; });
+        const general = processJobs(on(one),async () => async () => { started(); await release; },1,1,500,'work');
+        try {
+          await held;
+          await control.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES ('customer-work','fixture.customer','platform','{}')");
+          let served=0;
+          await processJobs(on(two),{'fixture.customer':async()=>{served++;}},2,2,500,'customerWork');
+          assert.equal(served,1);
+          assert.equal((await control.query("SELECT FROM jobs WHERE type LIKE 'abuse.stage.%' AND status='running'")).rowCount,1);
+        } finally { finish(); await general; }
+        await control.query("UPDATE jobs SET status='completed'");
+        // Force each stage to yield before its first write. Advance only the pending job's
+        // due time; the delay and counter are calculated and settled by real job handlers.
+        for (const [i,stage] of (['signIns','payments','clusters','sample'] as const).entries()) {
+          const id = 'abuse.stage.'+stage, pool=stage==='sample'?'abuseSample':'work';
+          await control.query("UPDATE jobs SET status='pending',available_at=now(),payload='{}' WHERE id=$1",[id]);
+          await two.query('SELECT pg_advisory_lock(327461638,$1)',[2+i]);
+          try {
+            let scheduled = 0;
+            for (const [turn,delay] of [30,60,120,240,480,900,900,900,900].entries()) {
+              assert.equal(await drainJobs(on(one),1,1,500,pool),1);
+              const record = async () => (await control.query("SELECT extract(epoch FROM available_at-clock_timestamp())::float8 AS delay,payload,available_at::text AS at FROM jobs WHERE id=$1 AND status='pending'",[id])).rows[0];
+              const next = await record();
+              assert.ok(next.delay<=delay+1 && next.delay>=delay-2);
+              if (stage==='signIns') assert.equal(next.payload.batchSize,Math.max(1,16/2**(turn+1)));
+              scheduled+=delay;
+              if (turn===7) assert.ok(scheduled>=3600,'A ninth stalled job cannot start in the first hour.');
+              await seedAbuseStages(on(one));
+              assert.equal((await record()).at,next.at);
+              assert.equal(await drainJobs(on(one),1,1,500,pool),0);
+              await control.query('UPDATE jobs SET available_at=now() WHERE id=$1',[id]);
+            }
+          } finally { await two.query('SELECT pg_advisory_unlock(327461638,$1)',[2+i]); }
+          await control.query("UPDATE jobs SET status='completed' WHERE id=$1",[id]);
+        }
+        await seedAbuseStages(on(one));
+        assert.equal((await control.query("SELECT FROM jobs WHERE status='pending'")).rowCount,0,'The minute tick never restarts a finished walk.');
+
+        await seed(224,'timeout-');
+        await control.query(`CREATE TRIGGER always_slow BEFORE INSERT ON abuse_signals FOR EACH ROW EXECUTE FUNCTION slow_fold();
+          UPDATE jobs SET status='pending',available_at=now(),payload='{}' WHERE id='abuse.stage.signIns'`);
+        await drainJobs(on(one),1,1,1000,'work');
+        const delayed = (await control.query("SELECT status,available_at>now() AS delayed,payload FROM jobs WHERE id='abuse.stage.signIns'")).rows[0];
+        assert.equal(delayed.status,'pending'); assert.ok(delayed.delayed && delayed.payload.stalls===1 && delayed.payload.batchSize<16);
+        assert.equal((await control.query("SELECT FROM abuse_signals WHERE value IN (SELECT md5('timeout-'||i) FROM generate_series(1,224)i)")).rowCount,0);
+        await control.query("DROP TRIGGER always_slow ON abuse_signals; UPDATE jobs SET available_at=now() WHERE id='abuse.stage.signIns'");
+        await drainJobs(on(one),1,1,1000,'work');
+        const recovered = (await control.query("SELECT status,payload FROM jobs WHERE id='abuse.stage.signIns'")).rows[0];
+        assert.equal(recovered.status,'pending'); assert.equal(recovered.payload.batchSize,16); assert.equal(recovered.payload.stalls,0);
+        await drainJobs(on(one),4,1,1000,'work');
+        assert.equal((await control.query("SELECT FROM abuse_signals WHERE seen=1 AND value IN (SELECT md5('timeout-'||i) FROM generate_series(1,224)i)")).rowCount,224);
+      });
+
+      await t.test('a partial discovery pass resumes; a moved tuple, an erasure and a late commit behind its scan are safe', async () => {
+        await seed(3,'physical-');
+        await control.query(`INSERT INTO nightmail_signin_attempts(issuer,subject,outcome)
+          SELECT 'unobserved',repeat('x',150)||i,'not_approved' FROM generate_series(1,6000)i`);
+        const block = async () => (await control.query('SELECT abuse_stage_signin_page() AS next')).rows[0].next;
+        assert.equal(Number(await block()),64);
+        // Change a staged tuple before the next process finishes the pass.
+        await control.query("UPDATE nightmail_signin_attempts SET attempts=attempts+1,observed=jsonb_build_array(jsonb_build_object('kind','provider','value',md5('moved'))) WHERE subject='physical-1'");
+        await abuseSubject(on(two),{subject:{issuer:'fixture',subject:'physical-2'}},'erase');
+        assert.equal((await control.query("SELECT FROM abuse_signin_queue WHERE source_key=abuse_key('fixture','physical-2')")).rowCount,0);
+        await runAbuseStage(on(two),'signIns');
+        assert.equal((await control.query("SELECT FROM abuse_signals WHERE value IN (md5('physical-1'),md5('physical-2'))")).rowCount,0);
+        assert.deepEqual((await control.query("SELECT seen FROM abuse_signals WHERE value IN (md5('moved'),md5('physical-3'))")).rows,[{seen:1},{seen:1}]);
+        // A source transaction invisible throughout a complete pass can commit
+        // behind the scan. The next sweep starts at block zero, not a timestamp.
+        await one.query('BEGIN');
+        try {
+          await one.query(`INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,observed,last_at)
+            VALUES ('fixture','late-commit','signed_in',jsonb_build_array(jsonb_build_object('kind','provider','value',md5('late-commit'))),now()-interval '1 minute')`);
+          assert.equal((await runAbuseStage(on(two),'signIns')).items,0);
+          await one.query('COMMIT');
+        } catch (error) { await one.query('ROLLBACK'); throw error; }
+        assert.equal((await runAbuseStage(on(two),'signIns')).items,1);
+        assert.equal((await runAbuseStage(on(two),'signIns')).items,0);
+      });
+
+      await t.test('10,000 outstanding data failures share 128 retries per hour and do not block new sign-ins', async () => {
+        await seed(10000,'retry-load-');
+        await control.query(`UPDATE nightmail_signin_attempts SET observed='{}' WHERE subject LIKE 'retry-load-%';
+          INSERT INTO abuse_work_versions(stage,source_key,version_at,version_count,failures,reason,first_failed_at,retry_after)
+          SELECT 'signIns',abuse_key(issuer,subject),last_at,attempts,3,'INVALID_OBSERVATION',now()-interval '1 day',now()-interval '1 hour'
+          FROM nightmail_signin_attempts WHERE subject LIKE 'retry-load-%';
+          UPDATE abuse_retry_slots SET available_at='-infinity' WHERE stage='signIns'`);
+        const retried=async () => (await control.query("SELECT count(*)::int AS n FROM abuse_work_versions WHERE failures=4 AND stage='signIns'")).rows[0].n;
+        for (let quarter=1; quarter<=4; quarter++) {
+          await seed(1,'retry-peer-'+quarter+'-');
+          if (quarter>1) await control.query("UPDATE abuse_retry_slots SET available_at=available_at-interval '15 minutes' WHERE stage='signIns'");
+          assert.equal((await runAbuseStage(on(one),'signIns')).items,1,'Fresh data can fold while permits are being used.');
+          assert.equal(await retried(),32*quarter);
+          assert.equal((await control.query("SELECT FROM abuse_retry_slots WHERE stage='signIns' AND available_at>now()+interval '14 minutes'")).rowCount,32);
+          await runAbuseStage(on(one),'signIns');
+          assert.equal(await retried(),32*quarter,'An extra stage claim grants no retries.');
+        }
+        assert.equal((await control.query("SELECT FROM abuse_work_versions WHERE stage='signIns' AND failures>0")).rowCount,10000);
+        await control.query("DELETE FROM nightmail_signin_attempts WHERE subject LIKE 'retry-load-%'");
+        const {abuseFailures}=await import('./src/abuse.js');
+        assert.equal((await drizzle(control).execute(sql`SELECT ${abuseFailures} AS f`)).rows[0].f,null,'Gone sources immediately leave Health.');
+        await control.query("DELETE FROM abuse_signin_queue WHERE retry_after IS NOT NULL; DELETE FROM abuse_work_versions WHERE failures>0");
+      });
+    });
+  });
+  test('abuse monitoring: off until its activation time, then prospective only; a sign-in adds pseudonymised facts to its own log row and nothing else; only accepted Hosted mail made after activation is sampled; every value is a keyed hash or from a closed list; leased, bounded stage jobs; nothing runs on the send path', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const abuseModule = await import('./src/abuse.js'), { sql } = await import('drizzle-orm'), { loadConfig } = await import('./src/config.js');
       const stored = async () => (await db.query('SELECT count(*)::int AS n FROM abuse_signals')).rows[0].n as number, before = await stored();
@@ -33805,8 +34237,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash,rendered,created_at) VALUES ($1,$2,'camp_fixture',1,'{}','fixture',$3,now()-interval '1 minute')`, [oldReview, early, JSON.stringify({ html: offer(1) })]);
       await mail({ workspace: early, review: oldReview });                                        // A campaign frozen before monitoring started.
       assert.deepEqual(h.first, { signIns: 0, payments: 0, sampled: 0, added: 0 });
-      const state = async () => (await db.query(`SELECT active_since=now() AS floor_now,lease_until,cursors FROM abuse_state WHERE id='monitor'`)).rows[0];
-      assert.deepEqual(await state(), { floor_now: true, lease_until: null, cursors: { workspaces: '' } });
+      const state = async () => (await db.query(`SELECT active_since=now() AS floor_now,lease_until='infinity' AS retired,cursors FROM abuse_state WHERE id='monitor'`)).rows[0];
+      assert.deepEqual(await state(), { floor_now: true, retired: true, cursors: { workspaces: '' } });
       const values = async (id: string, kind: string) => (await signals('workspace', id)).filter(s => s.kind === kind).map(s => s.value);
 
       // Sign-ups. A is refused. B is the same Gmail mailbox under another alias, from the same /24 and browser, and
@@ -33843,21 +34275,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await mail({ workspace: byo, html: offer(13), topic: byoTopic });                          // Sent through a connected account before the workspace moved to Hosted.
       await h.command('--workspace', excludedWorkspace, '--exclude', '--reason', 'Synthetic agreement', '--source', 'agreement');
       await mail({ workspace: excludedWorkspace, html: offer(14) });
-      await payment(wid, 'fp_abuse_fixture'); await payment(twin, 'fp_abuse_fixture'); await payment(twin, null, 'clock_timestamp()', 'failed'); await payment(excludedWorkspace, 'fp_abuse_fixture');
+      await payment(wid, 'fp_abuse_fixture'); await payment(twin, 'fp_abuse_fixture'); await payment(twin, null, 'clock_timestamp()', 'failed'); await payment(excludedWorkspace, 'fp_excluded_fixture');
       const madeBy = (await db.query('SELECT clock_timestamp() AS at')).rows[0].at as Date;
       const warnings = t.mock.method(console, 'warn', () => {});
       const queries = t.mock.method(db, 'query');
       const run = await h.hourly();
-      const statements = queries.mock.calls.map(call => String((call.arguments[0] as { text?: string })?.text ?? call.arguments[0]));
+      const reads = await Promise.all(queries.mock.calls.map(async call => (await call.result as pg.QueryResult | undefined)?.rows));
       queries.mock.restore();
-      assert.deepEqual(run, { signIns: 9, payments: 4, sampled: 3, added: 8 + 7 + 6 + 8 + 2 + 18 });
-      assert.equal(warnings.mock.calls.filter(call => String(call.arguments[0]).includes('"step":"signIn"')).length, 5, 'Each malformed row is passed over.');
-      // Bounded: every statement of the run sits in a short transaction that set its statement and lock timeouts first,
-      // and each writing transaction took its entity's lock.
-      assert.ok(statements.length < 400, `${statements.length} statements`);
-      assert.equal(statements.filter(text => /set_config\('statement_timeout'/.test(text)).length, statements.filter(text => /^savepoint/i.test(text)).length);
-      assert.equal(statements.filter(text => /INSERT INTO abuse_signals/.test(text)).length <= statements.filter(text => /pg_advisory_xact_lock/.test(text)).length, true);
-
+      assert.deepEqual(run, { signIns: 4, payments: 4, sampled: 3, added: 8 + 7 + 6 + 8 + 2 + 18 });
+      assert.equal(warnings.mock.calls.filter(call => String(call.arguments[0]).includes('"reason":"INVALID_OBSERVATION"')).length, 5, 'Each malformed row is deferred without storing its contents.');
       // Sign-ins: a refused one sits under a keyed hash of its subject; an admitted one on its user.
       assert.deepEqual(await kinds('attempt', attemptOf('sub-a')), ['asn', 'browser', 'email', 'email_alias', 'flag:plus_alias', 'flag:waitlisted', 'net', 'provider']);
       const a = await signals('attempt', attemptOf('sub-a')), userB = await signals('user', b), of = (rows: typeof a, kind: string) => rows.filter(s => s.kind === kind).map(s => s.value);
@@ -33892,7 +34318,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // simulated, a connected account's, anything made or accepted before monitoring started, and an excluded
       // workspace, whose card's fingerprint is not even read.
       for (const id of [skipped, simulated, byo, early, excludedWorkspace]) assert.deepEqual(await signals('workspace', id), [], id);
-      assert.ok(statements.some(text => /CASE WHEN NOT[\s\S]*card_fingerprint END/.test(text)));
+      const visible = JSON.stringify(reads);
+      assert.ok(visible.includes('fp_abuse_fixture') && !visible.includes('fp_excluded_fixture'),'Only eligible fingerprints reach the folding process.');
       // Nothing stored names an address, a network, a user agent, a card, a domain, a recipient or any wording.
       const everything = JSON.stringify((await db.query('SELECT * FROM abuse_signals')).rows) + JSON.stringify((await db.query('SELECT * FROM abuse_sampling')).rows) + JSON.stringify((await db.query('SELECT * FROM abuse_state')).rows);
       for (const secret of ['abusefixture', 'abuse.fixture', 'casey', 'jane', 'burner', 'mailinator', '198.51.100', '203.0.113', 'Macintosh', 'AppleWebKit', 'fp_abuse', 'seed-inbox', 'abuse-recipient', 'example.com', 'example.org', 'promo-fixture', 'pixel', 'tracker', 'warehouse', 'jacket', 'sign-in code', 'gh-sub', 'sub-a'])
@@ -33908,27 +34335,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([kept.length, kept.includes(abuse.signalHash(runtime.config, 'net', '192.0.2.0/24')), kept.includes((await db.query(`SELECT md5('flood100') AS v`)).rows[0].v), kept.includes((await db.query(`SELECT md5('flood1') AS v`)).rows[0].v),
         (await signals('attempt', attemptOf('sub-flood'))).length], [100, true, true, false, 0], 'Trimmed after the adoption, in the same transaction.');
 
-      // A second run continues from its cursors; a run in progress makes the next one return; out of time, it reads nothing.
-      assert.match((await state()).cursors.payments.id, /^bpa-/);
+      // A previous release still holding the legacy lease finishes before the new jobs start.
       await db.query(`UPDATE abuse_state SET lease_until=now()+interval '1 minute'`);
       await mail({ workspace: wid, subject: 'Your sign-in code', text: reset });
       assert.equal(await h.hourly(), null);
       await db.query(`UPDATE abuse_state SET lease_until=now()-interval '1 second'`);
-      assert.deepEqual(await abuse.abuseHourly(runtime, { budgetMs: -1 }), { signIns: 0, payments: 0, sampled: 0, added: 0 });
-      // Out of time is never silent: the stages it stopped with work left are on its state (and logged), and runs in a row
-      // that ran out of time are counted for Health; a run that finishes its work starts the count again.
-      const ran = async () => (await db.query(`SELECT last_run,cut_runs FROM abuse_state WHERE id='monitor'`)).rows[0] as { last_run: { cuts: string[]; stages: Record<string, number> }; cut_runs: number };
-      const outOfTime = await ran();
-      assert.ok(outOfTime.cut_runs >= 1 && outOfTime.last_run.cuts.includes('sample:time') && outOfTime.last_run.cuts.includes('clusters:time'), JSON.stringify(outOfTime));
       assert.deepEqual(await h.hourly(), { signIns: 0, payments: 0, sampled: 1, added: 3 });
-      const finished = await ran();
-      assert.deepEqual([finished.cut_runs, finished.last_run.cuts, Object.keys(finished.last_run.stages).sort()], [0, [], ['alerts', 'clusters', 'payments', 'sample', 'signIns']]);
-      // A writer that cannot get its entity's lock (the privacy command holds it) gives up at the lock timeout and moves on.
+      // A busy subject is skipped for this pass; the other subject still progresses.
       const other = await fixtureDatabase(t);
       await other.query('BEGIN'); await other.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`abuse:subject:${issuer} sub-held`]);
       await signIn('sub-held', 'held@abuse-c.example.com', '192.0.2.50'); await signIn('sub-after', 'after@abuse-c.example.com', '192.0.2.51');
       const blockedAt = Date.now();
-      assert.deepEqual(await h.hourly(), { signIns: 2, payments: 0, sampled: 0, added: 7 });
+      assert.deepEqual(await h.hourly(), { signIns: 1, payments: 0, sampled: 0, added: 7 });
       assert.ok(Date.now() - blockedAt < 3000, `gave up after ${Date.now() - blockedAt} ms`);
       await other.query('ROLLBACK');
       assert.deepEqual([(await signals('attempt', attemptOf('sub-held'))).length, (await signals('attempt', attemptOf('sub-after'))).length], [0, 7]);
@@ -33962,10 +34380,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const admitted = admission.mock.calls.map(call => String((call.arguments[0] as { text?: string })?.text ?? call.arguments[0]));
       admission.mock.restore();
       assert.ok(admitted.length > 0 && !admitted.some(text => /abuse_|observed/.test(text)), 'Admission reads and writes nothing of abuse monitoring.');
-      // A database that is down: logged by code, and the job returns.
+      // A failed tick is visible to hourly upkeep, which logs the failure and continues its other tasks.
       const down = { config: runtime.config, db: { transaction: async () => { throw new Error('down'); } } } as unknown as typeof runtime;
-      assert.equal(await abuse.abuseHourly(down), null);
-      assert.ok(warnings.mock.calls.some(call => String(call.arguments[0]).includes('"step":"lease"')));
+      await assert.rejects(abuse.abuseHourly(down), /down/);
       warnings.mock.restore();
     });
   });
@@ -33987,7 +34404,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       //    Even with every cursor gone (the sampler's position, the job's cursors), nothing observed before the erasure returns.
       await db.query('DELETE FROM abuse_sampling WHERE workspace_id=$1', [workspaceId]); await db.query(`UPDATE abuse_state SET cursors='{}'`);
       const reread = await h.hourly();
-      assert.deepEqual([reread!.payments > 0 && reread!.signIns > 0, await count('workspace', workspaceId)], [true, 0], 'The payment and the mail were read again and refused by the floor.');
+      assert.deepEqual([reread!.payments === 0 && reread!.signIns === 0, await count('workspace', workspaceId)], [true, 0], 'Receipts survive a cursor reset; the sampler still honours the floor.');
       //    What happens after the erasure is recorded again.
       await mail({ workspace: workspaceId, html: offer(2) }); await payment(workspaceId, 'fp_abuse_erased');
       await h.hourly();
@@ -45153,18 +45570,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const { SUPPORT_AI } = await import('./src/health-thresholds.js'), over = SUPPORT_AI.dailyLineUsd + 11.234;
     assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, supportAiToday: SUPPORT_AI.dailyLineUsd - 0.01 } }), []);
     assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, supportAiToday: over } }), [`support-ai-cost warning ${over}: $${over.toFixed(2)} since midnight UTC, past the $${SUPPORT_AI.dailyLineUsd.toFixed(2)} daily line.`]);
-    // Abuse alerts that should have gone out and have not, and the hourly abuse job out of time three runs in a row (health-thresholds.ts ABUSE).
-    // Abuse alerts that need a look: a warning; critical while a high alert is unposted over an hour. The monitor behind:
-    // a sign-in waiting over two hours to be read (how far behind, in words), or the job out of time three runs in a row.
-    const abuse = (undelivered: { late: number; failed: number; expired: number; high: number; unconfirmed: number }, behind: { runs: number; cuts: string[]; signInsWaiting: number; signInsBehindSeconds: number | null }) =>
-      lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: undelivered, abuseBehind: behind } });
-    assert.deepEqual(abuse({ late: 0, failed: 0, expired: 0, high: 0, unconfirmed: 0 }, { runs: 2, cuts: ['signIns:time'], signInsWaiting: 3, signInsBehindSeconds: 7_000 }), []);
-    assert.deepEqual(abuse({ late: 0, failed: 0, expired: 0, high: 0, unconfirmed: 0 }, { runs: 0, cuts: [], signInsWaiting: 0, signInsBehindSeconds: null }), []);
-    assert.deepEqual(abuse({ late: 1, failed: 0, expired: 0, high: 0, unconfirmed: 1 }, { runs: 0, cuts: [], signInsWaiting: 112, signInsBehindSeconds: 98_190 }),
-      ['abuse-alerts-undelivered warning 2: 2 not delivered: 1 unposted over 60 minutes, 1 posted but unconfirmed (Slack didn\'t answer; check the channel).',
-        'abuse-monitor-behind warning 98190: sign-ins are 27.3 h behind: 112 waiting to be read, the oldest for 27.3 h.']);
-    assert.deepEqual(abuse({ late: 1, failed: 1, expired: 1, high: 1, unconfirmed: 0 }, { runs: 3, cuts: ['signIns:time', 'clusters:time'], signInsWaiting: 2, signInsBehindSeconds: 600 }),
-      ['abuse-alerts-undelivered critical 3: 3 not delivered (1 high, unposted): 1 unposted over 60 minutes, 1 failed, 1 expired unposted.', 'abuse-monitor-behind warning 600: the hourly job ran out of time 3 runs in a row (last stopped: `signIns:time`, `clusters:time`).']);
+    const lag = (seconds: number | null) => lines({ ...quiet(), database: { ...quiet().database!, abuseBehind: { 'sign-ins': seconds } } });
+    assert.deepEqual(lag(7200), []);
+    assert.deepEqual(lag(7201), ['abuse-monitor-behind:sign-ins warning 7201: sign-ins: oldest outstanding work has waited 2 h.']);
+    assert.equal(lag(7199).length,1);
+    assert.deepEqual(lag(null), []);
+    assert.deepEqual(lag(7199), []);
+    const abuseDelivery = (high: number, unconfirmed: number) => lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: { late: 1, failed: high, expired: high, high, unconfirmed } } });
+    assert.deepEqual(abuseDelivery(0,1), ["abuse-alerts-undelivered warning 2: 2 not delivered: 1 unposted over 60 minutes, 1 posted but unconfirmed (Slack didn't answer; check the channel)."]);
+    assert.deepEqual(abuseDelivery(1,0), ['abuse-alerts-undelivered critical 3: 3 not delivered (1 high, unposted): 1 unposted over 60 minutes, 1 failed, 1 expired unposted.']);
   });
 
   test('MX health: warnings stay on Health; critical opens, reminders and long recoveries are single plain Slack lines; short flaps stay quiet across ticks; operator and self-hosted access', async t => {

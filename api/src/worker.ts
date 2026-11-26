@@ -527,7 +527,9 @@ export default {
       });
       return;
     }
-    const hooks = batch.queue === env.WEBHOOK_QUEUE_NAME, pool = hooks ? 'webhooks' : 'work';
+    const hooks = batch.queue === env.WEBHOOK_QUEUE_NAME;
+    const sample = !hooks && batch.messages.some(m => (m.body as { kind?: string } | null)?.kind === 'abuse-sample');
+    const pool = hooks ? 'webhooks' : sample ? 'abuseSample' : 'work';
     if (!hooks && batch.queue !== queueName(env, 'WORK_QUEUE_NAME', 'bane-work')) {
       core.log('error', { code: 'UNKNOWN_QUEUE', queue: batch.queue });
       batch.retryAll();
@@ -538,7 +540,7 @@ export default {
       // Orchestration only (mail is dispatched by Durable Objects): a longer budget lets a campaign's
       // prepare → expand → finish chain run inside one invocation instead of one queue hop per step.
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
-      const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
+      const outcome = await followDueJobs(runtime, () => sample ? drainJobs(runtime,1,1,1000,pool) : drainJobs(runtime,100,concurrency,10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: sample ? 'abuse-sample' : 'wake' }, { delaySeconds }), sample ? 0 : 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
       // A campaign's copies are screened in these drains: their repeats go to the second classifier's queue under
       // waitUntil, so the acknowledgement below never waits for that queue.
@@ -626,8 +628,11 @@ export default {
           await flushCounters(health.db); await healthTick(health, { queues: queues.sort((a,b)=>a.name<b.name?-1:1) });
         });
       }
+      if (runtime.config.abuseMonitoring) try { await (await import('./abuse.js')).seedAbuseStages(runtime); }
+      catch { core.log('warn',{code:'ABUSE_STAGE_SEED_FAILED'}); }
       // Minute cron: recover orchestration jobs whose wake was lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,'work'), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }),0,'work');
+      if (runtime.config.abuseMonitoring) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WAKE_QUEUE.send({kind:'abuse-sample'},{delaySeconds}),0,'abuseSample');
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
       // Fold sending_campaign_tallies and sending_metrics_hourly delta rows in bounded chunks every minute.
       try { await (await core.wrapModuleLoad(() => import('./sending-tallies.js'))).foldSendingTallies(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'SENDING_TALLIES_FOLD_FAILED' }); }

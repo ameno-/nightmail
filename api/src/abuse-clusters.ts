@@ -1,9 +1,9 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { bounded, monitoring, rare, utc, workspaceExcluded, type Entity, type Hosted } from './abuse.js';
+import { bounded, graphLock, isolateItem, workOrder, runnableSeed, lockClusterMembers, type WorkVersion, type AbuseTx, monitoring, rare, utc, workspaceExcluded, type Entity, type Hosted } from './abuse.js';
 import { operatorContext, recordAudit } from './audit.js';
 import { RATES } from './billing/rates.js';
-import { errors, log, notFound, response, security, type App, type Ctx, type DbExecutor } from './core.js';
+import { errors, notFound, response, security, type App, type Ctx } from './core.js';
 import { operatorActor, type OperatorIdentity } from './operator.js';
 
 // Abuse monitoring, part 2: the groups ("clusters") that accounts and workspaces form when they share enough signals,
@@ -97,7 +97,7 @@ async function gather(runtime: Hosted, seed: Entity): Promise<Component> {
 type WorkspaceFacts = { id: string; name: string; created_at: string; position: { mode?: string; freeSentLeft?: number; freeReceivedLeft?: number } | null; exempt: boolean; paid: boolean; step: string | null; daily_limit: number | null;
   sending: string | null; paused: boolean; screened: number; rejected: number; failed_payments: number; disputes: number; fraud_warning: boolean; fast_first_send: boolean };
 /** What scoring and the operator's view read about the member workspaces, live: plan, this month's free use, standing, payments. */
-async function workspaceFacts(tx: DbExecutor, ids: string[]) {
+async function workspaceFacts(tx: AbuseTx, ids: string[]) {
   if (!ids.length) return [];
   return (await tx.execute<WorkspaceFacts>(sql`SELECT w.id,w.name,${utc(sql`w.created_at`)} AS created_at,billing_position(w.id) AS position,w.exempt_hosted_quotas AS exempt,
       EXISTS (SELECT FROM billing_ledger b WHERE b.workspace_id=w.id AND b.kind='topup') AS paid,s.step,s.daily_limit,pc.kind AS sending,coalesce(pc.paused_at IS NOT NULL,false) AS paused,
@@ -177,13 +177,14 @@ export type ClusterChange = { id: string; score: number; band: Band; reasons: Re
  * members were in; the others merge into it. A component of fewer than two accounts is no cluster: what was stored for
  * it is removed, and the members left over are queued to be grouped again. Returns the stored cluster, or null.
  */
-export async function recluster(runtime: Hosted, seed: Entity): Promise<ClusterChange | null> {
+async function recluster(runtime: Hosted, seed: Entity): Promise<ClusterChange | null> {
   const component = await gather(runtime, seed), scored = await score(runtime, component), valid = scored.accounts.length >= 2;
   const members = component.members, workspaces = members.filter(member => member.type === 'workspace').map(member => member.id);
   return bounded(runtime, async tx => {
     const { rows: stored } = await tx.execute<{ id: string; score: number; band: Band; peak: number; members: Entity[] }>(sql`SELECT c.id,c.score,c.band,c.peak,c.members FROM abuse_clusters c
       WHERE c.id IN (SELECT m.cluster_id FROM abuse_cluster_members m WHERE (m.entity_type,m.entity_id) IN (${pairsOf(members)})) ORDER BY c.first_at,c.id FOR UPDATE`);
     const kept = valid ? stored[0] : undefined, left = stored.flatMap(cluster => cluster.members).filter(member => !members.some(m => keyOf(m) === keyOf(member)));
+    await lockClusterMembers(tx,[...members,...left]);
     const gone = stored.filter(cluster => cluster.id !== kept?.id).map(cluster => cluster.id);
     if (gone.length) await tx.execute(sql`DELETE FROM abuse_clusters WHERE id=ANY(${sql.param(gone)}::text[])`);
     // Grouped now: the links of what was walked. Members a cluster lost are grouped again from their own links.
@@ -195,7 +196,7 @@ export async function recluster(runtime: Hosted, seed: Entity): Promise<ClusterC
     await tx.execute(sql`INSERT INTO abuse_clusters(id,score,band,peak,accounts,workspaces,reasons,members,edges) VALUES(${id},${scored.score},${band},${scored.score},${scored.accounts.length},${workspaces.length},
         ${JSON.stringify(scored.reasons)}::jsonb,${JSON.stringify(members)}::jsonb,${JSON.stringify(component.edges)}::jsonb)
       ON CONFLICT (id) DO UPDATE SET score=excluded.score,band=excluded.band,peak=greatest(abuse_clusters.peak,excluded.peak),accounts=excluded.accounts,workspaces=excluded.workspaces,reasons=excluded.reasons,
-        members=excluded.members,edges=excluded.edges,scored_at=now(),changed_at=CASE WHEN ${changed} THEN now() ELSE abuse_clusters.changed_at END`);
+        members=excluded.members,edges=excluded.edges,scored_at=now(),score_requested_at=NULL,changed_at=CASE WHEN ${changed} THEN now() ELSE abuse_clusters.changed_at END`);
     await tx.execute(sql`DELETE FROM abuse_cluster_members WHERE cluster_id=${id}`);
     await tx.execute(sql`INSERT INTO abuse_cluster_members(entity_type,entity_id,cluster_id) SELECT type,id,${id} FROM jsonb_to_recordset(${JSON.stringify(members)}::jsonb) AS m(type text,id text)`);
     return { id, score: scored.score, band, reasons: scored.reasons, workspaces, accounts: scored.accounts.length, members: members.length, keys: members.map(keyOf), previous: kept ? { score: kept.score, band: kept.band, members: kept.members.length } : null };
@@ -205,30 +206,37 @@ export async function recluster(runtime: Hosted, seed: Entity): Promise<ClusterC
  * The hourly job's last stage: groups up to SEEDS_A_RUN entities whose links changed, then rescores up to
  * RESCORED_A_RUN clusters, longest unscored first (usage and standing move without any link changing). Stops at the
  * deadline; what is left waits for the next run (`cut`: it stopped for the time, or at SEEDS_A_RUN or RESCORED_A_RUN with
- * work still waiting). A cluster that fails is skipped.
+ * work still waiting). Uncommitted work remains outstanding for another turn.
  */
-export async function refreshClusters(runtime: Hosted, deadline: number, onChange?: (change: ClusterChange) => Promise<void>) {
-  const result = { grouped: 0, rescored: 0, cut: null as 'time' | 'limit' | null }, done = new Set<Key>();
-  const one = async (seed: Entity) => {
-    if (done.has(keyOf(seed))) return false;
-    try { const change = await recluster(runtime, seed); done.add(keyOf(seed)); if (change) await onChange?.(change); return true; }
-    catch { done.add(keyOf(seed)); log('warn', { code: 'ABUSE_STEP_FAILED', step: 'cluster' }); return false; }
-  };
-  let round = 0, waiting = false;
-  for (; round < SEEDS_A_RUN && Date.now() < deadline; round++) {
-    const { rows: [pending] } = await bounded(runtime, tx => tx.execute<{ a_type: Entity['type']; a_id: string }>(sql`SELECT a_type,a_id FROM identity_links WHERE pending ORDER BY last_at DESC LIMIT 1`));
-    if (!pending) { waiting = false; break; }
-    waiting = true;
-    const seed = { type: pending.a_type, id: pending.a_id };
-    // A seed that failed stays pending; it is not tried twice in one run.
-    if (done.has(keyOf(seed))) { waiting = false; break; }
-    if (await one(seed)) result.grouped++;
+export async function refreshClusters(runtime: Hosted, deadline: number, advanced: () => void = () => {}) {
+  const result = { grouped: 0, rescored: 0, cut: null as 'time' | 'limit' | null };
+  const pending = sql`WITH seeds AS (SELECT a_type,a_id,min(pending_since) AS due FROM identity_links WHERE pending GROUP BY a_type,a_id)
+    SELECT json_build_object('type',a_type,'id',a_id) AS seed,abuse_key(a_type,a_id) AS source_key,${utc(sql`due`)} AS at
+    FROM seeds WHERE ${runnableSeed('links',sql`abuse_key(a_type,a_id)`,sql`due`)} ORDER BY ${workOrder('links',sql`abuse_key(a_type,a_id)`,sql`due`)},a_type,a_id LIMIT 1`;
+  const due = sql`least(score_requested_at,scored_at+interval '30 minutes')`;
+  const stale = sql`SELECT members->0 AS seed,abuse_key(id) AS source_key,${utc(due)} AS at FROM abuse_clusters
+    WHERE ${due}<=now() AND ${runnableSeed('scores',sql`abuse_key(id)`,due)} ORDER BY ${workOrder('scores',sql`abuse_key(id)`,due)},id LIMIT 1`;
+  for (const [stage,query,limit] of [['links',pending,SEEDS_A_RUN],['scores',stale,RESCORED_A_RUN]] as const) {
+    for (let n=0; n<limit; n++) {
+      if (Date.now()>=deadline) { result.cut='time'; return result; }
+      const outcome = await bounded(runtime,async tx => {
+        await graphLock(tx,true);
+        const { rows: [row] } = await tx.execute<WorkVersion & { seed: Entity }>(query);
+        if (!row) return null;
+        const scoped = { ...runtime, tx };
+        return isolateItem(tx,stage,row,async () => {
+          const change = await recluster(scoped,row.seed);
+          if (change) await (await import('./abuse-alerts.js')).noteAlert(scoped,change);
+        });
+      });
+      if (outcome === null) break;
+      if (outcome) {
+        if (stage==='links') result.grouped++; else result.rescored++;
+        advanced();
+      }
+      if (n+1===limit) result.cut='limit';
+    }
   }
-  if (waiting && (round >= SEEDS_A_RUN || Date.now() >= deadline)) result.cut = Date.now() >= deadline ? 'time' : 'limit';
-  const { rows: stale } = Date.now() < deadline ? await bounded(runtime, tx => tx.execute<{ seed: Entity }>(sql`SELECT members->0 AS seed FROM abuse_clusters WHERE scored_at<now()-interval '30 minutes' ORDER BY scored_at LIMIT ${RESCORED_A_RUN}`)) : { rows: [] };
-  if (Date.now() >= deadline) result.cut = 'time';
-  for (const { seed } of stale) { if (Date.now() >= deadline) { result.cut = 'time'; break; } if (await one(seed)) result.rescored++; }
-  if (!result.cut && stale.length >= RESCORED_A_RUN) result.cut = 'limit';
   return result;
 }
 

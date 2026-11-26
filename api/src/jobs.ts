@@ -110,8 +110,8 @@ const ingestSlots=36;
 let ingestReserved=0;
 let hookCursor='';
 export type JobHandlerResolver = Record<string, JobHandler> | ((type: string) => Promise<JobHandler | undefined> | JobHandler | undefined);
-export type JobPool = 'all' | 'work' | 'webhooks' | 'ingest';
-const classes = (pool: JobPool) => pool === 'ingest' ? [] : pool === 'webhooks' ? ['hook'] : ['feedback','campaign','other','publish', ...(pool === 'all' ? ['hook'] : [])];
+export type JobPool = 'all' | 'work' | 'webhooks' | 'ingest' | 'abuseSample' | 'customerWork';
+const classes = (pool: JobPool) => pool === 'abuseSample' ? ['abuse_sample'] : pool === 'ingest' ? [] : pool === 'webhooks' ? ['hook'] : ['feedback','campaign','other','publish', ...(pool==='customerWork' ? [] : ['abuse']), ...(pool === 'all' ? ['hook'] : [])];
 const jobDue = sql`CASE WHEN j.status='running' THEN j.lease_until ELSE j.available_at END`;
 export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver, limit = 1, concurrency = 1, maxDurationMs = 20000, pool: JobPool = 'all') {
   const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0;
@@ -131,6 +131,10 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
   type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; lease_fence: string; webhook: ClaimedWebhook | null;ingest:IngestInput|null;delete_binding:import('./provider-credentials.js').ReadyConnection|null };
   const jobFence = (job: Claimed) => and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), sql`${jobs.leaseUntil}=${job.lease_fence}::timestamptz`, typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
   const stripLoadFailures = (payload: Record<string, unknown>) => '_loadFailures' in payload ? (() => { const { _loadFailures: _, ...rest } = payload; return rest; })() : payload;
+  const writeJob = async (job: Claimed, started: number, statement: SQL) => {
+    if (job.type.startsWith('abuse.stage.')) return (await import('./abuse.js')).settleStage(runtime,job.type,started,statement);
+    return runtime.db.execute(statement);
+  };
   const settleError = async (job: Claimed, handlerPayload: Record<string, unknown>, error: unknown, settle: (update: SQLWrapper) => Promise<unknown>, claimMs: number, claimBatchSize: number, jobStarted: number) => {
     const fence = jobFence(job);
     const context = { event: 'job', jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
@@ -140,14 +144,14 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const refundedAttempts = Math.max(0, job.attempts - 1);
       const delay = Math.min(15 * 60_000, 15_000 * 4 ** (loadFailures - 1));
       const nextPayload = { ...handlerPayload, _loadFailures: loadFailures };
-      await runtime.db.update(jobs).set({ status: 'pending', attempts: refundedAttempts, leaseUntil: null, lastError: error.code, availableAt: new Date(Date.now() + delay).toISOString(), payload: nextPayload }).where(fence);
+      await writeJob(job,jobStarted,runtime.db.update(jobs).set({ status: 'pending', attempts: refundedAttempts, leaseUntil: null, lastError: error.code, availableAt: new Date(Date.now() + delay).toISOString(), payload: nextPayload }).where(fence).getSQL());
       log(loadFailures >= LOAD_ERROR_THRESHOLD ? 'error' : 'warn', { ...context, jobType: job.type, attempt: refundedAttempts, loadFailures, code: error.code, retryable: true, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
       return;
     }
     if (error instanceof JobDeferred) {
       // A successful polling turn breaks a streak of failures/evictions.
       const nextPayload = error.payload ?? (handlerPayload !== job.payload ? handlerPayload : undefined);
-      await runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: nextPayload } : {}) }).where(fence);
+      await writeJob(job,jobStarted,runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: job.type==='abuse.stage.clusters' ? sql`${JSON.stringify(nextPayload)}::jsonb || jsonb_build_object('revision',coalesce((payload->>'revision')::bigint,0))` : nextPayload } : {}) }).where(fence).getSQL());
       log('info', { ...context, code: 'JOB_DEFERRED', availableAt: error.availableAt, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
       return;
     }
@@ -179,7 +183,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
     let records: SQL | undefined, settling = false;
     const settle = (update: SQLWrapper) => {
       settling = true;
-      return runtime.db.execute(records ? sql`WITH settled AS (${update.getSQL()} RETURNING id), ${records} SELECT 1` : update.getSQL());
+      return writeJob(job,jobStarted,records ? sql`WITH settled AS (${update.getSQL()} RETURNING id), ${records} SELECT 1` : update.getSQL());
     };
     const handlerPayload = stripLoadFailures(job.payload);
     try {
@@ -189,7 +193,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       if (!handler) throw new ApiError(500, 'JOB_HANDLER_MISSING', 'No handler is registered for this job type.');
       const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type === 'mailbox.reconcile' || job.type === 'operation.ses'
         ? await regionalRuntime(job.workspace_id) : { ...runtime, config: { ...runtime.config, workspaceId: job.workspace_id } };
-      await handler(ownerRuntime, handlerPayload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id, leaseFence: job.lease_fence,
+      await handler(ownerRuntime, handlerPayload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id, startedAt: jobStarted, leaseFence: job.lease_fence,
         webhook: job.webhook,ingest:job.ingest,deleteBinding:job.delete_binding, recordWithSettlement: ctes => { records = ctes; } });
       await settle(runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null, ...(handlerPayload !== job.payload ? { payload: handlerPayload } : {}) }).where(fence));
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
@@ -260,7 +264,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           AND NOT EXISTS(SELECT FROM mail_action_attempts a WHERE a.workspace_id=j.workspace_id AND a.delivery_id=j.payload->>'deliveryId' AND a.attempts>=j.attempts))`;
       const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
       // Inbound never takes a drain's last lane (when concurrency >= 3), so campaign/other/publish/hook work always has a lane.
-      const slots=pool==='webhooks'?0:Math.max(0,Math.min(claimBatchSize,ingestSlots-ingestReserved,(effectiveConcurrency>2?effectiveConcurrency-1:effectiveConcurrency)-drainIngest));
+      const slots=pool==='webhooks'||pool==='abuseSample'?0:Math.max(0,Math.min(claimBatchSize,ingestSlots-ingestReserved,(effectiveConcurrency>2?effectiveConcurrency-1:effectiveConcurrency)-drainIngest));
       // Only the head of each class enters the preference sort. The expression matches
       // jobs_ready_page, even for an expired running lease (no OR/BitmapOr + wide sort).
       // Seek over distinct queued hook owners (not over their backlog). Each gets
@@ -302,7 +306,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       deliveries_failed AS (UPDATE operation_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f
         WHERE f.type='operation.webhook' AND d.workspace_id=f.workspace_id AND d.id=f.payload->>'deliveryId' AND to_jsonb(d.generation)=f.payload->'generation' AND d.status='pending'), mailbox_failed AS (
         UPDATE mailbox_webhook_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f WHERE f.type='mailbox.webhook' AND d.id=f.payload->>'deliveryId' AND d.workspace_id=f.workspace_id AND d.status='pending' AND d.generation=coalesce((f.payload->>'generation')::int,0)), feedback AS (
-        SELECT id FROM (${head('feedback', pool!=='webhooks' && pool!=='ingest' && effectiveConcurrency > 1 && activeFeedback === 0 ? 1 : 0)}) f
+        SELECT id FROM (${head('feedback', pool!=='webhooks' && pool!=='ingest' && pool!=='abuseSample' && effectiveConcurrency > 1 && activeFeedback === 0 ? 1 : 0)}) f
       ), ingest_head AS MATERIALIZED (
         SELECT t.workspace_id FROM mail_ingest_turns t WHERE t.active>0 AND EXISTS(
           SELECT FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})))
@@ -312,7 +316,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       ), regular AS MATERIALIZED (
         SELECT j.id FROM (${pool==='ingest'?sql`SELECT NULL::text AS id,NULL::text AS type,NULL::timestamptz AS available_at WHERE false`:sql.join(classes(pool).map(kind=>sql`SELECT * FROM (${head(kind,claimBatchSize)}) page`),sql` UNION ALL `)}) j
         WHERE NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
-        ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
+        ORDER BY starts_with(j.type,'abuse.stage.'), CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN starts_with(j.type, 'campaign.') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
           CASE WHEN starts_with(j.type, 'campaign.') THEN 1 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 2 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 3 ELSE 4 END,
           j.available_at, j.id LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM ingest_first))
@@ -435,7 +439,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
 // Keep short quota deferrals moving without spinning wakeups or waiting for the next minute's cron.
 export async function nextWakeDelay(runtime: Runtime, pool: JobPool='all') {
   const result = await runtime.db.execute<{ delay: number | null }>(sql`SELECT CASE WHEN due IS NULL THEN NULL ELSE greatest(0, ceil(extract(epoch FROM due - now())))::int END AS delay
-    FROM (SELECT min(first.due) AS due FROM unnest(${sql.param([...classes(pool),...(pool==='webhooks'?[]:['ingest'])])}::text[]) kind
+    FROM (SELECT min(first.due) AS due FROM unnest(${sql.param([...classes(pool),...(pool==='webhooks'||pool==='abuseSample'?[]:['ingest'])])}::text[]) kind
       CROSS JOIN LATERAL (SELECT ${jobDue} AS due FROM jobs j WHERE public.job_class(j.type)=kind AND j.status IN ('pending','running') ORDER BY ${jobDue},j.id LIMIT 1) first) upcoming`);
   const delay = result.rows[0]?.delay;
   return delay !== null && delay !== undefined && delay <= 60 ? delay : null;
@@ -445,7 +449,7 @@ export async function nextWakeDelay(runtime: Runtime, pool: JobPool='all') {
 // completed job added a chain that never merged, and the duplicates crowded out the wakes that mattered.
 export async function reserveNextWake(runtime: Runtime, delaySeconds: number, pool: JobPool='all'): Promise<boolean> {
   const reserved = await runtime.db.execute(sql`INSERT INTO job_schedule (workspace_id, next_wake_at)
-    VALUES (${pool==='webhooks'?'scheduler:webhooks':WAKE_SCHEDULE_KEY}, clock_timestamp() + (${delaySeconds} * interval '1 second'))
+    VALUES (${pool==='abuseSample'?'scheduler:abuse-sample':pool==='webhooks'?'scheduler:webhooks':WAKE_SCHEDULE_KEY}, clock_timestamp() + (${delaySeconds} * interval '1 second'))
     ON CONFLICT (workspace_id) DO UPDATE SET next_wake_at = excluded.next_wake_at
     WHERE job_schedule.next_wake_at IS NULL OR job_schedule.next_wake_at <= clock_timestamp()
       OR job_schedule.next_wake_at > excluded.next_wake_at + interval '1 second'
