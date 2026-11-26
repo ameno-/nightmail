@@ -148,7 +148,7 @@ export async function idempotent<T extends Record<string, unknown>>(db: Database
  * getting a duplicate.
  */
 export const AUTHENTICATED_CREATES = [
-  /^\/v1\/(?:contacts|lists|newsletters|segments|contact-imports|templates|template-assets|webhooks|api-keys|agent-tokens|endpoints|inbox-connections)$/,
+  /^\/v1\/(?:contacts|lists|newsletters|segments|topics|contact-imports|templates|template-assets|webhooks|api-keys|agent-tokens|endpoints|inbox-connections)$/,
   /^\/v1\/template-assets\/import$/,
   /^\/v1\/routing\/routes$/,
   // A retried top-up returns the same Checkout link or charge instead of starting a second payment.

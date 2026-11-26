@@ -125,15 +125,24 @@ export function subjectOf(need: Need, row: StaffRow, short: string) {
 /** Someone's words, short: at most three lines and about 240 characters, the rest left to the conversation. */
 const shortQuote = (value: string) => {
   const lines = value.replace(/\r\n?/g, '\n').split('\n').map(line => line.trimEnd()).filter((line, i, all) => line || (i > 0 && all[i - 1])).join('\n').trim().split('\n');
-  const kept = lines.slice(0, 3).join('\n'), cut = kept.length > 240 ? kept.slice(0, 240).replace(/\s+\S*$/, '') : kept;
+  const kept = lines.slice(0, 3).join('\n'), cut = kept.length > 240 ? cutAt(kept, 240) : kept;
   return cut.length < value.trim().length ? `${cut.trimEnd()}${/[.!?:]$/.test(cut.trimEnd()) ? ' …' : '…'}` : cut;
+};
+/** Untrusted words cut to `n` characters at a space, and never inside a link, whose real host a cut could change (cut
+ *  short, "https://nightmail.dev.evil.example/…" would read as linking to nightmail.dev): with no space, a link the cut
+ *  reaches is left out. */
+const cutAt = (text: string, n: number) => { const cut = text.slice(0, n); return /\s/.test(cut) ? cut.replace(/\s+\S*$/, '') : cut.replace(/(?:https?:\/\/|www\.)\S*$/i, ''); };
+/** Words on one line, at most `max` long, cut as cutAt cuts. */
+const clip = (value: string, max: number) => {
+  const text = oneLine(value, Number.MAX_SAFE_INTEGER);
+  return text.length > max ? `${cutAt(text, max - 1).trimEnd()}…` : text;
 };
 /** What an agent wrote, on one line: its whole sentences that fit in about 220 characters (at least the first). */
 const sentences = (value: string) => {
   const text = value.replace(/\s+/g, ' ').trim(), parts = text.match(/.+?[.!?]+(?=\s|$)|.+$/g) ?? [text];
   let kept = '';
   for (const part of parts) { if (kept && (kept + part).length > 220) break; kept += part; }
-  return oneLine(kept.trim(), 220);
+  return clip(kept.trim(), 220);
 };
 
 /** One sentence: what the agent found (its summary, its own words and so untrusted), or, without one, why this needs a person now. */
@@ -149,7 +158,7 @@ function foundOf(need: Need, row: StaffRow, now: number): Line | null {
 }
 /** The one decision (set in bold) and the recommendation: one plain line, the agent's own words kept untrusted. */
 function decisionOf(need: Need, row: StaffRow): { decision: string; recommendation: Line | null } {
-  const recommended = row.brief?.recommendation ? { untrusted: `It recommends: ${oneLine(row.brief.recommendation, 220)}` } : null;
+  const recommended = row.brief?.recommendation ? { untrusted: `It recommends: ${clip(row.brief.recommendation, 220)}` } : null;
   switch (need) {
     case 'failed': return { decision: 'Send the reply again, or write a new one.', recommendation: null };
     case 'held': return sendable(row)

@@ -11,7 +11,9 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 import { AdminOnlyPage } from '../settings/admin-only'
 import { CampaignSenderInput, SenderLines } from '../campaigns/CampaignSenderInput'
 import { campaignDisplayStatus, campaignPollInterval } from '../campaigns/CampaignProgress'
+import { useQueryClient } from '@tanstack/react-query'
 import { composer } from '../campaigns/composer-chunk'
+import { onIdle, warmCampaignEditor } from '../campaigns/composer-content'
 import { issuesRequest, newIssuePath, newsletterPath, readersPath, rememberIssuesShape, useNewsletters, useRememberNewsletter } from './shared'
 import { IssuesSkeleton, ReadersSkeleton, issueColumns, newsletterColumns } from './skeletons'
 import './newsletters.css'
@@ -79,7 +81,10 @@ export function NewsletterPage() {
 function NewsletterView() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
+  const api = useApi()
+  const cache = useQueryClient()
   const warm = usePrefetchQueries()
+  useEffect(() => onIdle(() => { void composer.preload().catch(() => {}) }), [])
   const [params, setParams] = useSearchParams()
   const requested = Number(params.get('page')), page = Number.isSafeInteger(requested) && requested > 0 ? requested : 1
   const named = useNewsletters().find(item => item.id === id)?.name
@@ -97,7 +102,7 @@ function NewsletterView() {
     <PageHeader title={newsletter.data?.name ?? named ?? <SkeletonText width={140} lineHeight={24} />} actions={<Button variant="primary" onPointerEnter={() => void composer.preload().catch(() => {})} onClick={() => navigate(newIssuePath(id))}>New issue</Button>} />
     {newsletter.data ? <Readers newsletter={newsletter.data} /> : <ReadersSkeleton />}
     {issues.isError ? <ErrorState error={issues.error} onRetry={() => void issues.refetch()} /> : issues.isPending ? <IssuesSkeleton id={id} />
-      : <DataTable className="newsletter-issues" rows={rows} rowKey={issue => issue.id} rowHref={issuePath} onRowIntent={issue => { void warm([queries.campaign(issue.id)]); if (campaignEditable(issue)) void composer.preload().catch(() => {}) }}
+      : <DataTable className="newsletter-issues" rows={rows} rowKey={issue => issue.id} rowHref={issuePath} onRowIntent={issue => { if (!issue.archivedAt && campaignEditable(issue)) void warmCampaignEditor(cache, api, issue.id); else void warm([queries.campaign(issue.id)]) }}
           empty={<EmptyState title="No issues yet" />} columns={issueColumns(engagement).map(column => ({ ...column, ...renders[column.key]! }))} />}
     {issues.data && <Pagination page={issues.data.page} pageSize={issues.data.pageSize} total={issues.data.total} nextCursor={issues.data.nextCursor} count={issues.data.items.length} onPageChange={value => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(value)); return next })} />}
   </div>

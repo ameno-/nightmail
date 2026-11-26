@@ -562,7 +562,7 @@ export function useApi() {
 // keepPrevious keeps the last result on screen while a changed key (page, search, filter) loads, so a list never blanks.
 // Pass a function to keep it only for some key changes (a region change must not show the old region's rows).
 type KeepPrevious = boolean | ((previousKey: readonly unknown[]) => boolean)
-type Poll<T> = { interval?: number | ((data: T | undefined, failed: boolean) => number | false); retryInterval?: (error: unknown, failures: number) => number | false; enabled?: boolean; keepPrevious?: KeepPrevious }
+type Poll<T> = { interval?: number | ((data: T | undefined, failed: boolean) => number | false); retryInterval?: (error: unknown, failures: number) => number | false; enabled?: boolean; keepPrevious?: KeepPrevious; staleTime?: number }
 /** Stops polling on 422 READ_TOO_LARGE / non-429 4xx; backs off exponentially on 429/5xx/network and stops after 3 retries. */
 export function politePollInterval(base: number | false, error: unknown, consecutiveFailures: number): number | false {
   if (base === false) return false
@@ -592,7 +592,7 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: Api, signal:
       if (!(error instanceof DOMException && error.name === 'AbortError') && failures.current.key === keyId) failures.current.count += 1
       throw error
     }
-  }, enabled: poll?.enabled, refetchInterval: query => {
+  }, enabled: poll?.enabled, ...(poll?.staleTime === undefined ? {} : { staleTime: poll.staleTime }), refetchInterval: query => {
     if (query.state.error && poll?.retryInterval) return poll.retryInterval(query.state.error, failures.current.count)
     const base = typeof interval === 'function' ? interval(query.state.data, query.state.status === 'error') : interval ?? false
     return politePollInterval(base, query.state.error, failures.current.count)
