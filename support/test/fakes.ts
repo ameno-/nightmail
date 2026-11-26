@@ -235,7 +235,7 @@ export class SupportPlatform extends WorkerEntrypoint {
       if (!managed(allowed[0])) return refuse(404, 'NOT_FOUND');
       const p = { id: 'apr_' + 'a'.repeat(22) + String(proposals.length).padStart(4, '0'), conversationId: c.id, workspaceId: allowed[0].id, kind: body.kind, fields: Object.fromEntries(keys.map(k => [k, body[k]])), reason: body.reason };
       proposals.push(p);
-      const label = { raise_daily_limit: 'Set the daily sending limit', pause_sending: 'Pause the workspace’s sending' }[p.kind] ?? 'A change for staff';
+      const label = { raise_daily_limit: 'Set the daily sending limit', pause_sending: 'Pause the workspace’s sending', release_campaign: 'Release the paused campaign' }[p.kind] ?? 'A change for staff';
       return ok({ id: p.id, kind: p.kind, label, summary: (p.kind === 'raise_daily_limit' ? 'Daily limit ' + Number(body.daily ?? 0).toLocaleString('en-US') + ' for workspace ' : 'Workspace ') + p.workspaceId, state: 'proposed',
         expiresAt: new Date(Date.now() + 72 * 3600000).toISOString() }, 201);
     }
@@ -624,6 +624,13 @@ const toolUse = (id: string, name: string, input: object) => sse([
   ['content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } }], ['content_block_stop', { index: 0 }],
   ['message_delta', { delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 30 } }], ['message_stop', {}],
 ]);
+/** Several tool calls in one step, in this order, as the real model can make them (parallel tool use). */
+const toolUses = (calls: (readonly [id: string, name: string, input: object])[]) => sse([
+  start('msg_tools'),
+  ...calls.flatMap(([id, name, input], index) => [['content_block_start', { index, content_block: { type: 'tool_use', id, name, input: {} } }],
+    ['content_block_delta', { index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } }], ['content_block_stop', { index }]] as [string, unknown][]),
+  ['message_delta', { delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 30 * calls.length } }], ['message_stop', {}],
+]);
 const text = (chunks: string[]) => sse([
   start('msg_text'), ['content_block_start', { index: 0, content_block: { type: 'text', text: '' } }],
   ...chunks.map(chunk => ['content_block_delta', { index: 0, delta: { type: 'text_delta', text: chunk } }] as [string, unknown]),
@@ -756,6 +763,20 @@ export async function fakeGateway(request: Request): Promise<Response> {
   // the team with propose_to_staff, then answers.
   // The same thing two ways in one turn: a card pausing the campaign and asking the team to pause the workspace's sending,
   // in either order. The second is refused before Nightmail; then the model answers.
+  // The same, as two calls in one step (both orders): exactly one reaches Nightmail. And a card pausing a campaign beside a
+  // proposal to release it, step after step (both orders, and a release of another campaign, which isn't the same thing).
+  const card = (n: string, campaignId = 'cmp_1_acme') => [`toolu_card_${n}`, 'propose_action', { kind: 'pause_campaign', campaignId }] as const;
+  const staffPause = (n: string) => [`toolu_staff_${n}`, 'propose_to_staff', { kind: 'pause_sending', reason: 'Their campaign is mailing a list that complained; they want it stopped now.' }] as const;
+  const release = (n: string, campaignId = 'cmp_1_acme') => [`toolu_release_${n}`, 'propose_to_staff', { kind: 'release_campaign', campaignId, reason: 'The list was cleaned and they want the quarantined campaign to go out.' }] as const;
+  for (const [probe, calls] of [['Same-step card first probe', [card('s1'), staffPause('s1')]], ['Same-step staff first probe', [staffPause('s2'), card('s2')]]] as const) {
+    if (!said.includes(probe)) continue;
+    return used.length ? say(body, ['I’ve set that up: it needs one more step.']) : toolUses(calls);
+  }
+  for (const [probe, steps] of [['Release after card probe', [card('r1'), release('r1')]], ['Card after release probe', [release('r2'), card('r2')]], ['Other campaign release probe', [card('r3'), release('r3', 'cmp_2_acme')]]] as const) {
+    if (!said.includes(probe)) continue;
+    const next = steps[used.length];
+    return next ? toolUse(next[0], next[1], next[2]) : say(body, ['I’ve set that up: it needs one more step.']);
+  }
   for (const [probe, order] of [['Pause probe', ['propose_action', 'propose_to_staff']], ['Staff pause probe', ['propose_to_staff', 'propose_action']]] as const) {
     if (!said.includes(probe)) continue;
     const next = order.find(name => !used.includes(name));

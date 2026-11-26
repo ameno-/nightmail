@@ -904,6 +904,39 @@ describe('support Worker', () => {
     }
   }, 180_000);
 
+  test('the two pause paths asked for in one model step (parallel tool calls), in either order: exactly one reaches Nightmail and the other gets the plain refusal', async () => {
+    const results = (r: Recorded) => (r.body.messages as any[]).flatMap(blocksOf).filter((b: any) => b.type === 'tool_result');
+    for (const [i, [probe, firstPath]] of ([['Same-step card first probe', '/v1/support/actions'], ['Same-step staff first probe', '/v1/support/approvals']] as const).entries()) {
+      const chat = await chatAs(`usr_step${i}`, 'owner'), from = (await fakeCalls()).length, before = recorded.length;
+      await turn(chat, `${probe}: they want the sending stopped.`);
+      const asked = recorded.slice(before).filter(r => about(r, probe)), last = asked.at(-1)!;
+      // One model step asked for both: a single assistant message with two tool calls.
+      const step = (last.body.messages as any[]).find((m: any) => m.role === 'assistant' && blocksOf(m).filter((b: any) => b.type === 'tool_use').length === 2);
+      assert.ok(step, JSON.stringify(last.body.messages.map((m: any) => [m.role, blocksOf(m).map((b: any) => b.type)])));
+      const refused = results(last).filter((b: any) => /Refused: you already/.test(JSON.stringify(b.content)));
+      assert.equal(refused.length, 1, JSON.stringify(results(last)));
+      const writes = (await stampedCalls(chat.id, from)).filter(c => c[3] !== 'GET').map(c => c[1].split('?')[0]);
+      assert.deepEqual(writes, [firstPath], `${probe}: exactly one reached Nightmail, the call made first in the step`);
+      chat.ws.close();
+    }
+  }, 180_000);
+
+  test('a card pausing a campaign and asking the team to release that campaign are never both offered in one turn, in either order; releasing another campaign is a different thing', async () => {
+    const cases = [['Release after card probe', /already offered the customer a card to pause this campaign in this answer, so don’t also ask the team to release it/, ['/v1/support/actions']],
+      ['Card after release probe', /already asked the team to release this campaign in this answer, so don’t also offer a card to pause it/, ['/v1/support/approvals']],
+      ['Other campaign release probe', null, ['/v1/support/actions', '/v1/support/approvals']]] as const;
+    for (const [i, [probe, refusal, reached]] of cases.entries()) {
+      const chat = await chatAs(`usr_release${i}`, 'owner'), from = (await fakeCalls()).length, before = recorded.length;
+      await turn(chat, `${probe}: the campaign should go out after all.`);
+      const asked = recorded.slice(before).filter(r => about(r, probe)), blocks = (asked.at(-1)!.body.messages as any[]).flatMap(blocksOf);
+      const refused = blocks.filter((b: any) => b.type === 'tool_result' && /Refused: you already/.test(JSON.stringify(b.content)));
+      if (refusal) assert.ok(refused.length === 1 && refusal.test(JSON.stringify(refused[0].content)), `${probe}: ${JSON.stringify(refused)}`);
+      else assert.deepEqual(refused, [], probe);
+      assert.deepEqual((await stampedCalls(chat.id, from)).filter(c => c[3] !== 'GET').map(c => c[1].split('?')[0]), reached, probe);
+      chat.ws.close();
+    }
+  }, 180_000);
+
   test('the output gate replaces a leaking answer and files a ticket', async () => {
     const started = await post('/chat/start', { handoff: handoff() });
     const chat = await connect(started.body.socketUrl);
