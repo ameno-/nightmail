@@ -438,11 +438,11 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
    (the chat, UI notes' tray). */
 :root { --launcher-size: 32px; --launcher-inset: calc(var(--page-inset) + var(--space-16)); }
 /* Toasts and an agent's waiting card stay clear of the open chat: beside its docked card on a desktop (the dashboard's and
-   Get started's). The card slides over (translate, which moves nothing else on the page); below 900px there is no room
-   beside the chat, so it steps out until the chat closes. */
+   Get started's), the card's bottom level with the chat's. It slides over (translate, which moves nothing else); below
+   900px there is no room beside the chat, so it steps out until the chat closes. */
 @media (min-width: 900px) {
   body:has(#support-panel[data-open]):not(:has(.app-shell--compact)) .ui-toasts { right: calc(var(--launcher-inset) + min(400px, 100vw - var(--sidebar-width) - 2 * var(--launcher-inset)) + var(--space-12)); }
-  body:has(#support-panel[data-open]):not(:has(.app-shell--compact)) .agent-waiting { translate: calc(var(--space-24) - var(--launcher-inset) - min(400px, 100vw - var(--sidebar-width) - 2 * var(--launcher-inset)) - var(--space-12)) 0; }
+  body:has(#support-panel[data-open]):not(:has(.app-shell--compact)) .agent-waiting { translate: calc(var(--space-24) - var(--launcher-inset) - min(400px, 100vw - var(--sidebar-width) - 2 * var(--launcher-inset)) - var(--space-12)) calc(var(--space-24) - var(--launcher-inset)); }
 }
 @media (min-width: 900px) and (prefers-reduced-motion: no-preference) { .agent-waiting { transition: translate 260ms var(--ease-out-strong); } }
 @media (max-width: 899px) { body:has(#support-panel[data-open]) .agent-waiting { visibility: hidden; } }
