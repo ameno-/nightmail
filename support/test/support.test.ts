@@ -13,7 +13,7 @@ import { attachmentLink } from '../src/attachments.js';
 import { mailAllowed } from '../src/limits.js';
 import { fenced, project, toolResult, unfenced, untrusted } from '../src/agent/projection.js';
 import { customerBlock, notesBlock, oneLine } from '../src/agent/context.js';
-import { TOOLS, toolNames, type ToolHost } from '../src/agent/tools.js';
+import { TOOL_NAMES, TOOLS, toolNames, type ToolHost } from '../src/agent/tools.js';
 import { addressHash, chatToken, confirmToken, readChatToken, readConfirmToken } from '../src/tokens.js';
 import { cleanImage, ImageRejected } from '../src/image.js';
 import { jpegWithMetadata, pngWithMetadata, SECRET_TEXT, webpWithMetadata } from './images.js';
@@ -326,11 +326,14 @@ const about = (r: Recorded, needle: string) => {
   return JSON.stringify(last?.content ?? '').includes(needle);
 };
 /** The reads email never has, even for an owner: billing, the activity trail, request logs, webhook deliveries and receiving configuration. */
-const NOT_BY_EMAIL = ['api_errors', 'explain_request', 'get_audit', 'get_billing', 'list_webhook_deliveries', 'receiving_routes', 'held_addresses', 'pending_verifications', 'smtp_refusals'];
+const NOT_BY_EMAIL = ['api_errors', 'explain_request', 'get_audit', 'get_billing', 'list_webhook_deliveries', 'receiving_routes', 'held_addresses', 'pending_verifications', 'smtp_refusals',
+  'recheck_receiving_host', 'resend_forward_link', 'propose_to_staff'];
+/** What the agent does or asks for alone, owners' and admins' chats only (api/src/support-actions.ts): the safe actions and proposals to staff. */
+const SAFE = ['propose_to_staff', 'recheck_domain', 'recheck_receiving_host', 'resend_forward_link'];
 /** The receiving reads (api/src/support-receiving.ts): an owner's or admin's; by email only the hosts. */
 const RECEIVING = ['held_addresses', 'pending_verifications', 'receiving_hosts', 'receiving_routes'];
 /** The tools Nightmail lets only owners and admins read (MANAGER_TOOLS). */
-const MANAGER = ['api_errors', 'domain_health', 'explain_request', 'get_audit', 'get_billing', 'list_domains', 'list_webhook_deliveries', 'propose_action', 'recheck_domain', ...RECEIVING, 'smtp_refusals'];
+const MANAGER = ['api_errors', 'domain_health', 'explain_request', 'get_audit', 'get_billing', 'list_domains', 'list_webhook_deliveries', 'propose_action', ...RECEIVING, 'smtp_refusals', ...SAFE];
 /** The changes the fake Nightmail keeps (fakes.ts), and the one body the scripted retry proposal may send: its kind's IDs only. */
 const fakeActions = async (instance: Miniflare = mf) => (await (await (await instance.getWorker('fake-bane')).fetch('http://fake-bane/__actions')).json()) as any[];
 const RETRY = { kind: 'retry_webhook_delivery', webhookId: 'wh_acme', deliveryId: 'whd_1_acme' };
@@ -833,10 +836,10 @@ describe('support Worker', () => {
     const paths: string[] = [];
     const proposed: unknown[] = [];
     const host: ToolHost = { read: async path => { paths.push(path); return {}; }, workspaceId: () => 'ws_acme', hidden: () => [], chooseWorkspace: async () => '', requestContentAccess: async () => '', fileTicket: async () => '', reply: async () => '', note: async () => '',
-      propose: async proposal => { proposed.push(proposal); return ''; }, recheckDomain: async () => '', searchDocs: () => ({ results: [] }) };
+      propose: async proposal => { proposed.push(proposal); return ''; }, act: async () => ({}), searchDocs: () => ({ results: [] }) };
     const extra = { userId: 'usr_bo', conversationId: `conv_${'b'.repeat(26)}`, grant: `nm_support_${'9'.repeat(64)}`, token: 'tok', ticketRef: 'conv_x', email: 'bo@other.test' };
     const ids = { emailId: 'em_1', domainId: 'dom_1', campaignId: 'cmp_1', requestId: `req_${'a'.repeat(32)}`, days: 3, hours: 5, provider: 'gmail', status: 'bounced' };
-    const reads = TOOLS.filter(t => !['choose_workspace', 'request_content_access', 'file_ticket', 'reply', 'add_note', 'propose_action', 'recheck_domain', 'search_docs'].includes(t.name));
+    const reads = TOOLS.filter(t => !['choose_workspace', 'request_content_access', 'file_ticket', 'reply', 'add_note', 'propose_action', 'search_docs', ...SAFE].includes(t.name));
     for (const tool of reads) {
       paths.length = 0;
       await tool.execute({ ...ids, ...extra }, host);
@@ -862,7 +865,43 @@ describe('support Worker', () => {
     paths.length = 0;
     await TOOLS.find(t => t.name === 'search_docs')!.execute({ query: 'catch-all', ...ids, ...extra, workspaceId: 'ws_other' }, host);
     assert.deepEqual(paths, []);
+    // The safe actions and proposals to staff send only what each declares. A forward's resend names the forward by its ID
+    // and nothing else: an address, a destination or a choice the model adds never reaches Nightmail, and an address
+    // can't stand in for the ID. (Nightmail's route takes no body either: the acceptance test "forwards: …".)
+    const acts: [string, unknown][] = [];
+    host.act = async (path, body) => { acts.push([path, body ?? null]); return { label: 'Set the daily sending limit', summary: 'Daily limit 5,000 for workspace ws_acme', state: 'proposed' }; };
+    const junk = { to: 'someone@else.test', destination: 'someone@else.test', address: 'someone@else.test', recipient: 'someone@else.test', from: 'me@acme.test', choice: 'allow', decision: 'confirm', confirm: true, verified: true };
+    const tool = (name: string) => TOOLS.find(t => t.name === name)!;
+    await tool('resend_forward_link').execute({ forwardId: 'con_1_acme', ...junk, ...extra, workspaceId: 'ws_other' }, host);
+    await tool('recheck_receiving_host').execute({ hostId: 'mdom_1_acme', ...junk, ...extra }, host);
+    await tool('recheck_domain').execute({ domainId: 'dom_1', ...junk, ...extra }, host);
+    await tool('propose_to_staff').execute({ kind: 'raise_daily_limit', daily: 5000, reason: 'A launch next week.', ...junk, ...extra, workspaceId: 'ws_other' }, host);
+    assert.deepEqual(acts, [['/v1/support/receiving/forwards/con_1_acme/resend', null], ['/v1/support/receiving/hosts/mdom_1_acme/recheck', null], ['/v1/support/domains/dom_1/verify', null],
+      ['/v1/support/approvals', { kind: 'raise_daily_limit', reason: 'A launch next week.', daily: 5000 }]]);
+    for (const forwardId of ['someone@else.test', 'con_1/../../confirm', 'con_1?to=someone@else.test']) await assert.rejects(tool('resend_forward_link').execute({ forwardId }, host), /not valid/);
+    await assert.rejects(tool('propose_to_staff').execute({ kind: 'confirm_forward', reason: 'Confirm it for them.' }, host), /Pick kind/);
+    assert.equal(acts.length, 4);
+    // No tool that changes anything takes an address, a destination or a URL, so none can point mail or a link elsewhere;
+    // and none is named for confirming or declining (the panel's cards are the customer's own).
+    for (const t of TOOLS.filter(t => ['propose_action', 'choose_workspace', 'request_content_access', 'add_note', 'file_ticket', 'reply', ...SAFE].includes(t.name))) {
+      for (const key of Object.keys(t.params)) assert.ok(!/^(?:to|cc|bcc|from|address(?:es)?|emails?|destination|recipients?|url|link|target|choice|decision)$/i.test(key), `${t.name} takes ${key}`);
+      assert.ok(!/confirm|decline/.test(t.name), t.name);
+    }
   });
+
+  test('a campaign pause card and asking the team to pause the workspace’s sending are never both offered in one turn: whichever comes second is refused before Nightmail, in either order', async () => {
+    const cases = [['Pause probe', 'propose_to_staff', /already offered the customer a card to pause their campaign/, '/v1/support/actions?workspaceId=ws_acme'],
+      ['Staff pause probe', 'propose_action', /already asked the team to pause this workspace’s sending/, '/v1/support/approvals?workspaceId=ws_acme']] as const;
+    for (const [i, [probe, second, refusal, first]] of cases.entries()) {
+      const chat = await chatAs(`usr_pause${i}`, 'owner'), from = (await fakeCalls()).length, before = recorded.length;
+      await turn(chat, `${probe}: they want the sending stopped.`);
+      const asked = recorded.slice(before).filter(r => about(r, probe)), blocks = (asked.at(-1)!.body.messages as any[]).flatMap(blocksOf);
+      const use = blocks.find((b: any) => b.type === 'tool_use' && b.name === second), result = use && blocks.find((b: any) => b.type === 'tool_result' && b.tool_use_id === use.id);
+      assert.ok(result && refusal.test(JSON.stringify(result.content)), `${probe}: ${JSON.stringify(result)}`);
+      assert.deepEqual((await stampedCalls(chat.id, from)).filter(c => c[3] !== 'GET').map(c => c[1]), [first], `${probe}: only the first reached Nightmail`);
+      chat.ws.close();
+    }
+  }, 180_000);
 
   test('the output gate replaces a leaking answer and files a ticket', async () => {
     const started = await post('/chat/start', { handoff: handoff() });
@@ -1222,7 +1261,7 @@ describe('support Worker', () => {
       assert.ok(result && (result.is_error === true || /not available|denied|not allowed|unavailable/i.test(JSON.stringify(result.content))), `${tool} was refused: ${JSON.stringify(result)}`);
     }
     const id = await registeredIn('msg_vx_1'), stamped = (await fakeCalls()).slice(from).filter(c => c[0] === 'request' && c[2] === id);
-    assert.deepEqual(stamped.filter(c => /^\/v1\/support\/(?:billing|audit|requests|webhook-deliveries|receiving\/(?:routes|retired|forwards)|smtp\/refusals)/.test(c[1])), [], 'Nothing excluded reached Nightmail.');
+    assert.deepEqual(stamped.filter(c => /^\/v1\/support\/(?:billing|audit|requests|webhook-deliveries|receiving\/(?:routes|retired|forwards)|smtp\/refusals|approvals|receiving\/(?:hosts|forwards)\/[^/]+\/(?:recheck|resend))/.test(c[1])), [], 'Nothing excluded reached Nightmail.');
     // The <account> prefetch: status, domains and sending, without the activity trail, webhook failures, request IDs or key counts.
     const account = JSON.stringify(turns[0]!.body).match(/<account read=[\s\S]*?<\/account>/)?.[0] ?? '';
     assert.ok(account.includes('news.acme.test') && account.includes('campaigns'), account.slice(0, 400));
@@ -1251,6 +1290,33 @@ describe('support Worker', () => {
     assert.deepEqual(toolNames({ channel: 'email', verified: true, manager: true }).filter(n => RECEIVING.includes(n)), ['receiving_hosts']);
     assert.deepEqual(toolNames({ channel: 'email', verified: true, manager: false }).filter(n => RECEIVING.includes(n)), []);
     assert.deepEqual(toolNames({ channel: 'email' }).filter(n => RECEIVING.includes(n)), []);
+  }, 120_000);
+
+  test('safe actions and proposals to staff: an owner’s chat is offered them, asks the team for a limit through its own stamp and says it asked; a risky change called directly is no tool and reaches nothing; a member’s chat and every email get none of them', async () => {
+    const chat = await chatAs('usr_lown', 'owner'), from = (await fakeCalls()).length, before = recorded.length;
+    const frames = await turn(chat, 'Limit probe: we launch next week and need 50,000 emails a day.');
+    assert.equal(frames.find(f => f.type === 'tool.start' && f.tool === 'propose_to_staff')?.label, 'Asking the team to approve a change…', JSON.stringify(frames.map(f => f.type)));
+    assert.match(frames.find(f => f.type === 'message.end')?.text ?? '', /asked the Nightmail team/);
+    const asked = recorded.slice(before).filter(r => about(r, 'Limit probe'));
+    assert.ok(asked.length >= 3 && asked.every(r => SAFE.every(n => offered(r).includes(n)) && !offered(r).includes('pause_sending')), JSON.stringify(asked.map(offered)));
+    // The direct call found no such tool: its result is an error, and it reached nothing. The only change sent is the
+    // proposal, for the chat's own workspace, which the team approves or not.
+    const blocks = (asked.at(-1)!.body.messages as any[]).flatMap(blocksOf), direct = blocks.find((b: any) => b.type === 'tool_result' && b.tool_use_id === 'toolu_limit_direct');
+    assert.ok(direct && (direct.is_error === true || /unavailable|not available|no such|unknown|invalid/i.test(JSON.stringify(direct.content))), JSON.stringify(direct));
+    assert.deepEqual((await stampedCalls(chat.id, from)).filter(c => c[3] !== 'GET').map(c => [c[3], c[1], c[4]]),
+      [['POST', '/v1/support/approvals?workspaceId=ws_acme', { kind: 'raise_daily_limit', reason: 'Launch next week; standing is ok and the evaluation finished.', daily: 50000 }]]);
+    const kept = (await (await (await mf.getWorker('fake-bane')).fetch('http://fake-bane/__proposals')).json() as any[]).filter(p => p.conversationId === chat.id);
+    assert.deepEqual(kept.map(p => [p.workspaceId, p.kind, p.fields]), [['ws_acme', 'raise_daily_limit', { daily: 50000 }]]);
+    const result = blocks.find((b: any) => b.type === 'tool_result' && b.tool_use_id === 'toolu_limit_staff');
+    assert.match(JSON.stringify(result?.content ?? ''), /Nothing has changed: a person on the team decides/);
+    chat.ws.close();
+    // Offered only to an owner's or admin's chat; never to a member's, never by email.
+    assert.deepEqual(toolNames({ channel: 'chat', manager: true }).filter(n => SAFE.includes(n)).sort(), SAFE);
+    for (const who of [{ channel: 'chat', manager: false }, { channel: 'email', verified: true, manager: true }, { channel: 'email', verified: true, manager: false }, { channel: 'email' }] as const)
+      assert.deepEqual(toolNames(who).filter(n => SAFE.includes(n)), [], JSON.stringify(who));
+    // No risky change is a tool at all: limits, pauses, money, deleting and access are proposed or ticketed.
+    for (const risky of ['pause_sending', 'resume_sending', 'raise_daily_limit', 'raise_domain_limit', 'lift_growth_pace', 'release_marketing', 'release_campaign', 'grant_credit', 'refund', 'delete_domain', 'remove_member', 'revoke_key'])
+      assert.ok(!TOOL_NAMES.includes(risky), risky);
   }, 120_000);
 
   test('smtp_refusals: an owner’s chat reads why its mail app was refused through its own stamp, the recipients’ domains fenced; a member’s chat and every email are never offered it', async () => {
