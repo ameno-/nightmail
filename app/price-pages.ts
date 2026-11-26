@@ -27,11 +27,11 @@ import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/read
 //   app's page then takes the painted one's place (index.tsx), with the inlined CSS. The Worker answers /pricing
 //   with pricing.html from the assets, compressed (api/src/worker.ts), and api/src/server.ts does the same on Node; an
 //   address under /compare/ with no page is not found.
-// - With the comparisons' new look (verdict: VITE_PRICE_PAGES=verdict, page/switch.ts; the dev stage's), each
+// - With the comparisons drawn from their data (verdict: every build but VITE_PRICE_PAGES=board, page/switch.ts), each
 //   compare/<slug>.html is instead the page drawn from its data (page/comparison.ts, drawn by page/page.tsx) with its CSS
 //   inlined and none of the app's code, which it doesn't need (its links are plain links, and Get started opens
 //   Overview); and there is compare.html, every comparison on one page (page/hub.ts), with its Markdown twin
-//   compare.md and its place in the sitemap. compare/with-set.html is /compare with the homepage's television over it,
+//   compare.md and its places in the sitemap and llms.txt. compare/with-set.html is /compare with the homepage's television over it,
 //   while Ryan chooses (noindex, its canonical /compare). The Worker answers /compare with compare.html as it does the
 //   comparisons (api/src/worker.ts). Without it, the build writes exactly what it did before.
 // - Each page's Markdown twin, and the homepage's (readable.ts): pricing.md, compare/<slug>.md, index.md;
@@ -183,7 +183,7 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       }
       for (const { file, source } of words.markdownFiles()) this.emitFile({ type: 'asset', fileName: file, source })
       if (drawn) this.emitFile({ type: 'asset', fileName: 'compare.md', source: hubMarkdown(hub) })
-      this.emitFile({ type: 'asset', fileName: 'llms-site.txt', source: llmsSiteIndex() })
+      this.emitFile({ type: 'asset', fileName: 'llms-site.txt', source: llmsSiteIndex(drawn ? [`- [Compare](${canonicalOrigin}/compare.md): ${hub.llms}`] : []) })
       this.emitFile({ type: 'asset', fileName: 'llms-full.txt', source: words.llmsFull() })
       // The homepage's lastmod: the newest figure it quotes or links (every comparison's, which the price pages carry).
       const listed = [{ path: '/', modified: PRICE_PAGES.map(page => page.modified).sort().at(-1)! }, ...PRICE_PAGES_LIVE ? [...PRICE_PAGES, ...drawn ? [hubPage] : []].map(page => ({ path: page.path, modified: page.modified })) : []]

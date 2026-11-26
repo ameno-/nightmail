@@ -61,8 +61,9 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { liveSource, seed, start } from './cls-fixture.mjs';
 
-// The comparisons' look this build has (features/pricing/page/switch.ts reads the same variable).
-const verdictPages = process.env.VITE_PRICE_PAGES === 'verdict'
+// The comparisons' look this build has: from their data unless VITE_PRICE_PAGES=board (features/pricing/page/switch.ts
+// reads the same variable).
+const verdictPages = process.env.VITE_PRICE_PAGES !== 'board'
 const LIMIT = 0.001, JOB_TIMEOUT_MS = 90_000;
 const television = process.env.CLS_HOME === 'tv';
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resolve(app, '..'), out = join(app, '.cls', television ? 'tv' : '');
@@ -351,7 +352,7 @@ const pages = ids => [
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
   // The price pages (features/pricing), public and linked from the homepage: signed out, cold and from one another
   // (their header's links), the calculator also at its large size and signed in.
-  // With the comparisons' new look (VITE_PRICE_PAGES=verdict: features/pricing/page/switch.ts, the dev stage's) a
+  // With the comparisons drawn from their data (every build but VITE_PRICE_PAGES=board: features/pricing/page/switch.ts) a
   // comparison is a page of its own HTML with no app, so nothing reaches the calculator from it in the app's own
   // navigation (it is measured cold), the steel frame is the boards' alone, and there is /compare, with and without the
   // homepage's television over it.
