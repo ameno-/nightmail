@@ -3,7 +3,7 @@ import { productName, publicOrigin } from '../../../../api/src/brand.ts'
 import { COMPARISONS, OFFERS } from './compare/index.ts'
 import { PRICE_PAGES, type PricePage } from './pages.ts'
 import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
-import { billMath, claim, dayOf, formatCount, lastChecked, listOf, money, nightmail, nightmailBill, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
+import { billMath, claim, dayOf, formatCount, lastChecked, listOf, money, nightmail, nightmailBill, opening, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
 
 // What the public pages say, for readers that aren't browsers (app/price-pages.ts writes each file): a Markdown twin of
 // the homepage (/index.md), the calculator (/pricing.md) and each comparison (/compare/<slug>.md) with the same facts
@@ -28,7 +28,12 @@ const terms = () => [
 /** Every page a comparison's figures were read on, once each, with the day. */
 const pagesRead = (c: Comparison) => [...new Map(sourcesOf(c).map(source => [source.url, source])).values()]
 export const trademarks = `Product names belong to their owners and only identify their products. ${productName} isn’t affiliated with them.`
-const comparisonLinks = (except?: string) => COMPARISONS.filter(c => c.slug !== except).map(c => `- [${c.title}](${url(markdownPath(c.path))}): ${c.description}`).join('\n')
+/** What Nightmail charges, in one sentence. */
+const price = `${nightmail.perThousand} per 1,000 emails, sent or received, after ${free} free every month`
+/** A comparison in a sentence an assistant can quote: its headline, then the board's opening size with both monthly
+ *  prices and the day the competitor's were read. */
+const quotable = (c: Comparison) => { const o = opening(c, c.sizes[1]!); return `${claim(c).replaceAll('\u00a0', ' ')}. At ${o.size}: ${c.vendor} ${o.theirs} (${o.plan}), ${productName} ${o.ours}; ${c.vendor}’s prices checked ${o.day}.` }
+const comparisonLinks = (except?: string) => COMPARISONS.filter(c => c.slug !== except).map(c => `- [${c.title}](${url(markdownPath(c.path))}): ${quotable(c)}`).join('\n')
 
 /** A comparison's page in Markdown: its headline, the board at every size its fader reaches, the rows with their
  *  sources, Also in the box, the terms and the page's small print. */
@@ -44,7 +49,7 @@ export function comparisonMarkdown(c: Comparison): string {
   const head = [...sizeHead, productName, vendor, `${vendor} plan`]
   return [
     `# ${c.title}`,
-    `> ${claim(c).replaceAll('\u00a0', ' ')}. ${c.lead}`,
+    `> ${quotable(c)} ${c.lead} ${productName}’s price: ${price}.`,
     `Canonical page: ${url(c.path)}`,
     `## A month at each size`,
     `${c.assume} Monthly billing, no promotions. ${vendor}’s prices checked ${dayOf(c.offer.checked)} on [${host(c.offer.pricing)}](${c.offer.pricing}).`,
@@ -80,7 +85,7 @@ export function pricingMarkdown(): string {
   const [, medium] = PRESETS[1]!, bill = nightmailBill(medium.sent, medium.received)
   return [
     `# ${productName} price calculator`,
-    `> What ${productName} costs at your size, beside ${listOf(vendors)}. ${nightmail.perThousand} per 1,000 emails; contacts and teammates are free.`,
+    `> What ${productName} costs at your size, beside ${listOf(vendors)}: ${price}. Contacts and teammates are free.`,
     `Canonical page: ${url('/pricing')}`,
     `## How ${productName} charges`,
     terms(),
@@ -89,9 +94,9 @@ export function pricingMarkdown(): string {
     `Each vendor’s cheapest plan that holds the numbers, list price before tax, monthly billing, no promotions. Prices checked on ${listOf(checked)}.`,
     table(['Size', 'Sent', 'Received', 'Contacts', 'Teammates', productName, ...vendors], rows, [1, 2, 3, 4, 5]),
     `Any other numbers: ${url('/pricing')}?sent=…&received=…&contacts=…&teammates=… (each a whole number) opens the calculator on them.`,
+    trademarks,
     `## Comparisons`,
     comparisonLinks(),
-    trademarks,
   ].join('\n\n') + '\n'
 }
 
@@ -126,15 +131,18 @@ export function markdownFiles(): { file: string; source: string }[] {
 /** llms.txt's lines for the site's own pages (the API puts them under its title: api/src/site-index.ts). */
 export function llmsSiteIndex(): string {
   return [
+    `Hosted ${productName} charges ${price}. Contacts and teammates: no charge.`,
     `## Product and pricing`,
     `- [${productName}](${url('/index.md')}): what it does and what it costs\n- [Price calculator](${url('/pricing.md')}): ${productName} beside ${listOf([...new Set(OFFERS.map(offer => offer.vendor))])} at three sizes, and how to price any other\n- [The website in full](${url('/llms-full.txt')}): these pages and every comparison, in one file`,
     `## Comparisons`,
     comparisonLinks(),
   ].join('\n\n') + '\n\n'
 }
-/** llms-full.txt: every page's Markdown twin, one after another. */
+/** llms-full.txt: every page's Markdown twin, one after another, without the list of the other pages each twin ends with
+ *  (the calculator's Comparisons, a comparison's More): the homepage's Compared lists them once. */
 export function llmsFull(files = markdownFiles()): string {
-  return [`# ${productName}: the website in full`, `> The homepage, the price calculator and every comparison, as Markdown. API documentation: ${url('/docs.md')}.`, ...files.map(({ source }) => source.trim().replace(/^# /, '## ').replace(/\n(#{2,5}) /g, '\n#$1 '))].join('\n\n') + '\n'
+  const own = (source: string) => source.trim().replace(/\n## (?:More|Comparisons)\n[\s\S]*$/, '')
+  return [`# ${productName}: the website in full`, `> The homepage, the price calculator and every comparison, as Markdown. ${productName} charges ${price}. API documentation: ${url('/docs.md')}.`, ...files.map(({ source }) => own(source).replace(/^# /, '## ').replace(/\n(#{2,5}) /g, '\n#$1 '))].join('\n\n') + '\n'
 }
 
 // ---------------------------------------------------------------- structured data (JSON-LD)

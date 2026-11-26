@@ -251,18 +251,24 @@ export function comparisonOf(entry: Entry): Comparison {
   const sizes = entry.sizes.map(use)
   return { ...entry, title: `Nightmail vs ${entry.vendor}`, ...searchWords(entry, sizes[1]!), path: `/compare/${entry.slug}`, sizes, use }
 }
+/** The board's opening size as a sentence names it, with both monthly prices, the competitor's plan and the day its
+ *  prices were read: what the search result's description (searchWords) and the Markdown twin's summary quote. */
+export function opening(entry: Pick<Entry, 'offer' | 'model'>, u: Usage) {
+  const m = entry.model, theirs = theirPrice(entry.offer, u)!
+  const size = m.per === 'contact' ? `${formatCount(u.contacts)} contacts emailed ${m.sendsPerContact} times a month`
+    : m.per === 'inbox' ? `${formatCount(u.inboxes ?? 0)} agent inboxes, each ${m.receivedPerInbox} in and ${m.sentPerInbox} out a month`
+      : m.per === 'received' ? `${formatCount(u.received)} emails received a month` : `${formatCount(u.sent)} emails a month`
+  return { size, theirs: money(theirs.cents), plan: theirs.plan, ours: nightmailBill(u.sent, u.received).text, day: dayOf(entry.offer.checked) }
+}
 /** A comparison's title and description in search results and link previews, made from its data: led by what someone
  *  types ("<vendor> alternative", "<vendor> pricing"), then the board's opening size with both monthly prices and the day
  *  the vendor's were read, and how the vendor charges (its lead's first sentence) or what else the page has. The title
  *  fits 60 characters and the description 160 (price-pages.ts checks both): the first of these that fits. */
 function searchWords(entry: Entry, u: Usage): { searchTitle: string; description: string } {
-  const { vendor, model: m } = entry, theirs = theirPrice(entry.offer, u)!, ours = nightmailBill(u.sent, u.received).text
+  const { vendor } = entry, { size, theirs, plan, ours, day } = opening(entry, u)
   const named = entry.aka ? `${vendor} (${entry.aka})` : vendor, title = `${named} alternative: Nightmail vs ${vendor} pricing`
-  const size = m.per === 'contact' ? `${formatCount(u.contacts)} contacts emailed ${m.sendsPerContact} times a month`
-    : m.per === 'inbox' ? `${formatCount(u.inboxes ?? 0)} agent inboxes, each ${m.receivedPerInbox} in and ${m.sentPerInbox} out a month`
-      : m.per === 'received' ? `${formatCount(u.received)} emails received a month` : `${formatCount(u.sent)} emails a month`
-  const head = `${named} pricing vs Nightmail, checked ${dayOf(entry.offer.checked)}: ${size}, `, how = entry.lead.split(/(?<=\.) /)[0]!
-  const prices = [`${head}${vendor} ${money(theirs.cents)} (${theirs.plan}), Nightmail ${ours}.`, `${head}${vendor} ${money(theirs.cents)}, Nightmail ${ours}.`]
+  const head = `${named} pricing vs Nightmail, checked ${day}: ${size}, `, how = entry.lead.split(/(?<=\.) /)[0]!
+  const prices = [`${head}${vendor} ${theirs} (${plan}), Nightmail ${ours}.`, `${head}${vendor} ${theirs}, Nightmail ${ours}.`]
   const words = [...prices.map(text => `${text} ${how}`), ...prices.map(text => `${text} See every size and what each includes.`), ...prices]
   return { searchTitle: title.length <= 60 ? title : `${named} alternative and pricing · Nightmail`, description: words.find(text => text.length <= 160) ?? words.at(-1)! }
 }
