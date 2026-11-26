@@ -492,7 +492,7 @@ export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number;
   await stage('payments', started + budget * .4, async () => { result.payments = await foldPayments(runtime, run); });
   await stage('sample', started + budget * .75, async () => { result.sampled = await sampleSends(runtime, run); });
   // Groups the entities whose links changed and rescores the clusters longest unscored (src/abuse-clusters.ts).
-  // A change worth a person's look leaves an alert in the outbox; stored alerts are posted to Slack, a few an hour,
+  // A change worth a person's look leaves an alert in the outbox; review alerts are posted to Slack, a few an hour,
   // when the abuse or the operator alerts' webhook is configured (src/abuse-alerts.ts).
   const clusters = { grouped: 0, rescored: 0, alerts: 0, posted: 0 };
   await stage('clusters', started + budget, async () => {

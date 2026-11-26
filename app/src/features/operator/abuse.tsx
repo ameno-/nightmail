@@ -38,7 +38,7 @@ const kindText: Record<AbuseAlert['kind'], string> = { new: 'New', raised: 'Risk
 // Stored: waiting for a post to Slack for a day, else kept here only (no webhook is set, or its day has passed).
 const statusText: Record<AbuseAlert['status'], string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed' }
 const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'neutral', sent: 'success', failed: 'danger' }
-const deliveryText = (row: AbuseAlert, posting: boolean) => row.status !== 'stored' ? statusText[row.status] : posting && Date.now() - Date.parse(row.createdAt) < 86_400_000 ? 'Queued' : 'Not posted'
+const deliveryText = (row: AbuseAlert, posting: boolean) => row.status !== 'stored' ? statusText[row.status] : posting && row.band === 'review' && Date.now() - Date.parse(row.createdAt) < 86_400_000 ? 'Queued' : 'Not posted'
 const reviewText: Record<AbuseReview['action'], string> = { watch: 'Watched', dismiss: 'Dismissed' }
 // When, in a tooltip; who, as a masked address where it shows (never in a tooltip, which can't mask it).
 const reviewTitle = (review: AbuseReview) => `${reviewText[review.action]} ${when(review.at)}`

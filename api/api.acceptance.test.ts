@@ -30876,7 +30876,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       admission.mock.restore();
     });
   });
-  test('abuse monitoring: a cluster that needs a look leaves one alert whose Slack message is one line and three bullets with no personal data; it posts to the abuse webhook or else the operator alerts\' one, never without a webhook, each message once, and a failed post waits longer each time; operators read the outbox and Watch or Dismiss an alert; an action from the abuse view gives the workspace a fixed reason and keeps the note in the staff audit', async t => {
+  test('abuse monitoring: a cluster that needs a look leaves one alert whose Slack message is one line and three bullets with no personal data; only review alerts post, to the abuse webhook or else the operator alerts\' one, never without a webhook, each message once, and a failed post waits longer each time; operators read the outbox and Watch or Dismiss an alert; an action from the abuse view gives the workspace a fixed reason and keeps the note in the staff audit', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const h = await abuseHarness(runtime, db), { payment, signIn, abuse } = h, wid = runtime.config.workspaceId, { loadConfig } = await import('./src/config.js'), alerts = await import('./src/abuse-alerts.js'), { REASON_CODES } = await import('./src/abuse-clusters.js');
       const outbox = async () => (await db.query('SELECT id,cluster_id,band,score,kind,workspaces,status,attempts,error,payload,sent_at,members,reasons FROM abuse_alerts ORDER BY score,id')).rows as Json[];
@@ -30944,25 +30944,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const post: import('./src/abuse-alerts.js').SlackPost = async (url, init) => { posts.push({ url, init }); return answer; };
       await abuse.abuseHourly(runtime, { post });
       assert.deepEqual([posts.length, (await outbox()).map(alert => alert.status)], [0, ['stored', 'stored']]);
-      // With one: a refused post waits 50 minutes before it is tried again, then 100; an accepted one is sent once, to
-      // that URL alone, without following a redirect.
+      // With one: only the review alert is posted; the high one stays stored. A refused post waits 50 minutes before it
+      // is tried again, then 100; an accepted one is sent once, to that URL alone, without following a redirect.
       runtime.config.abuseSlackWebhookUrl = hook;
       const warnings = t.mock.method(console, 'warn', () => {});
       const waits = async () => (await db.query(`SELECT round(extract(epoch FROM retry_at-now())/60)::int AS minutes FROM abuse_alerts ORDER BY score,id`)).rows.map((row: Json) => row.minutes);
       await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.status, alert.attempts, alert.error]), await waits()], [2, [['stored', 1, 'HTTP_500'], ['stored', 1, 'HTTP_500']], [50, 50]]);
+      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.band, alert.status, alert.attempts, alert.error]), await waits()], [1, [['review', 'stored', 1, 'HTTP_500'], ['high', 'stored', 0, null]], [50, null]]);
       await abuse.abuseHourly(runtime, { post });
-      assert.equal(posts.length, 2, 'Not before its time.');
-      await db.query(`UPDATE abuse_alerts SET retry_at=now()`); await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => alert.attempts), await waits()], [4, [2, 2], [100, 100]]);
+      assert.equal(posts.length, 1, 'Not before its time.');
+      await db.query(`UPDATE abuse_alerts SET retry_at=now() WHERE band='review'`); await abuse.abuseHourly(runtime, { post });
+      assert.deepEqual([posts.length, (await outbox()).map(alert => alert.attempts), await waits()], [2, [2, 0], [100, null]]);
       assert.ok(warnings.mock.calls.every(call => !/hooks\.slack|T0\/B0|blocks/.test(String(call.arguments[0]))), 'Neither the webhook nor the message is logged.');
       warnings.mock.restore();
-      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '25 hours' WHERE band='review'`); await db.query(`UPDATE abuse_alerts SET retry_at=now()`);
+      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '25 hours',retry_at=now() WHERE band='review'`);
       answer = { ok: true, status: 200 };
+      await abuse.abuseHourly(runtime, { post });
+      assert.equal(posts.length, 2, 'An alert more than a day old is not posted late.');
+      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '1 minute' WHERE band='review'`);
       await abuse.abuseHourly(runtime, { post }); await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.band, alert.status, alert.attempts, alert.error, alert.sent_at !== null]), await waits()], [5, [['review', 'stored', 2, 'HTTP_500', false], ['high', 'sent', 3, null, true]], [0, null]], 'An alert more than a day old is not posted late.');
+      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.band, alert.status, alert.attempts, alert.error, alert.sent_at !== null]), await waits()], [3, [['review', 'sent', 3, null, true], ['high', 'stored', 0, null, false]], [null, null]], 'The review alert is posted once; the high one never.');
       const last = posts.at(-1)!;
-      assert.deepEqual([last.url, last.init.method, last.init.redirect, last.init.headers, JSON.parse(last.init.body)], ['https://hooks.slack.com/services/T0/B0/fixture', 'POST', 'manual', { 'content-type': 'application/json' }, (await outbox())[1]!.payload]);
+      assert.deepEqual([last.url, last.init.method, last.init.redirect, last.init.headers, JSON.parse(last.init.body)], ['https://hooks.slack.com/services/T0/B0/fixture', 'POST', 'manual', { 'content-type': 'application/json' }, (await outbox())[0]!.payload]);
 
       // Operators read the outbox; nobody else does; the read is recorded.
       const path = '/v1/operator/abuse/alerts';
@@ -30972,7 +30975,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const { setOperator } = await import('./scripts/set-operator.js');
       await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic abuse reviewer']);
       const read = ok(await local('GET', path));
-      assert.deepEqual([read.data.map((alert: Json) => [alert.band, alert.kind, alert.status, alert.clusterId, alert.workspaces, alert.review]), read.delivery, read.nextCursor, read.data[0].payload], [[['high', 'raised', 'sent', cluster, 3, null], ['review', 'new', 'stored', cluster, 2, null]], 'slack', null, (await outbox())[1]!.payload]);
+      assert.deepEqual([read.data.map((alert: Json) => [alert.band, alert.kind, alert.status, alert.clusterId, alert.workspaces, alert.review]), read.delivery, read.nextCursor, read.data[0].payload], [[['high', 'raised', 'stored', cluster, 3, null], ['review', 'new', 'sent', cluster, 2, null]], 'slack', null, (await outbox())[1]!.payload]);
       const paged = ok(await local('GET', `${path}?limit=1`)), latest = ok(await local('GET', `${path}?cluster=${cluster}&limit=1`)).data;
       assert.deepEqual([paged.data.length, ok(await local('GET', `${path}?limit=1&cursor=${encodeURIComponent(paged.nextCursor)}`)).data[0].band, ok(await local('GET', '/v1/operator/abuse/clusters')).alerts, latest.map((alert: Json) => alert.band), ok(await local('GET', `${path}?cluster=acl_${'0'.repeat(24)}`)).data],
         [1, 'review', 2, ['high'], []]);
@@ -31018,7 +31021,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await outbox(), []);
     });
   });
-  test('abuse monitoring: an alert is not raised again for what operators already have: a watched one only at a higher level, a dismissed one only with a new member or reason, and not for workspaces an alert named this week; Slack gets at most three an hour, high first, only while the cluster still needs a look and nobody has reviewed it', async t => {
+  test('abuse monitoring: an alert is not raised again for what operators already have: a watched one only at a higher level, a dismissed one only with a new member or reason, and not for workspaces an alert named this week; Slack gets review alerts only, at most three an hour, oldest first, only while the cluster still needs a look and nobody has reviewed it', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const h = await abuseHarness(runtime, db), { payment } = h, { setOperator } = await import('./scripts/set-operator.js');
       await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic abuse operator']);
@@ -31062,25 +31065,26 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       z.push(await member('named-3', 'fp_named')); await h.hourly();
       assert.deepEqual((await alertsOf(zc)).map(a => [a.band, a.kind]), [['review', 'grew']]);
 
-      // Two more at review; one of them no longer needs a look by the time Slack is told.
-      const w = await group('cleared'), v = await group('extra'); await h.hourly();
-      const wc = (await clusterOf(w[0]!)).id, vc = (await clusterOf(v[0]!)).id;
+      // Three more at review; one of them no longer needs a look by the time Slack is told.
+      const w = await group('cleared'), v = await group('extra'), u = await group('later'); await h.hourly();
+      const wc = (await clusterOf(w[0]!)).id, vc = (await clusterOf(v[0]!)).id, uc = (await clusterOf(u[0]!)).id;
       await standing(w[0]!, 'ok'); await rescore(); assert.equal((await clusterOf(w[0]!)).band, 'watch');
 
-      // Delivery: high first, then the oldest; three in an hour; never one reviewed, or whose cluster dropped below review.
+      // Delivery: review alerts only, the oldest first; three in an hour; never a high one, one reviewed, or one whose
+      // cluster dropped below review.
       const at = (cluster: string, kind: string, minutes: number) => db.query(`UPDATE abuse_alerts SET created_at=now()-make_interval(mins=>$3) WHERE cluster_id=$1 AND kind=$2`, [cluster, kind, minutes]);
-      await at(xc, 'raised', 10); await at(yc, 'grew', 40); await at(zc, 'grew', 30); await at(vc, 'new', 20); await at(wc, 'new', 5);
+      await at(xc, 'raised', 50); await at(yc, 'grew', 40); await at(zc, 'grew', 30); await at(vc, 'new', 20); await at(uc, 'new', 15); await at(wc, 'new', 5);
       runtime.config.abuseSlackWebhookUrl = 'https://hooks.slack.com/services/T0/B0/fixture';
       const posts: string[] = [], post: import('./src/abuse-alerts.js').SlackPost = async (_url, init) => { posts.push(JSON.parse(init.body).text); return { ok: true, status: 200 }; };
       const sent = async () => (await db.query(`SELECT cluster_id,kind FROM abuse_alerts WHERE status='sent' AND id<>$1`, [gone])).rows.map((row: Json) => `${row.cluster_id}:${row.kind}`).sort();
       await h.abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts, await sent()], [['High risk 85: 2 related accounts (risk raised)', 'Review risk 60: 3 related accounts (new member)', 'Review risk 60: 3 related accounts (new member)'], [`${xc}:raised`, `${yc}:grew`, `${zc}:grew`].sort()]);
+      assert.deepEqual([posts, await sent()], [['Review risk 60: 3 related accounts (new member)', 'Review risk 60: 3 related accounts (new member)', 'Review risk 55: 2 related accounts'], [`${yc}:grew`, `${zc}:grew`, `${vc}:new`].sort()]);
       await h.abuse.abuseHourly(runtime, { post });
       assert.equal(posts.length, 3, 'Three an hour.');
       await db.query(`UPDATE abuse_alerts SET sent_at=now()-interval '61 minutes' WHERE sent_at IS NOT NULL`);
       await h.abuse.abuseHourly(runtime, { post }); await h.abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, posts[3], (await alertsOf(vc))[0]!.status, (await alertsOf(wc))[0]!.status, ...(await alertsOf(xc)).concat(await alertsOf(yc)).filter(a => a.review).map(a => a.status)],
-        [4, 'Review risk 55: 2 related accounts', 'sent', 'stored', 'stored', 'stored']);
+      assert.deepEqual([posts.length, posts[3], (await alertsOf(uc))[0]!.status, (await alertsOf(wc))[0]!.status, (await alertsOf(xc))[1]!.band, (await alertsOf(xc))[1]!.status, ...(await alertsOf(xc)).concat(await alertsOf(yc)).filter(a => a.review).map(a => a.status)],
+        [4, 'Review risk 55: 2 related accounts', 'sent', 'stored', 'high', 'stored', 'stored', 'stored']);
     });
   });
   test('abuse monitoring: mail that reaches no one outside its workspace (Nightmail\'s own test and setup emails, campaign tests, mail to its own members) is never fingerprinted and the built-in domain is nobody\'s sending domain, so new workspaces do not cluster on onboarding; a value that became common links nobody, even through a link written while it was rare; a waitlist refusal counts only when it repeats', async t => {

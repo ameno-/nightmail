@@ -7,9 +7,9 @@ import { errors, json, log, notFound, response, security, type App } from './cor
 import { operatorActor } from './operator.js';
 
 // Abuse monitoring, part 3: the alert outbox and its review. When a cluster first reaches a level a person should look
-// at (review or high), climbs a level or gains a member there, one alert is stored with the Slack message it posts. The
-// message goes to ABUSE_SLACK_WEBHOOK_URL, else to the operator alerts' webhook (config.ts); with neither, alerts are
-// only stored. Operators read them in the Operator area either way, and review one from its cluster's page: Watch
+// at (review or high), climbs a level or gains a member there, one alert is stored with its Slack message. Only review
+// alerts are posted: to ABUSE_SLACK_WEBHOOK_URL, else to the operator alerts' webhook (config.ts); high ones, and every
+// alert when neither is set, are only stored. Operators read them in the Operator area either way, and review one from its cluster's page: Watch
 // (reviewed, keep tracking: raised again only at a higher level) or Dismiss (not abuse: raised again only with a member
 // or a reason it did not have). Pause is there too, on each workspace.
 //
@@ -98,8 +98,9 @@ export async function noteAlert(runtime: Hosted, change: ClusterChange) {
 export type SlackPost = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; redirect: 'manual'; signal: AbortSignal }) => Promise<{ ok: boolean; status: number; body?: { cancel(): Promise<void> } | null }>;
 const POSTED_AN_HOUR = 3, ATTEMPTS_MOST = 5;
 /**
- * The delivery adapter: posts the stored alerts of the last day that nobody has reviewed and whose cluster is still at
- * review or high, high ones first, then the oldest, at most POSTED_AN_HOUR in any hour; the rest wait for the next run.
+ * The delivery adapter: posts the stored review alerts of the last day that nobody has reviewed and whose cluster is
+ * still at review or high, oldest first, at most POSTED_AN_HOUR in any hour; the rest wait for the next run. High
+ * alerts are never posted: operators read them in the Operator area.
  * Without a webhook it does nothing and alerts stay stored. A post that fails is tried again after 50 minutes, then
  * 100, 200 and 400 (the job runs hourly), five times in all; one that succeeds is marked sent. Runs inside the hourly
  * job's lease, so two runs never post the same alert.
@@ -112,8 +113,8 @@ export async function deliverAlerts(runtime: Hosted, deadline: number, post: Sla
     const room = POSTED_AN_HOUR - (posted?.n ?? 0);
     if (room <= 0) return [];
     return (await tx.execute<{ id: string; payload: unknown }>(sql`SELECT a.id,a.payload FROM abuse_alerts a JOIN abuse_clusters c ON c.id=a.cluster_id AND c.band IN ('review','high')
-      WHERE a.status='stored' AND a.review IS NULL AND a.created_at>now()-interval '1 day' AND (a.retry_at IS NULL OR a.retry_at<=now())
-      ORDER BY a.band='high' DESC,a.created_at LIMIT ${room}`)).rows;
+      WHERE a.band='review' AND a.status='stored' AND a.review IS NULL AND a.created_at>now()-interval '1 day' AND (a.retry_at IS NULL OR a.retry_at<=now())
+      ORDER BY a.created_at LIMIT ${room}`)).rows;
   });
   let sent = 0;
   for (const alert of due) {
