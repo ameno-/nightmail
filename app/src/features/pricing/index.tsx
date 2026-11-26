@@ -74,7 +74,7 @@ export function PricePage() {
   // The board's frame in the homepage's steel, while its concrete waits for a yes (board.tsx): ?frame=steel.
   const [search] = useSearchParams()
   // (/compare is a page only with the comparisons drawn from their data: page/pricing.tsx answers it there.)
-  const doc = /^\/(?:pricing|alternatives)\//.test(pathname) ? PRICE_PAGES.find(p => p.path === pathname.replace(/\/+$/, ''))?.doc : undefined
+  const doc = PRICE_PAGES.find(p => p.path === pathname.replace(/\/+$/, ''))?.doc
   if (doc) return <DocFrame title={doc.searchTitle}><DocView doc={doc} /></DocFrame>
   if ((vendor !== null && !comparison) || /^\/(?:pricing|alternatives)\//.test(pathname) || pathname.replace(/\/+$/, '') === '/compare') return <PriceFrame title={`Page not found · ${productName.toLowerCase()}`}><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
   // The tab's title is the one the page's HTML carries (price-pages.ts), so search engines read one title either way.

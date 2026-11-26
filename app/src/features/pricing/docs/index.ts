@@ -1,6 +1,7 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { comparisons } from '../compare/index.ts'
 import type { Doc } from './doc.ts'
+import { emailForAgents } from './agents.ts'
 import { vendorAlternatives } from './alternatives.ts'
 import { ALTERNATIVES_VENDORS, PRICING_VENDORS } from './registry.ts'
 import { vendorPricing } from './vendor-pricing.ts'
@@ -13,6 +14,8 @@ const pricingVendors = PRICING_VENDORS.map(slug => ({ slug, vendor: comparisons[
 export const DOCS: Doc[] = [
   ...PRICING_VENDORS.map(slug => vendorPricing(comparisons[slug]!, pricingVendors)),
   ...ALTERNATIVES_VENDORS.map(slug => vendorAlternatives(comparisons[slug]!)),
+  // The use-case pages, each from the comparisons of its kind.
+  emailForAgents(),
 ]
 
 /** A vendor's pricing page needs this much of its own to be worth an address: a page with less is a template with a name

@@ -33,7 +33,7 @@ export function PricePage() {
   const comparison = vendor !== null && Object.hasOwn(comparisons, vendor) ? comparisons[vendor]! : null
   if (comparison) return <Frame title={PRICE_PAGES.find(page => page.comparison === comparison)!.searchTitle}><ComparisonView comparison={comparison} /></Frame>
   // A vendor's pricing or alternatives page (docs/), or (another address under them) not found, as ../index.tsx says it.
-  const doc = /^\/(?:pricing|alternatives)\//.test(at) ? PRICE_PAGES.find(page => page.path === at)?.doc : undefined
+  const doc = PRICE_PAGES.find(page => page.path === at)?.doc
   if (doc) return <Frame title={doc.searchTitle}><DocView doc={doc} /></Frame>
   return <Calculator />
 }

@@ -15,8 +15,11 @@ export const CRAWL_DISALLOW = ['/v1/', '/api/', '/mcp', '/internal/', '/unsubscr
 /** The pages search engines may index: the homepage, the price pages, the docs and the legal pages. Every other address
  *  the dashboard's shell answers is a signed-in screen (Overview, Domains, Connect …), which a crawler sees only as the
  *  sign-in, so the Worker and the Node server send it with X-Robots-Tag: noindex. */
-export const isPublicPage = (pathname: string) => pathname === '/' || /^\/(?:pricing|compare|docs|legal)(?:\/|$)|^\/alternatives\//.test(pathname);
+export const isPublicPage = (pathname: string) => pathname === '/' || /^\/(?:pricing|compare|docs|legal)(?:\/|$)|^\/alternatives\//.test(pathname) || SITE_ROOT_PAGES.includes(pathname);
 
+/** The site's own pages at the top level that the build writes (app/price-pages.ts: the use-case pages, docs/agents.ts).
+ *  The Worker serves them from the build's files, as it does the pages under isSitePage's directories. */
+export const SITE_ROOT_PAGES = ['/email-for-ai-agents'];
 /** An address under the directories the build writes the site's own pages into (app/price-pages.ts): a comparison
  *  (/compare/<vendor>), a vendor's pricing page (/pricing/<vendor>) or its alternatives page (/alternatives/<vendor>). The
  *  Worker serves them from the build's files. */
