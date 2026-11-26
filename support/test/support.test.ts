@@ -2268,8 +2268,8 @@ describe('support Worker', () => {
     const marked = async (messageId: string) => (await fakeCalls(instance)).filter(c => c[0] === 'markDelivery' && c[2] === messageId).map(c => c[3]);
     /** The wake has queued this staff reply (its pull runs after the 202). */
     const queued = (id: string, reply: string) => eventually(async () => (await drive(id)).rows.some(r => r.id === `staff:${reply}`) || undefined);
-    async function chat() {
-      const start = await instance.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: handoff() }) });
+    async function chat(token = handoff()) {
+      const start = await instance.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: token }) });
       const started = await start.json() as any;
       const socket = await instance.dispatchFetch(started.socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
       const ws = (socket as any).webSocket; ws.accept();
@@ -2403,6 +2403,65 @@ describe('support Worker', () => {
       assert.equal((await instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', body: JSON.stringify({ conversationId: c.id }) })).status, 401);
       await new Promise(r => setTimeout(r, 300));
       assert.equal((await fakeCalls(instance)).filter(x => x[0] === 'pullOutbox').length, pulls);
+    }, 180_000);
+
+    test('a ticket the dashboard filed before any chat existed: a staff reply wakes the Worker, which adopts the chat without registering it again and emails the reply; resuming it opens that chat with the filed message, and no turn answers it; nobody else can resume it', async () => {
+      const id = 'conv_' + 'f'.repeat(26), user = 'usr_filedfirst', filed = 'msg_filedfirstaaaaaa', reply = 'msg_filedreplyaaaaaa';
+      const resume = (conversationId: string, token: string) => instance.dispatchFetch(`${SUPPORT}/chat/resume`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ conversationId, handoff: token }) });
+      // Nightmail holds it (opened from the filed message, a staff ticket, the agent paused for it); the Worker never did.
+      await fakeHook('/__filed', { id, userId: user, messages: [{ id: filed, text: 'My domain still says pending after a day.', at: new Date(Date.now() - 60_000).toISOString() }] }, instance);
+      assert.equal(await (await db()).prepare('SELECT id FROM conversations WHERE id = ?').bind(id).first(), null);
+      const models = recorded.length, from = (await fakeCalls(instance)).length;
+      // 1. A staff reply wakes it: adopted, and the reply goes by email (no panel open) and is marked sent.
+      await setInbox({ id, reply: { id: reply, text: 'Hi, the record is fixed on our side now.', staffName: 'Dana Rivera' } });
+      assert.equal((await wake(id)).status, 202);
+      await queued(id, reply);
+      await drive(id, { tick: true });
+      const emailed = await eventually(async () => { const e = await sends(`staff-${reply}`); return e.length ? e : undefined; });
+      assert.deepEqual([emailed![0][2], emailed![0][3].to], ['/v1/inbound/threads', ['filedfirst@other.test']]);
+      assert.deepEqual(await marked(reply), ['sent']);
+      assert.ok(!(await fakeCalls(instance)).slice(from).some(c => c[0] === 'registerConversation'), 'Nightmail already holds it: never registered again.');
+      assert.deepEqual(await (await db()).prepare('SELECT channel, user_id, workspace_id, status FROM conversations WHERE id = ?').bind(id).first(), { channel: 'chat', user_id: user, workspace_id: 'ws_acme', status: 'ticketed' });
+      // 2. Someone else's handoff can't resume it.
+      assert.equal((await resume(id, handoff('usr_someoneelse'))).status, 403);
+      // 3. Its person resumes it: the filed message and the staff reply are its history, and nothing answered the message.
+      const resumed = await resume(id, handoff(user));
+      assert.equal(resumed.status, 200);
+      const chatSocket = await connect(((await resumed.json()) as any).socketUrl, instance);
+      const history = (await chatSocket.until(f => f.type === 'history')).messages as any[];
+      assert.deepEqual(history.map(m => [m.id, m.role]), [[filed, 'user'], [reply, 'staff']]);
+      assert.equal(recorded.length, models, 'No turn for a filed message: staff answer it.');
+      chatSocket.ws.close();
+      // A chat filed for another person isn't adopted from a resume with this one's handoff.
+      const theirs = 'conv_' + 'g'.repeat(26);
+      await fakeHook('/__filed', { id: theirs, userId: 'usr_filedother', messages: [{ id: 'msg_filedotheraaaaaa', text: 'Is anyone there?', at: new Date().toISOString() }] }, instance);
+      assert.equal((await resume(theirs, handoff(user))).status, 404);
+      assert.equal(await (await db()).prepare('SELECT id FROM conversations WHERE id = ?').bind(theirs).first(), null);
+    }, 180_000);
+
+    test('a message filed into a chat the Worker already holds: taken into its history once, under its own ID, with no turn; one with the words the person sent here in the last hour is the same message', async () => {
+      const c = await chat(handoff('usr_heldfiled'));
+      await setInbox({ id: c.id, channel: 'chat' });
+      c.say('hf1', 'Why are Gmail bounces up?');
+      assert.ok(await c.until(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text ?? '')));
+      c.ws.close();
+      // The chat dropped after the person sent their question; the dashboard filed it (the same words) and one more.
+      const now = new Date().toISOString(), added = 'msg_heldfilednewaaaa';
+      await fakeHook('/__filed', { id: c.id, messages: [{ id: 'msg_heldfiledsameaaa', text: 'Why are Gmail bounces up?', at: now }, { id: added, text: 'Also: my webhook test fails.', at: now }] }, instance);
+      const models = recorded.length;
+      const resumed = await instance.dispatchFetch(`${SUPPORT}/chat/resume`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ conversationId: c.id, handoff: handoff('usr_heldfiled') }) });
+      assert.equal(resumed.status, 200);
+      const again = await connect(((await resumed.json()) as any).socketUrl, instance);
+      const users = ((await again.until(f => f.type === 'history')).messages as any[]).filter(m => m.role === 'user');
+      assert.deepEqual(users.map(m => m.text), ['Why are Gmail bounces up?', 'Also: my webhook test fails.']);
+      assert.equal(users[1].id, added, 'Under its own ID, so the mirror leaves it as it is.');
+      // A reconnect takes nothing twice.
+      again.ws.close();
+      const third = await connect(((await (await instance.dispatchFetch(`${SUPPORT}/chat/resume`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ conversationId: c.id, handoff: handoff('usr_heldfiled') }) })).json()) as any).socketUrl, instance);
+      assert.equal(((await third.until(f => f.type === 'history')).messages as any[]).filter(m => m.role === 'user').length, 2);
+      third.ws.close();
+      await new Promise(r => setTimeout(r, 500));
+      assert.equal(recorded.length, models, 'No turn for a filed message.');
     }, 180_000);
 
     test('the staff inbox: an email answer written before staff took over is held and never sent; while paused nothing is answered; a staff reply goes only to the verified sender', async () => {

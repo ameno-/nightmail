@@ -65,6 +65,8 @@ const handoff = token => {
 // Registered conversations (api/src/support-conversations.ts): Nightmail decides whom each is for, and every stamped
 // request answers for that person only, whatever the request says.
 const conversations = new Map();
+// Chats as Nightmail holds them with what the dashboard filed while the chat couldn't take a message (/__filed).
+const filed = new Map();
 const view = (c, created, generalAnswer) => ({ id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, status: c.closed ? 'closed' : 'open', workspaceId: c.workspaceId, contentShared: !!c.content, created, ...generalAnswer === undefined ? {} : { generalAnswer } });
 // A chat's own routes (api/src/support-conversations.ts chatOnly): an email conversation is refused them.
 const chatOnly = path => /^\\/v1\\/support\\/(?:notes|actions|approvals)(?:\\/|$)/.test(path) || /^\\/v1\\/support\\/domains\\/[^/]+\\/verify$/.test(path)
@@ -306,6 +308,17 @@ export class SupportPlatform extends WorkerEntrypoint {
     if (inboxDown) return unavailable();
     return ok({ data: releases.filter(r => id === undefined || r.conversationId === id) });
   }
+  // GET /v1/operator/support/conversations/{id}/filed: a chat Nightmail holds, whether it opened it from a filed message,
+  // and the customer's filed messages.
+  async filedConversation(id) {
+    calls.push(['filedConversation', id]);
+    if (inboxDown) return unavailable();
+    const c = conversations.get(id), x = filed.get(id);
+    if (!c || c.channel !== 'chat') return missing();
+    const who = person(c.userId), w = memberships(c.userId).find(m => m.id === c.workspaceId);
+    return ok({ id, status: c.closed ? 'closed' : x?.status ?? 'open', filed: !!x?.filed, user: { id: c.userId, name: who.name, email: who.email },
+      workspace: w ? { id: w.id, name: w.name, role: w.role } : null, page: c.page ?? null, requestIds: x?.requestIds ?? [], messages: x?.messages ?? [] });
+  }
   async pullOutbox(id) {
     calls.push(['pullOutbox', id ?? null]);
     if (inboxDown) return unavailable();
@@ -441,6 +454,25 @@ export default {
     if (url.pathname === '/__release') { const { conversationId, messageId } = await request.json(); calls.push(['release', conversationId, messageId]); releases.push({ conversationId, messageId, requestedAt: new Date().toISOString() }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__session') { const { userId, activeSession, sessionSince } = await request.json(); known(userId, userId.slice(4) + '@other.test'); Object.assign(people.get(userId), { activeSession, sessionSince: sessionSince ?? null }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__workspaceName') { const { id, name } = await request.json(); WORKSPACES[id] = name; return new Response(null, { status: 204 }); }
+    // The dashboard filed messages into a chat while the chat couldn't take them (api/src/support-conversations.ts
+    // fileChatTicket): into an existing one, or opening one (filed) for this person and workspace, with a staff ticket
+    // and the agent paused for it. Nightmail's inbox holds the messages.
+    if (url.pathname === '/__filed') {
+      const { id, userId, workspaceId = 'ws_acme', page = '/domains', requestIds = [], messages = [] } = await request.json();
+      let c = conversations.get(id);
+      if (!c) {
+        known(userId, userId.slice(4) + '@other.test'); join(userId, workspaceId);
+        c = { id, channel: 'chat', userId, sender: null, mode: 'member', verification: 'handoff', workspaceId, content: null, closed: false, read: new Set(), page, challenges: new Set(), signedIn: [] };
+        conversations.set(id, c);
+        filed.set(id, { filed: true, status: 'ticketed', requestIds, messages: [] });
+      }
+      const x = filed.get(id) ?? { filed: false, status: 'ticketed', requestIds: [], messages: [] };
+      x.messages.push(...messages); filed.set(id, x);
+      if (!inbox.has(id)) inbox.set(id, { channel: 'chat', status: 'ticketed', paused: null, messages: [], state: {}, outbox: [] });
+      const box = inbox.get(id); box.paused = 'ticket';
+      for (const m of messages) box.messages.push({ id: m.id, author: 'customer', kind: 'filed', text: m.text, at: m.at });
+      return new Response(null, { status: 204 });
+    }
     if (url.pathname === '/__full') { full.add((await request.json()).userId); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__close') { closeFailures = (await request.json()).fail ?? 0; return new Response(null, { status: 204 }); }
     // Support actions: read them all; the person decides one (status, with the API's result, error and delivery); its

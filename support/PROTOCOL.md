@@ -36,6 +36,8 @@ Keep `conversationId`, `socketUrl` and `expiresAt` in `sessionStorage`, keyed by
 
 `POST {support}/chat/resume` with `{ "conversationId", "handoff" }` returns the same shape as `/chat/start`: a new chat token, nothing else. Account access never expires mid-conversation (Nightmail reads it from the conversation on every request), so there is nothing to renew. Use it when:
 
+A chat Nightmail opened from a message the dashboard filed (the chat couldn't take it) resumes the same way, by its ID: the Worker adopts it for that person on the first resume. Its `history` then includes every filed message, as the customer's, and nothing answers them until staff do (the agent is paused for the ticket). A message filed into a chat the Worker already holds shows in `history` from the next resume or connection.
+
 - the chat token expired (connect refused, or `expiresAt` passed);
 - the dashboard was opened with `?support=<conversationId>` for a chat conversation.
 
