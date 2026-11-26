@@ -22,13 +22,16 @@ export const isPublicPage = (pathname: string) => pathname === '/' || /^\/(?:pri
 export const isSitePage = (pathname: string) => /^\/(?:compare|pricing)\//.test(pathname);
 /** Where one of those the build didn't make is (and /compare, without its page): nowhere (404), never the dashboard. */
 export const isMissingComparePage = (pathname: string) => pathname === '/compare' || isSitePage(pathname);
-/** Where a reference page the build didn't make is (app/docs-pages.ts writes one per operation): not found, rather than
+/** Where a reference page the build didn't make is (app/site-pages.ts writes one per operation): not found, rather than
  *  the docs' "Page not found" with 200, which search engines count as a soft 404. */
 export const isMissingDocsPage = (pathname: string) => pathname.startsWith('/docs/api/');
+/** Where a legal document the build didn't make a page for is (app/site-pages.ts writes one per document): not found,
+ *  for the same reason. (/legal itself, and /legal/ on its way there, are the index.) */
+export const isMissingLegalPage = (pathname: string) => /^\/legal\/[^/]/.test(pathname);
 /** Reference pages search engines indexed under an operation's old name (Search Console, 26 Nov 2026): rules were
  *  called rituals, and AI decisions omens. Each old address moves for good (301) to the page under the new name, so it
  *  keeps what it had; the other operations that left the API (the support agent's, and the removed ones) stay not found.
- *  The old names are in no sitemap or llms.txt. app/docs-pages.ts refuses a build where a new name has no page. */
+ *  The old names are in no sitemap or llms.txt. app/site-pages.ts refuses a build where a new name has no page. */
 export const RENAMED_OPERATIONS: Record<string, string> = {
   applyRituals: 'applyRules', attachRituals: 'attachRules', checkRitual: 'checkRule', createRitualFromRecipe: 'createRuleFromRecipe',
   deleteRitual: 'deleteRule', getRitual: 'getRule', getRituals: 'getRules', getRitualTypings: 'getRuleTypings', getRitualVersion: 'getRuleVersion',

@@ -1,9 +1,9 @@
-// (With extensions: the build's config imports this file, docs-pages.ts.)
+// (With extensions: the build's config imports this file, site-pages.ts.)
 import { productName } from '../../../../api/src/brand.ts'
 
 // What each docs page is called in the browser tab, search results and link previews, and its description there. The
 // page sets them as it renders (index.tsx, useDocumentMeta) and the build writes the same into the page's own HTML
-// (app/docs-pages.ts), so a crawler that doesn't run the script reads them too.
+// (app/site-pages.ts), so a crawler that doesn't run the script reads them too.
 
 type Schema = Record<string, any>
 export type OperationEntry = { id: string; method: string; path: string; tag: string; summary: string; description: string; operation: Schema; pathItem: Schema }

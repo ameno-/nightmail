@@ -220,7 +220,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
 }
 
 // The tab's title and the description search results and link previews read, per page (meta.ts): the same as the
-// page's own HTML carries (app/docs-pages.ts).
+// page's own HTML carries (app/site-pages.ts).
 const defaultDescription = window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.content ?? ''
 function useDocumentMeta(title: string, description: string) {
   useEffect(() => {

@@ -1,11 +1,11 @@
-// (With extensions: the build's config imports this file, docs-pages.ts.)
+// (With extensions: the build's config imports this file, site-pages.ts.)
 import { productName } from '../../../../api/src/brand.ts'
 import { agentSetupGuide } from '../../../../api/src/agent-setup-guide.ts'
 import { builtinDomainGuide } from '../../../../api/src/builtin-limits.ts'
 import { webhookSignatureGuide } from '../../../../api/src/webhook-signature-guide.ts'
 
 /** Each guide's address (/docs/<id>), title and summary, in the docs' order: guides.tsx gives each its body, and the
- *  build writes each its page (app/docs-pages.ts) from these without loading the dashboard. */
+ *  build writes each its page (app/site-pages.ts) from these without loading the dashboard. */
 export const GUIDE_NAMES: { id: string; title: string; summary: string }[] = [
   { id: 'receiving', title: 'Receiving', summary: 'How mail reaches your domain and where it goes: addresses, routes, rules and endpoints.' },
   { id: 'rules', title: 'Rules and AI decisions', summary: `Ready-made or scripted rules that post, forward, junk and label mail, and the questions they can ask ${productName}’s AI.` },
