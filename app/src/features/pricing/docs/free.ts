@@ -124,7 +124,10 @@ export function freeEmailApi(): Doc {
   const basis = `The others: each one’s free plan, trial or one-off as its own page states it, checked ${when}; a daily allowance counts as 30 days’ worth where no monthly one is stated, and a dash under Limits means none is stated. Each name links to its comparison and the page it was read on.`
   const note: Text = [`${scope} ${terms} ${limits} ${basis}`]
   const h1: Doc['h1'] = [[`${formatCount(nightmail.freeSent)} emails free.`], ['Every month.']]
-  const caption = `${productName}, beside ${spelled(apis.rows.length)} email APIs’ free plans · checked ${when.replaceAll(' ', '\u00a0')}`
+  // What the shown rows are, in words true of each: a trial isn't a free plan, and a one-off (Mandrill's demo) is neither.
+  const kinds = new Set(apis.rows.map(r => r.f!.kind)), unit = kinds.has('once') ? 'allowances' : 'plans'
+  const what = `free ${unit}${kinds.has('trial') && unit === 'plans' ? ' and trials' : ''}`
+  const caption = `${productName}, beside ${spelled(apis.rows.length)} email APIs’ ${what} · checked ${when.replaceAll(' ', '\u00a0')}`
   const sections: Section[] = [
     { id: 'free', title: 'Free email API plans', quiet: true, blocks: [table(apis.rows, note)] },
     factsSection(),
@@ -134,14 +137,16 @@ export function freeEmailApi(): Doc {
   const cited = shownSources(apis.rows.map(r => r.source!), apis.rows[0]!.c.offer).map((s, i) => shownSources([apis.rows[i]!.source!], apis.rows[i]!.c.offer)[0] ?? s)
 
   const latest = checked.at(-1)!, path = '/free-email-api'
-  const searchTitle = `Free email API? ${apis.rows.length} free plans side by side (${monthOf(latest)})`
+  const searchTitle = `Free email API? ${apis.rows.length} ${what} side by side (${monthOf(latest)})`
+  const smaller = `smaller ${unit}${kinds.has('trial') ? ' or trials' : ''}`, free = `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month`
   const description = [
-    `Free email API plans, checked ${when}: ${productName}, ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month, beside the ${apis.rows.length} of ${apis.all.length} compared APIs whose free plan is smaller.`,
-    `Free email API plans, checked ${when}: ${productName}, ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month, beside the ${apis.rows.length} of ${apis.all.length} compared with a smaller one.`,
+    `Free email API plans, checked ${when}: ${productName}, ${free}, beside the ${apis.rows.length} of ${apis.all.length} compared APIs with ${smaller}.`,
+    `Free email API plans, checked ${when}: ${productName}, ${free}, beside the ${apis.rows.length} of ${apis.all.length} compared with ${smaller}.`,
+    `Free email APIs, checked ${when}: ${productName}, ${free}, beside the ${apis.rows.length} of ${apis.all.length} compared with ${smaller}.`,
   ].find(text => text.length <= 160 && text.length >= 140) ?? ''
   const doc: Doc = {
     path, title: 'Free email API plans', searchTitle, description, h1, answer: [[caption]], sections, questions: [],
-    cardWords: { lines: [`${formatCount(nightmail.freeSent)} emails free.`, 'Every month.'], caption: [`${productName}, beside ${spelled(apis.rows.length)} email APIs’ free plans, checked ${dayOf(latest)}.`, `Beside ${apis.rows.length} email APIs’ free plans, checked ${dayOf(latest)}.`].find(t => t.length <= 70)! },
+    cardWords: { lines: [`${formatCount(nightmail.freeSent)} emails free.`, 'Every month.'], caption: [`${productName}, beside ${spelled(apis.rows.length)} email APIs’ ${what}, checked ${dayOf(latest)}.`, `Beside ${apis.rows.length} email APIs’ ${what}, checked ${dayOf(latest)}.`].find(t => t.length <= 70)! },
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] }, lead,
     related: [
       { title: 'Compare', path: '/compare', line: `${productName} beside every email service it is compared with.` },
