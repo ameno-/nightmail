@@ -31,6 +31,7 @@ export interface SupportMessage {
   id: string; seq: number; author: SupportAuthor; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[]
   staff: { userId: string; name: string | null } | null; delivery: 'queued' | 'sent' | 'failed' | 'held' | null; heldReason: HeldReason | null
   files: { id: string; name: string | null; type: string | null; size: number | null }[]; email: SupportEmail | null; deliveredAt: string | null; at: string
+  draft: { outcome: 'sent' | 'edited' | 'replaced' | 'discarded'; by: { userId: string; name: string | null }; at: string; replyId: string | null } | null
 }
 export type SupportEventKind = 'opened' | 'ticket' | 'priority' | 'paused' | 'resumed' | 'resolved' | 'done' | 'undone' | 'closed' | 'approved' | 'declined'
 /** A one-click decision a staff email linked to (api/src/support-approvals.ts): only a signed-in operator's confirm runs it. */
@@ -72,6 +73,9 @@ export const supportInboxApi = {
   },
   detail: (conversationId: string, signal?: AbortSignal) => request<SupportDetail>(`${base}/${id(conversationId)}`, { signal }),
   reply: (conversationId: string, text: string, idempotencyKey: string) => request<SupportMessage>(`${base}/${id(conversationId)}/replies`, { method: 'POST', body: { text }, idempotencyKey }),
+  /** A held agent answer, sent as the agent wrote it (no text) or edited, as a staff reply: it pauses the agent like any reply. */
+  sendDraft: (conversationId: string, messageId: string, text: string | undefined, idempotencyKey: string) => request<SupportMessage>(`${base}/${id(conversationId)}/drafts/${id(messageId)}/send`, { method: 'POST', body: text === undefined ? {} : { text }, idempotencyKey }),
+  discardDraft: (conversationId: string, messageId: string, idempotencyKey: string) => request<SupportMessage>(`${base}/${id(conversationId)}/drafts/${id(messageId)}/discard`, { method: 'POST', idempotencyKey }),
   /** An internal note: staff see it in the timeline; the customer and the agent never do. */
   note: (conversationId: string, text: string, idempotencyKey: string) => request<SupportMessage>(`${base}/${id(conversationId)}/notes`, { method: 'POST', body: { text }, idempotencyKey }),
   /** A customer email in full: all of its text and its HTML as stored (render it sandboxed, images off until asked). */
@@ -168,7 +172,7 @@ export function snapshotInbox(client: QueryClient) {
 // A reply staff are writing, per staff member and conversation, kept in this tab (sessionStorage) until it is sent or
 // discarded: it survives moving between conversations and a reload, and a reply that fails comes back into its box with
 // why, wherever staff are when it fails. `key` is its Idempotency-Key: sent again unedited, it is never sent twice.
-export type InboxDraft = { text: string; key: string; failed: string | null; sending: { text: string; key: string } | null; mode?: 'reply' | 'note' }
+export type InboxDraft = { text: string; key: string; failed: string | null; sending: { text: string; key: string } | null; mode?: 'reply' | 'note'; draftOf?: string | null }
 const DRAFTS = 'nightmail.support-inbox.drafts'
 const draftListeners = new Set<() => void>()
 let drafts: { user: string; map: Record<string, InboxDraft> } | null = null
@@ -188,8 +192,8 @@ export const subscribeInboxDrafts = (listener: () => void) => { draftListeners.a
 export function updateInboxDraft(user: string, conversationId: string, change: (draft: InboxDraft) => Partial<InboxDraft> | null) {
   const map = { ...draftsOf(user) }, current = map[conversationId] ?? { text: '', key: crypto.randomUUID(), failed: null, sending: null }
   const patch = change(current), next = patch && { ...current, ...patch }
-  // A note chosen with nothing typed yet is kept too, so the box stays a note.
-  if (next && (next.text || next.failed || next.sending || next.mode === 'note')) map[conversationId] = next
+  // A note chosen, or a held answer's reply started, with nothing typed yet is kept too, so the box stays what it is.
+  if (next && (next.text || next.failed || next.sending || next.mode === 'note' || next.draftOf)) map[conversationId] = next
   else delete map[conversationId]
   drafts = { user, map }
   try { if (Object.keys(map).length) sessionStorage.setItem(`${DRAFTS}:${user}`, JSON.stringify(map)); else sessionStorage.removeItem(`${DRAFTS}:${user}`) } catch { /* Kept for this page only. */ }

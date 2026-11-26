@@ -129,14 +129,29 @@ function useInboxActions() {
     read: (c: SupportConversation, read: boolean, seq?: number) => run(c, x => ({ ...x, unread: !read }), () => supportInboxApi.read(c.id, read, seq), { reread: false }).catch(() => {}),
     wake: (c: SupportConversation) => run(c, x => x, () => supportInboxApi.wake(c.id)).then(r => toast(r.woken ? 'Support service woken' : 'The support service didn’t answer', r.woken ? 'success' : 'error'), () => {}),
     reply: (c: SupportConversation, text: string, key: string) => {
-      const pending: SupportMessage = { id: `pending:${key}`, seq: c.messageCount + 1, author: 'staff', kind: 'reply', text, tools: [], attachments: [], staff: me, delivery: 'queued', heldReason: null, files: [], email: null, deliveredAt: null, at: now() }
+      const pending: SupportMessage = { id: `pending:${key}`, seq: c.messageCount + 1, author: 'staff', kind: 'reply', text, tools: [], attachments: [], staff: me, delivery: 'queued', heldReason: null, files: [], email: null, deliveredAt: null, at: now(), draft: null }
       const messages = (change: (list: SupportMessage[]) => SupportMessage[]) => client.setQueryData<SupportDetail>(inboxKeys.detail(c.id), d => d && { ...d, messages: change(d.messages) })
       return run(c, x => { messages(list => [...list, pending]); return { ...x, agentState: 'paused', pausedBy: { kind: 'staff', userId: me.userId, name: me.name }, pausedAt: x.pausedAt ?? now(), lastAuthor: 'staff', lastMessageAt: now(), messageCount: x.messageCount + 1, queuedReplies: x.queuedReplies + 1, done: null, unread: false } },
         () => supportInboxApi.reply(c.id, text, key), { after: sent => messages(list => list.map(m => m.id === pending.id ? sent : m)), done: c.agentState === 'active' ? 'Reply queued. The agent is paused.' : 'Reply queued' })
     },
+    // A held answer sent as a staff reply: the reply shows at once and the answer says who sent it.
+    sendDraft: (c: SupportConversation, draftId: string, text: string | undefined, key: string) => {
+      const held = client.getQueryData<SupportDetail>(inboxKeys.detail(c.id))?.messages.find(m => m.id === draftId)
+      const body = text ?? held?.text ?? '', fresh = Boolean(held?.heldReason && freshOnly[held.heldReason])
+      const decided = (replyId: string | null) => ({ outcome: fresh ? 'replaced' as const : text === undefined || text === held?.text.trim() ? 'sent' as const : 'edited' as const, by: me, at: now(), replyId })
+      const pending: SupportMessage = { id: `pending:${key}`, seq: c.messageCount + 1, author: 'staff', kind: 'reply', text: body, tools: [], attachments: [], staff: me, delivery: 'queued', heldReason: null, files: [], email: null, deliveredAt: null, at: now(), draft: null }
+      const messages = (change: (list: SupportMessage[]) => SupportMessage[]) => client.setQueryData<SupportDetail>(inboxKeys.detail(c.id), d => d && { ...d, messages: change(d.messages) })
+      return run(c, x => { messages(list => [...list.map(m => m.id === draftId ? { ...m, draft: decided(null) } : m), pending]); return { ...x, agentState: 'paused', pausedBy: { kind: 'staff', userId: me.userId, name: me.name }, pausedAt: x.pausedAt ?? now(), lastAuthor: 'staff', lastMessageAt: now(), messageCount: x.messageCount + 1, queuedReplies: x.queuedReplies + 1, done: null, unread: false } },
+        () => supportInboxApi.sendDraft(c.id, draftId, text, key), { after: sent => messages(list => list.map(m => m.id === pending.id ? sent : m.id === draftId ? { ...m, draft: decided(sent.id) } : m)), done: 'Reply queued' })
+    },
+    discardDraft: (c: SupportConversation, draftId: string) => {
+      const messages = (change: (list: SupportMessage[]) => SupportMessage[]) => client.setQueryData<SupportDetail>(inboxKeys.detail(c.id), d => d && { ...d, messages: change(d.messages) })
+      return run(c, x => { messages(list => list.map(m => m.id === draftId ? { ...m, draft: { outcome: 'discarded', by: me, at: now(), replyId: null } } : m)); return x },
+        () => supportInboxApi.discardDraft(c.id, draftId, crypto.randomUUID()), { after: dropped => messages(list => list.map(m => m.id === draftId ? dropped : m)), done: 'Draft discarded' }).catch(() => {})
+    },
     // A note: shown at once in the timeline; it changes nothing the lists show.
     note: (c: SupportConversation, text: string, key: string) => {
-      const pending: SupportMessage = { id: `pending:${key}`, seq: c.messageCount + 1, author: 'staff', kind: 'note', text, tools: [], attachments: [], staff: me, delivery: null, heldReason: null, files: [], email: null, deliveredAt: null, at: now() }
+      const pending: SupportMessage = { id: `pending:${key}`, seq: c.messageCount + 1, author: 'staff', kind: 'note', text, tools: [], attachments: [], staff: me, delivery: null, heldReason: null, files: [], email: null, deliveredAt: null, at: now(), draft: null }
       const messages = (change: (list: SupportMessage[]) => SupportMessage[]) => client.setQueryData<SupportDetail>(inboxKeys.detail(c.id), d => d && { ...d, messages: change(d.messages) })
       return run(c, x => { messages(list => [...list, pending]); return { ...x, messageCount: x.messageCount + 1, unread: false } },
         () => supportInboxApi.note(c.id, text, key), { after: sent => messages(list => list.map(m => m.id === pending.id ? sent : m)), done: 'Note added' })
@@ -429,13 +444,32 @@ const deliveryBadge: Record<string, { text: string; tone: Tone } | undefined> = 
 const held = (m: SupportMessage) => m.author === 'agent' && (m.delivery === 'held' || m.kind === 'held')
 const size = (bytes: number | null) => bytes === null ? '' : bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 
-function Message({ m, detail }: { m: SupportMessage; detail: SupportDetail }) {
+const decidedText = { sent: 'Sent as written by', edited: 'Edited and sent by', replaced: 'Replaced with a fresh reply by', discarded: 'Discarded by' }
+/** A held answer that may hold account details the person can no longer see: never sent, as written or edited (the API refuses it). */
+const freshOnly: Partial<Record<HeldReason, string>> = { access: 'This person’s access changed after the agent wrote it, so it can’t be sent. Write a fresh reply.', earlier: 'An earlier version of the agent wrote it, so it can’t be sent. Write a fresh reply.' }
+/** A held answer's choices: send it as the agent wrote it, edit it in the reply box first, or discard it (in place, asked
+ *  once more). One that can't be sent offers only a fresh reply, from an empty reply box, or discarding it. */
+function DraftActions({ m, c, actions, onEdit }: { m: SupportMessage; c: SupportDetail['conversation']; actions: Actions; onEdit: (m: SupportMessage, fresh: boolean) => void }) {
+  const [confirming, setConfirming] = useState(false)
+  const fresh = m.heldReason ? freshOnly[m.heldReason] : undefined
+  return <div className="sinbox-draft" onKeyDown={event => { if (event.key === 'Escape' && confirming) { event.stopPropagation(); setConfirming(false) } }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setConfirming(false) }}>
+    <span className="cluster sinbox-draft__actions">
+      {fresh ? <Button size="sm" onClick={() => { setConfirming(false); onEdit(m, true) }}>Write a fresh reply</Button> : <>
+        <Button size="sm" onClick={() => { setConfirming(false); void actions.sendDraft(c, m.id, undefined, crypto.randomUUID()).catch(() => {}) }}>Send as written</Button>
+        <Button size="sm" onClick={() => { setConfirming(false); onEdit(m, false) }}>Edit and send</Button></>}
+      <Button size="sm" variant={confirming ? 'danger' : 'ghost'} onClick={() => { if (!confirming) setConfirming(true); else { setConfirming(false); void actions.discardDraft(c, m.id) } }}>{confirming ? 'Discard it' : 'Discard'}</Button>
+    </span>
+    {confirming && <span className="sinbox-draft__warn" role="status">It’s never sent. The customer isn’t told.</span>}
+  </div>
+}
+
+function Message({ m, detail, canAct, actions, onEdit }: { m: SupportMessage; detail: SupportDetail; canAct: boolean; actions: Actions; onEdit: (m: SupportMessage, fresh: boolean) => void }) {
   const c = detail.conversation, note = m.author === 'staff' && m.kind === 'note', isHeld = held(m)
   // The support platform's own notices (a fixed reply, a pause notice) are a line, like an event.
   if (m.author === 'system') return <li className="sinbox-event"><Info size={14} aria-hidden="true" /><span className="sinbox-event__text">{m.text}</span><time dateTime={m.at} title={when(m.at)}>{shortDateTime(m.at)}</time></li>
   const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer') : m.author === 'agent' ? 'Nightmail AI' : m.staff?.name ?? 'Staff'
   const via = note ? 'Internal note' : m.author === 'customer' ? (m.email ? 'Email' : channelLabels[c.channel]) : m.author === 'staff' ? `Reply by ${c.channel === 'email' ? 'email' : 'chat'}` : null
-  const badge = isHeld ? { text: 'Held, not sent', tone: 'warning' as Tone } : m.author === 'agent' ? deliveryBadge[m.delivery ?? 'sent'] : m.author === 'staff' && !note ? deliveryBadge[m.delivery ?? ''] : undefined
+  const badge = isHeld ? m.draft && (m.draft.outcome === 'sent' || m.draft.outcome === 'edited') ? { text: 'Held, then sent by staff', tone: 'neutral' as Tone } : { text: 'Held, not sent', tone: 'warning' as Tone } : m.author === 'agent' ? deliveryBadge[m.delivery ?? 'sent'] : m.author === 'staff' && !note ? deliveryBadge[m.delivery ?? ''] : undefined
   return <li className="sinbox-message" data-author={m.author} data-note={note || undefined} data-held={isHeld || undefined} data-pending={m.id.startsWith('pending:') || undefined}>
     <div className="sinbox-message__meta">
       <span className="sinbox-message__author">{author}</span>
@@ -446,9 +480,11 @@ function Message({ m, detail }: { m: SupportMessage; detail: SupportDetail }) {
     </div>
     {m.email ? <EmailBody conversationId={c.id} email={m.email} subject={c.subject} />
       : m.author === 'agent' ? <div className="sinbox-text"><Markdown text={m.text} /></div> : <div className="sinbox-message__body">{m.text}</div>}
-    {isHeld && <p className="sinbox-held">{m.heldReason ? heldWhy[m.heldReason] : 'Not sent.'}</p>}
     {m.files.length > 0 && !m.email && <Files conversationId={c.id} files={m.files} />}
     {m.tools.length > 0 && <ul className="sinbox-tools" aria-label="What the agent checked">{m.tools.map((tool, index) => <li key={index}>{tool.ok ? <Check size={12} aria-label="Done" /> : <X size={12} aria-label="Failed" />}{tool.label}</li>)}</ul>}
+    {isHeld && !m.draft && <p className="sinbox-held">{m.heldReason ? freshOnly[m.heldReason] ?? heldWhy[m.heldReason] : 'Not sent.'}</p>}
+    {isHeld && m.draft && <p className="sinbox-held" data-decided="">{decidedText[m.draft.outcome]} {m.draft.by.name ?? 'staff'} · <time dateTime={m.draft.at} title={when(m.draft.at)}>{shortDateTime(m.draft.at)}</time></p>}
+    {isHeld && !m.draft && canAct && c.status !== 'closed' && !m.id.startsWith('pending:') && <DraftActions m={m} c={c} actions={actions} onEdit={onEdit} />}
   </li>
 }
 
@@ -540,11 +576,14 @@ function useOpenAtEnd() {
 }
 function Transcript({ detail, canAct, actions, composer }: { detail: SupportDetail; canAct: boolean; actions: Actions; composer: RefObject<ComposerHandle | null> }) {
   useOpenAtEnd()
-  const entries = timelineOf(detail)
+  const entries = timelineOf(detail), user = useSession()?.identity?.id ?? ''
+  // Edit and send: the held answer goes into the reply box, marked as that draft, so sending it decides the draft.
+  // A fresh reply starts from an empty box: nothing of the held answer is carried over.
+  const edit = (m: SupportMessage, fresh: boolean) => { updateInboxDraft(user, detail.conversation.id, () => ({ text: fresh ? '' : m.text.trim(), key: crypto.randomUUID(), mode: 'reply', draftOf: m.id, failed: null })); composer.current?.focus('reply') }
   return <div className="sinbox-transcript">
     {detail.brief && <AiSummary brief={detail.brief} />}
     {detail.earlierMessages > 0 && <p className="sinbox-earlier">{number(detail.earlierMessages)} earlier {detail.earlierMessages === 1 ? 'message isn’t' : 'messages aren’t'} shown.</p>}
-    {entries.length ? <ol className="sinbox-timeline">{entries.map(entry => entry.event ? <EventLine key={entry.key} e={entry.event} c={detail.conversation} /> : <Message key={entry.key} m={entry.message} detail={detail} />)}</ol>
+    {entries.length ? <ol className="sinbox-timeline">{entries.map(entry => entry.event ? <EventLine key={entry.key} e={entry.event} c={detail.conversation} /> : <Message key={entry.key} m={entry.message} detail={detail} canAct={canAct} actions={actions} onEdit={edit} />)}</ol>
       : <EmptyState title="No messages yet" />}
     {canAct && <Composer ref={composer} detail={detail} actions={actions} />}
   </div>
@@ -584,11 +623,14 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
     // Sent: the keys are the inbox's again (e marks it done, j moves on).
     field.current?.blur()
     // A failure puts the text back in this conversation's box (before anything typed since), with its own key.
-    ;(note ? actions.note(c, body, sent.key) : actions.reply(c, body, sent.key)).then(() => updateInboxDraft(user, c.id, () => ({ sending: null })),
-      error => updateInboxDraft(user, c.id, now => ({ sending: null, mode, failed: error instanceof ApiError ? error.message : failedText,
+    const draftOf = !note ? draft.draftOf ?? null : null
+    if (draftOf) updateInboxDraft(user, c.id, () => ({ draftOf: null }))
+    ;(note ? actions.note(c, body, sent.key) : draftOf ? actions.sendDraft(c, draftOf, body, sent.key) : actions.reply(c, body, sent.key)).then(() => updateInboxDraft(user, c.id, () => ({ sending: null })),
+      error => updateInboxDraft(user, c.id, now => ({ sending: null, mode, draftOf, failed: error instanceof ApiError ? error.message : failedText,
         ...now.text ? { text: `${sent.text}\n\n${now.text}`, key: crypto.randomUUID() } : { text: sent.text, key: sent.key } })))
   }
   const name = c.customer?.name ?? 'the customer', me = identity?.name ?? 'you', target = detail.replyTarget
+  const editing = !note && draft?.draftOf ? detail.messages.find(m => m.id === draft.draftOf && !m.draft) : undefined
   const hint = feedback ? 'An agent filed this report: there’s nobody to reply to. Resolve it or mark it done; notes are for staff.' : note ? 'Only staff see notes. The customer and the agent never do.'
     : offline ? 'The support service is offline, so replies are off.'
     : c.channel === 'email' ? <>Replying as {me} · an email in this thread{target.address ? <> to <PrivateAddress value={target.address} /></> : ''}, from {productName} support{!target.verified && '. Their email didn’t pass DMARC, so it may not be delivered'}{handling ? '. Sending pauses the agent.' : '.'}</>
@@ -598,6 +640,7 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
       <button type="button" aria-pressed={!note} onClick={() => take('reply')}>Reply</button>
       <button type="button" aria-pressed={note} onClick={() => take('note')}>Note</button>
     </div>}
+    {editing && <p className="sinbox-composer__editing">{editing.heldReason && freshOnly[editing.heldReason] ? 'A fresh reply instead of the agent’s held answer, which can’t be sent.' : 'Editing the agent’s held answer: sending it goes out as your reply.'} <button type="button" onClick={() => updateInboxDraft(user, c.id, () => ({ draftOf: null }))}>Keep it separate</button></p>}
     <Textarea ref={field} aria-label={note ? 'Internal note' : 'Reply'} placeholder={note ? 'Add an internal note' : `Reply to ${name}`} value={text} maxLength={8000} disabled={offline}
       onChange={event => { const value = event.target.value; updateInboxDraft(user, c.id, () => ({ text: value, key: crypto.randomUUID(), mode })) }}
       onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send() } else if (event.key === 'Escape') { event.preventDefault(); event.currentTarget.blur() } }} />
