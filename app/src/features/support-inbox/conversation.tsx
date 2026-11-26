@@ -387,7 +387,7 @@ function eventText(e: SupportEvent, c: SupportConversation): string {
   switch (e.kind) {
     case 'opened': return c.channel === 'agent_feedback' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
     // reason chat_unavailable: the dashboard filed a message the support chat couldn't take (api/src/support-conversations.ts fileChatTicket).
-    case 'ticket': return d.by === 'nightmail' ? `${d.reason === 'chat_unavailable' ? 'Filed as a ticket: the chat couldn’t answer' : 'Ticket opened: this needs a person'}${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
+    case 'ticket': return d.by === 'nightmail' ? `${d.reason === 'chat_unavailable' ? 'Filed: the chat couldn’t answer' : 'Ticket opened: this needs a person'}${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
     case 'priority': return `Priority ${d.from ?? '—'} → ${d.to ?? '—'}`
     case 'paused': return d.by === 'ticket' ? 'Handed to you: the agent stopped for the ticket' : d.reply ? `${who ?? 'Staff'} replied and took over from the agent` : `${who ?? 'Staff'} paused the agent`
     case 'resumed': return `${who ?? 'Staff'} handed back to the agent`
