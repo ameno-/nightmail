@@ -2457,7 +2457,7 @@ export type CampaignAudienceCounts = {
             message: string;
         }>;
         /**
-         * Present when part of the review couldn't be worked out just now (sizing the plan): what was left out, in a sentence. The review is then the one without that part, and its verdict is at least ramp_recommended.
+         * Present when part of the review couldn't be worked out just now (sizing the plan): what was left out, in a sentence. The review is then the one without that part, and its verdict is at least ramp_recommended. A launch that fails the same way is refused, 503 SEND_PLAN_UNAVAILABLE (retryable), with nothing sent.
          */
         unavailable?: string;
         domain: {
@@ -2805,7 +2805,7 @@ export type CampaignQueued = {
             message: string;
         }>;
         /**
-         * Present when part of the review couldn't be worked out just now (sizing the plan): what was left out, in a sentence. The review is then the one without that part, and its verdict is at least ramp_recommended.
+         * Present when part of the review couldn't be worked out just now (sizing the plan): what was left out, in a sentence. The review is then the one without that part, and its verdict is at least ramp_recommended. A launch that fails the same way is refused, 503 SEND_PLAN_UNAVAILABLE (retryable), with nothing sent.
          */
         unavailable?: string;
         domain: {
