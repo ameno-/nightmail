@@ -13641,7 +13641,14 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.equal(retry.id, queued.id);
     assert.equal(retry.simulated, true);
     error(await http('POST', '/v1/emails/send', key.secret, { ...payload, subject: 'Different payload' }, headers), 409, 'IDEMPOTENCY_CONFLICT');
-    const completed = await poll(`/v1/emails/${queued.id}`, key.secret, body => body.status === 'delivered', true); // Smoke-test the external runner itself.
+    // The external runner handles Send and Delivery as separate jobs. Delivery can commit first.
+    const lifecycle = await poll(`/v1/emails/${queued.id}/events`, key.secret, body =>
+      ['send', 'delivery'].every(type => body.data.some((event: Json) => event.type === type)), true);
+    assert.equal(lifecycle.nextCursor, null, 'The complete lifecycle must fit on one page.');
+    const events: Json[] = lifecycle.data;
+    for (const type of ['dispatch_attempt', 'accepted', 'send', 'delivery']) assert.equal(events.filter(event => event.type === type).length, 1, `Exact retry must not duplicate lifecycle events: ${type}.`);
+    const completed = ok(await http('GET', `/v1/emails/${queued.id}`, key.secret));
+    assert.equal(completed.status, 'delivered');
     assert.equal(completed.simulated, true);
     assert.equal(completed.environment, undefined);
     assert.match(completed.providerId, /^sim_/, 'Simulation must return an isolated provider-shaped message ID.');
@@ -13650,8 +13657,6 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     const content = ok(await http('GET', `/v1/emails/${queued.id}/content`, key.secret));
     assert.equal(content.text, payload.text);
     assert.equal(content.simulated, true);
-    const events = page(await http('GET', `/v1/emails/${queued.id}/events`, key.secret));
-    for (const type of ['dispatch_attempt', 'accepted', 'send', 'delivery']) assert.equal(events.filter(event => event.type === type).length, 1, 'Exact retry must not duplicate lifecycle events.');
     assert.ok(events.every(event => event.simulated && event.environment === undefined));
     assert.ok(events.every(event => event.providerId === null || /^sim_/.test(event.providerId)));
     ok(await http('GET', `/v1/emails/${queued.id}`, liveKey.secret));
