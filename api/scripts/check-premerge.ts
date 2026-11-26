@@ -375,8 +375,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     if (CHECKED_DAYS.test('checked recently')) fail('Price pages', 'The day check accepts a page with no day.', file)
     for (const { path, html } of out.docs) {
       const page = text(html)
-      // (The free plans page states allowances, not bills: Nightmail's is the billing code's, checked below.)
-      checkFigures(path, html, path === '/free-email-api' ? 0 : 1)
+      checkFigures(path, html, 1)
       for (const term of terms.slice(0, 2)) if (!page.includes(term)) fail('Price pages', `${path} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
       // (A page of several services, an alternatives page or a use-case page, links each to its comparison, which names the
       // pages read: docs/alternatives.ts, docs/agents.ts.)

@@ -6,6 +6,8 @@ const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const POSTMARK = 'https://postmarkapp.com/pricing'
+// Its free Developer plan (read on 26 Nov 2026), below every size here: /free-email-api lists it (docs/free.ts).
+const FREE = readOn('2026-11-26')(POSTMARK, 'Everyone starts on our free Developer plan, which includes 100 emails every month. And it never expires or runs out.')
 const SCRIPT = 'https://postmarkapp.com/dist/js/pricing.44675b0a700fd8b9c0ca.js'
 const tier = (size: number, cents: number, overage: number, quote: string): Tier => ({ size, cents, overage, source: read(SCRIPT, quote) })
 const users = (count: number | null) => ({ count, source: read(POSTMARK, 'Number of Users Up to 6 users Up to 4 users Up to 6 users Unlimited users') })
@@ -17,6 +19,7 @@ const offer: Offer = {
   counts: 'emails sent and received', payg: ' plus extra emails',
   beyond: { text: 'Custom pricing', source: read(POSTMARK, 'Hey Big Sender! Let’s work together to improve your deliverability. Contact our sales team to discuss custom pricing options.') },
   plans: [
+    { name: 'Free', tiers: [{ size: 100, cents: 0, source: FREE }] },
     { name: 'Basic', seats: users(4), tiers: [
       tier(10_000, 1_500, 180, 'range:[1e4,5e4,125e3,3e5,7e5,15e5,3e6] … name:"Basic",volume:[… {amount:X.range[0],min:X.range[0],max:X.range[1],base_price:15,overagesPrice:1.8}'),
       tier(50_000, 5_500, 180, 'range:[1e4,5e4,125e3,3e5,7e5,15e5,3e6] … name:"Basic",volume:[… {amount:X.range[1],min:X.range[1],max:X.range[2],base_price:55,overagesPrice:1.8}'),

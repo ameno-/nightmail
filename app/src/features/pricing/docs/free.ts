@@ -43,8 +43,10 @@ export const FREE: Record<string, Free> = {
   sendgrid: { kind: 'trial', day: 100, length: '60 days', source: row('Free every month') },
   socketlabs: { kind: 'trial', length: 'one month', terms: 'a month of Core or a set amount of credits', source: row('Free every month') },
   mandrill: { kind: 'once', once: 500, terms: 'to your verified domain', source: row('Free every month') },
+  postmark: { kind: 'standing', month: 100, source: tier },
+  unione: { kind: 'trial', month: 6_000, length: 'four months', terms: 'four months of 6,000 a month, with a card', source: row('Free every month') },
   mailjet: { kind: 'larger', month: 6_000, day: 200, source: tier },
-  bird: { kind: 'none', source: row('Free every month') },
+  bird: { kind: 'standing', month: 1_000, source: row('Free every month') },
   mailchimp: { kind: 'standing', month: 500, holds: 250, day: 250, source: tier },
   mailerlite: { kind: 'standing', month: 2_500, holds: 250, source: tier },
   aweber: { kind: 'standing', month: 3_000, holds: 500, source: tier },
@@ -54,6 +56,7 @@ export const FREE: Record<string, Free> = {
   brevo: { kind: 'larger', day: 300, source: tier },
   beehiiv: { kind: 'larger', holds: 2_500, terms: 'unlimited email sends', source: tier },
   buttondown: { kind: 'unstated', holds: 100, source: tier },
+  robotomail: { kind: 'standing', month: 10, received: 10, holds: 1, terms: 'only with your verified address', source: tier },
   agentmail: { kind: 'standing', month: 3_000, holds: 3, source: tier },
   nylas: { kind: 'standing', month: 3_000, holds: 3, source: tier },
   postfleet: { kind: 'standing', month: 3_000, day: 100, holds: 3, source: tier },
@@ -86,9 +89,10 @@ export function freeEmailApi(): Doc {
         throw new Error(`/free-email-api says ${c.offer.vendor} gives ${formatCount(figure)}, which its source doesn't say (${source.url}, read ${source.checked}): docs/free.ts.`)
     if (f.length && !words.includes(f.length.split(' ')[0]!.toLowerCase())) throw new Error(`/free-email-api gives ${c.offer.vendor}'s trial as ${f.length}, which its source doesn't say (docs/free.ts).`)
   }
-  // The rows: a standing allowance smaller than Nightmail's, a trial, or a one-off; the build stops on one that isn't smaller.
+  // The rows: a standing allowance smaller than Nightmail's, a trial (it ends, whatever its size), or a one-off; the build
+  // stops on a standing or one-off row that isn't smaller.
   const listed = read.filter(r => r.f && (r.f.kind === 'standing' || r.f.kind === 'trial' || r.f.kind === 'once'))
-  for (const { c, f } of listed) {
+  for (const { c, f } of listed.filter(r => r.f!.kind !== 'trial')) {
     const sends = monthly(f!)
     if ((sends !== undefined && sends >= nightmail.freeSent) || (f!.received !== undefined && f!.received >= nightmail.freeReceived))
       throw new Error(`/free-email-api lists ${c.offer.vendor} among the free allowances smaller than Nightmail's, and it isn't (docs/free.ts).`)
@@ -109,12 +113,13 @@ export function freeEmailApi(): Doc {
     const limits = [f.kind === 'trial' && !f.terms ? `Ends after ${f.length}` : '', f.kind !== 'trial' && f.month !== undefined && f.day !== undefined ? `${formatCount(f.day)} a day` : '', f.terms && f.kind !== 'trial' ? capital(f.terms) : ''].filter(Boolean).join('; ')
     return [capital(free.replace(/^, /, '')), limits || '—']
   }
-  const ours: Text[] = [[productName], [`${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received a month`], ['No end date']]
+  // Nightmail's row, its $0 marked with the mail it covers (blue, as on every price page, and read back by check-premerge).
+  const ours: Text[] = [[productName], [{ ours: '$0', sent: nightmail.freeSent, received: nightmail.freeReceived }, ` for ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received a month`], ['No end date']]
   const table = (rows: typeof listed, note: Text): Table => ({ kind: 'table', numeric: [], caption: note, head: ['Service', 'Free', 'Limits'], rows: [{ cells: ours }, ...rows.map(({ c, f }) => ({ cells: [[{ text: c.offer.vendor, href: c.path }], ...cells(c, f!).map(t => [t])] as Text[] }))] })
 
   const scope = `Shown: the ${apis.rows.length} of ${apis.all.length} email APIs ${productName} has compared itself with whose free allowance is smaller than its own, or is a trial or a one-off; this is not every email API.`
   const lead = `Listed: the ${listed.length} of ${n} email services ${productName} has compared itself with whose free allowance is smaller than its own, or is a trial or a one-off (${byGroup.map(g => `${g.rows.length} ${g.unit}`).join(', ')}); this is not every email service.`
-  const limits = `On a new workspace the first ${formatCount(EVALUATION.recipients)} recipients are a check: more go out once their results are in, then up to ${formatCount(GROWTH.start)} an hour for ${GROWTH.hours} hours; the built-in domain sends only to your workspace’s members, ${formatCount(BUILTIN_CAPS.members.perDay)} a day.`
+  const limits = `On a new workspace the first ${formatCount(EVALUATION.recipients)} recipients are a check: more go out once their results are in, then from ${formatCount(GROWTH.start)} an hour, ${GROWTH.factor === 2 ? 'doubling' : 'growing'} each clean hour, for ${GROWTH.hours} hours; the built-in domain sends only to your workspace’s members, ${formatCount(BUILTIN_CAPS.members.perDay)} a day.`
   const terms = `${productName}: ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month, with no end date; past it, ${nightmail.perThousand} per 1,000 emails, sent or received.`
   const basis = `The others: each one’s free plan, trial or one-off as its own page states it, checked ${when}; a daily allowance counts as 30 days’ worth where no monthly one is stated, and a dash under Limits means none is stated. Each name links to its comparison and the page it was read on.`
   const note: Text = [`${scope} ${terms} ${limits} ${basis}`]
