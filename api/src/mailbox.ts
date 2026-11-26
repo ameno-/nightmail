@@ -727,6 +727,7 @@ export function registerMailbox(app: App) {
       text: body.text ? body.text + (quote?.text ?? '') : undefined, html: body.html ? body.html + (quote?.html ?? '') : undefined,
       attachments: await resolveAttachments(c.env, mailbox, body.attachments,from), threadId: original.threadId,
       inReplyTo: parentId, references: replyReferences(original, parentId), autoSubmitted: body.autoSubmitted, headers: body.headers,
+      answering: original.id,
     };
   }
   registerInboundThreadReads(app, access);

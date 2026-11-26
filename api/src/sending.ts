@@ -48,7 +48,7 @@ import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
 import { RecipientWarning, recipientWarnings, RiskBreakdown } from './list-hygiene.js';
-import { assertBuiltinInput, assertBuiltinRecipients, assertBuiltinStillSends, awaitBuiltinSetup, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
+import { assertBuiltinInput, assertBuiltinRecipients, assertBuiltinStillSends, awaitBuiltinSetup, BUILTIN_NOTE, builtinReplyPolicy, isBuiltinHost } from './builtin-domain.js';
 import { ATTACHMENT_LIMITS_TEXT, ATTACHMENT_REFUSALS_TEXT, ATTACHMENT_RULES_TEXT, UPLOAD_HEADERS } from './attachment-limits.js';
 import { estimateFinish, judgeReadiness, LEGACY_READINESS_REASONS, LEGACY_REASON, RAMP, RAMP_HOUR_MS, rampLines, rampStart, READINESS_REASONS, type RampAt, type RampLines, type ReadinessReason } from './standing-model.js';
 
@@ -2148,7 +2148,9 @@ function passThrough(snapshot: EmailSnapshot, mime: string, bulk: boolean) {
   if (bulk) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'Signed or encrypted mail can’t be sent as bulk mail.');
   snapshot.mime = mime;
 }
-export type MailboxSendRequest = { protocolEnvelope?:boolean; mime?: string; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };
+export type MailboxSendRequest = { protocolEnvelope?:boolean; mime?: string; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[];
+  /** A thread reply: the received message it answers (builtin-domain.ts builtinReplyException). */
+  builtinReply?: import('./builtin-domain.js').BuiltinReply };
 /** Queues one transactional email from a mailbox through the send admission and dispatch pipeline, with extra MIME
  * headers. Only sendFromMailbox calls it, under the send locks it holds. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: SendScope, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
@@ -2156,7 +2158,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   // A built-in domain stops sending once the workspace's own verifies, and its Reply-To stays at its own name, here as on POST /v1/emails/send.
   await assertBuiltinStillSends(runtime, db, a.workspaceId, [request.from]);
   assertBuiltinInput(runtime.config, [{ from: request.from, replyTo: request.replyTo, attachments: request.attachments }]);
-  await assertBuiltinRecipients(runtime, db, a.workspaceId, [{ from: request.from, recipients: [...request.to, ...request.cc, ...request.bcc] }]);
+  const { replyGranted } = await assertBuiltinRecipients(runtime, db, a.workspaceId, [{ from: request.from, recipients: [...request.to, ...request.cc, ...request.bcc] }], false, request.builtinReply);
   const schema = request.protocolEnvelope ? ProtocolSendInput : SendInput;
   const parsed = schema.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.protocolEnvelope?[...request.to,...request.cc,...request.bcc]:request.to, cc:request.protocolEnvelope?[]:request.cc, bcc:request.protocolEnvelope?[]:request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
@@ -2171,7 +2173,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   const message: Outgoing = { snapshot, recipients: hostedCost(request.to, request.cc, request.bcc), marketing: !!isBulk, oversize };
   // The mailbox rules admitted this sender and these attachments; the sending log's reader rule is for other callers.
   const decided = admitted(runtime, (await db.execute<{ s: Admitted | Refused }>(sql`SELECT ${await admission(runtime, a.workspaceId, actorJson(a),
-    { stage: 'send', locks: held, mails: admissionMails(runtime, [message]), ...charges(runtime, [message]) }, undefined, actorAssets(a, snapshot.attachments, true))} AS s`)).rows[0]!.s,
+    { stage: 'send', locks: held, mails: admissionMails(runtime, [message]), ...charges(runtime, [message]), ...(replyGranted ? { builtin: builtinReplyPolicy(runtime.config) } : {}) }, undefined, actorAssets(a, snapshot.attachments, true))} AS s`)).rows[0]!.s,
     a.workspaceId, { oversize: () => oversize });
   const route = decided.mails[0]!;
   snapshot.region = route.region;

@@ -196,6 +196,8 @@ export type OutgoingMessage = {
   threadId?: string; inReplyTo: string | null; references: string[]; autoSubmitted?: 'auto-generated' | 'auto-replied'; headers: { name: string; value: string }[];
   /** Nightmail-authored mail carrying a single-use capability (fwd_…). Every workspace-visible copy withholds it; only the sent message has it. */
   sealed?: boolean;
+  /** replyToInboundThread only: the received message this answers, for a built-in domain's reply to its sender. */
+  answering?: string;
 };
 /** Withholds single-use capabilities (a forward confirmation; a sign-in link, signups.ts signinLinkUrl) from stored, workspace-visible copies of sealed mail. */
 export const sealCapabilities = (value: string) => value.replace(/fwd_[0-9a-f]{64}|(?<=\blink=)[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{43}/g, '[link withheld: only the recipient can use it]');
@@ -280,7 +282,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   // recipients a message, so a larger envelope goes as several emails, To and Cc first: up to 50 of them see each other
   // in the headers SES writes. The mailbox message follows the first email's delivery.
   const emailIds:string[]=[];
-  for (const part of envelopeParts(message)) emailIds.push((await queueMailboxEmail(runtime, tx, held, message.actor, { protocolEnvelope:!!message.protocolArchive,from: message.from, fromName: fromName ?? undefined, ...part, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain?.region, subject: message.subject, html: message.html, text: message.text, mime: message.mime, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors)).emailId);
+  for (const part of envelopeParts(message)) emailIds.push((await queueMailboxEmail(runtime, tx, held, message.actor, { ...(message.answering ? { builtinReply: { messageId: message.answering, mailboxId: current.id } } : {}),protocolEnvelope:!!message.protocolArchive,from: message.from, fromName: fromName ?? undefined, ...part, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain?.region, subject: message.subject, html: message.html, text: message.text, mime: message.mime, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors)).emailId);
   const emailId=emailIds[0]!;
   const stored=message.protocolArchive?.stored??true;
   if (!domain?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');

@@ -42,7 +42,8 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
     sending: z.enum(['ready', 'pending', 'closed', 'off']).describe('ready: it sends now (in a new workspace\'s first seconds, a send waits for its setup to finish). pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).'),
     paused: z.literal(true).optional().describe('Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving.'),
     scope: z.enum(['anyone', 'members']).describe('Who it sends to: anyone, or the verified addresses of the workspace\'s members.'), perDay: z.number().int(), perMinute: z.number().int(),
-    used: z.number().int().describe('Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends.') })
+    used: z.number().int().describe('Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends.'),
+    repliesToSenders: z.literal(true).optional().describe('Present when, though it sends to members only, a reply (replyToInboundThread) may go once to the sender of the message it answers, if that sender passed authentication.') })
     .nullable().optional().describe('Hosted only: the subdomain of the installation\'s own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.'),
   attention: z.string().optional().describe('A connected AWS account\'s most pressing health finding, for a banner; absent when nothing needs attention.'),
 }).openapi('ConnectionSummary');
@@ -131,7 +132,7 @@ export function connectionSummaryOf(runtime: Runtime, row: ConnectionSummaryRow 
     standing: allowance ? { step: (allowance.step ?? 'ok') as 'ok', marketingHeld: !!allowance.marketingHeld } : null,
     domains: { total: row.domains, verified: row.verified_domains }, sent: row.sent, received: row.received, ...(row.attention ? { attention: row.attention } : {}),
     // Sending from the built-in domain closes once a domain of the workspace's own verifies (send_admission).
-    ...(builtin ? { builtinDomain: row.builtin ? { ...row.builtin, sending: row.builtin.sending !== 'off' && row.verified_domains > 0 ? 'closed' : row.builtin.sending, scope: builtin, ...SEND_LIMITS.builtin[builtin] } : null } : {}) };
+    ...(builtin ? { builtinDomain: row.builtin ? { ...row.builtin, sending: row.builtin.sending !== 'off' && row.verified_domains > 0 ? 'closed' : row.builtin.sending, scope: builtin, ...SEND_LIMITS.builtin[builtin], ...(builtin === 'members' && runtime.config.builtinReplies ? { repliesToSenders: true as const } : {}) } : null } : {}) };
 }
 export async function connectionSummary(runtime: Runtime, wid: string) {
   return connectionSummaryOf(runtime,(await runtime.db.execute<ConnectionSummaryRow>(connectionSummaryQuery(runtime,wid))).rows[0]);

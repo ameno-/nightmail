@@ -26434,6 +26434,61 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),202);
       assert.deepEqual((await db.query("SELECT from_address,to_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{from_address:from,to_addresses:['someone@sender.example']}]);
       assert.equal((await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND origin='auto'",[wid])).rows[0].n,0,'The catch-all never creates addresses.');
+      // NIGHTMAIL_BUILTIN_REPLIES, off above (the refusal carries no reply detail). On, while it sends to members only, a
+      // thread reply may go once to the sender of the message it answers when that sender passed authentication; every
+      // other case is still refused, with which condition failed. The caps here are arbitrary.
+      {
+        runtime.config.builtinScope='members';runtime.config.builtinReplies={perDay:4,perRecipientPerDay:2};
+        // To the default inbox (an agent inbox, which replies only to authenticated authors already), or to support@ (an address).
+        const fresh=async(o:{from?:string;verified?:boolean;automated?:boolean;replyTo?:string[];address?:boolean;to?:string[]}={})=>{const {n,mid}=await receive([o.address?`support@${host}`:`order-${randomUUID().slice(0,6)}@${host}`]);assert.equal(n,1);
+          const id=unique('msg'),sender=o.from??'someone@sender.example',input=(await runtime.db.execute<{i:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS i`)).rows[0]!.i;
+          const plan=matchRouting(input.routing,input.recipients,false,'PASS',new Date().toISOString());
+          await storeIncoming(runtime.db,{id,workspaceId:wid,direction:'inbound',region:oh,sesMessageId:mid,messageId:`<${mid}@sender.example>`,inReplyTo:null,references:[],subject:'Question',
+            fromAddress:sender,fromName:null,to:o.to?o.to.map(address=>({name:null,address})):input.recipients,cc:[],bcc:[],replyTo:(o.replyTo??[]).map(address=>({name:null,address})),envelopeFrom:sender,envelopeTo:input.recipients,sentAt:null,receivedAt:new Date().toISOString(),
+            text:'Hi.',html:null,bodyTruncated:false,snippet:'Hi.',headers:[],attachmentCount:0,sizeBytes:100,rawBucket:bucket,rawKey:`workspaces/${wid}/raw/${mid}.eml`,verdicts:{spam:'PASS',virus:'PASS',dmarc:o.verified===false?'FAIL':'PASS'},spam:false,automated:!!o.automated,status:'received',
+            lifecycle:plan.recipients.some(r=>r.inboxes.some(id=>input.routing.boxes?.[id]?.kept))?'kept':undefined} as any,[],true,true,o.verified!==false,plan,undefined,null);
+          const row=(await db.query('SELECT thread_id,mailbox_id FROM mailbox_messages WHERE message_id=$1',[id])).rows[0];
+          return {id,thread:row.thread_id as string,box:row.mailbox_id as string};};
+        const answer=(m:{id:string;thread:string;box:string},extra:Json={})=>local('POST',`/v1/inbound/threads/${m.thread}/reply`,{addressId:m.box,replyToMessageId:m.id,text:'Thanks, on it.',...extra});
+        const refusedFor=async(reply:Promise<Reply>)=>{const e=error(await reply,422,'BUILTIN_DOMAIN_RECIPIENT');assert.equal(e.retryable,false);return e.details[0].reply as string;};
+        const nextDay=()=>db.query("UPDATE sending_emails SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1",[wid]); // The built-in caps of its own count sends, not these.
+        await nextDay();
+        // A verified sender gets one reply, sent to them alone, transactional; a second reply to the same message is refused.
+        const first=await fresh();
+        ok(await answer(first),202);
+        assert.deepEqual((await db.query("SELECT to_addresses,cc_addresses,bcc_addresses,snapshot->>'kind' AS kind FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{to_addresses:['someone@sender.example'],cc_addresses:[],bcc_addresses:[],kind:'transactional'}]);
+        await nextDay();
+        assert.match(await refusedFor(answer(first)),/already answered once/);
+        // A sender that didn't pass authentication: an agent inbox already refuses it; an address now refuses it too (a
+        // forged From must not make the built-in domain mail a victim).
+        error(await answer(await fresh({verified:false})),403,'RECIPIENT_NOT_ALLOWED');
+        assert.match(await refusedFor(answer(await fresh({verified:false,address:true}))),/didn’t pass authentication/);
+        // Only the sender: another recipient, a cc, or a Reply-To at another domain is refused.
+        assert.match(await refusedFor(answer(await fresh({address:true}),{to:['someone-else@sender.example']})),/only to the address that sent/);
+        assert.match(await refusedFor(answer(await fresh({address:true}),{cc:['copy@sender.example']})),/alone: no other recipients/);
+        assert.match(await refusedFor(answer(await fresh({replyTo:['help@elsewhere.example'],address:true}),{to:['someone@sender.example']})),/Reply-To/);
+        // Automated mail: refused even when the caller asks to answer automated mail anyway.
+        assert.match(await refusedFor(answer(await fresh({automated:true,address:true}),{allowAutomated:true})),/automated/);
+        // A signed message the sender wrote to someone else, replayed here (this domain isn't in its To or Cc): never answered.
+        assert.match(await refusedFor(answer(await fresh({from:'replayed@sender.example',to:['friend@elsewhere.example'],address:true}))),/wasn’t sent to this domain/);
+        // Per recipient across every workspace: two replies to this person from other built-in workspaces today use theirs.
+        for (const other of ['ws_other_a','ws_other_b']) await db.query("INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES($1,$2,'shared@sender.example')",[other,unique('msg')]);
+        assert.match(await refusedFor(answer(await fresh({from:'shared@sender.example',address:true}))),/daily allowance/);
+        // A suppressed address is never mailed.
+        await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason) VALUES($1,$2,'blocked@sender.example',true,'bounce')",[unique('con'),wid]);
+        assert.match(await refusedFor(answer(await fresh({from:'blocked@sender.example',address:true}))),/suppressed/);
+        // The daily caps: per recipient (a second message from the same sender is the last one today), then per workspace.
+        ok(await answer(await fresh()),202);await nextDay();
+        assert.match(await refusedFor(answer(await fresh())),/daily allowance/);
+        ok(await answer(await fresh({from:'two@sender.example'})),202);await nextDay();
+        ok(await answer(await fresh({from:'three@sender.example'})),202);await nextDay();
+        const capped=await refusedFor(answer(await fresh({from:'four@sender.example'})));
+        assert.match(capped,/daily allowance/);assert.doesNotMatch(capped,/\d/,'The detail never states the numbers.');
+        // Ordinary sends from the built-in domain are still members only, and carry no reply detail.
+        const plain=error(await local('POST','/v1/emails/send',{from,to:'someone@sender.example',subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
+        assert.equal(plain.details[0].reply,undefined);
+        runtime.config.builtinScope='anyone';runtime.config.builtinReplies=null;
+      }
       // Forwarding's confirmation is an email from the built-in domain too (its links on the link domain): to anyone but a
       // member, refused the same way while it sends to members only; to a member's own address, sent.
       runtime.config.builtinScope='members';runtime.config.linkHost='links.builtin-fixture.example';
