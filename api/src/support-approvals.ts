@@ -34,6 +34,8 @@ export type ApprovalKind = {
   payload?: z.ZodObject<{ workspaceId: z.ZodString } & z.ZodRawShape>;
   /** The exact target in Nightmail's words, from the payload (IDs and numbers only), shown with the effect in the email and on the confirm step. */
   summary?(payload: Record<string, unknown>): string;
+  /** The value it changes, now (read when the confirm step opens) and after approving, so an approval from a phone shows both. */
+  change?(db: DbExecutor, payload: Record<string, unknown>): Promise<{ now: string; after: string }>;
   run(deps: Deps, conversationId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>>;
 };
 const Workspace = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
@@ -50,6 +52,24 @@ async function ownWorkspace(d: Deps, payload: Record<string, unknown>) {
     throw new ApiError(409, 'SUPPORT_APPROVAL_TARGET_CHANGED', 'The customer no longer manages this workspace (owner or admin), so this can’t run for them.');
   return wid;
 }
+/** The limit in force now: the operator's unexpired override, else the score's (none for an exempt workspace); the domain limit. */
+async function limitNow(db: DbExecutor, wid: string, kind: 'daily' | 'domains') {
+  const { rows: [now] } = await db.execute<{ current: number | null }>(kind === 'daily'
+    ? sql`SELECT CASE WHEN w.exempt_hosted_quotas THEN NULL WHEN w.send_cap_override IS NOT NULL AND (w.send_cap_override_expires_at IS NULL OR w.send_cap_override_expires_at > now())
+        THEN w.send_cap_override ELSE s.daily_limit END AS current FROM workspaces w LEFT JOIN sender_standing s ON s.workspace_id = w.id WHERE w.id = ${wid}`
+    : sql`SELECT workspace_domain_limit(${wid}) AS current`);
+  return now?.current === null || now?.current === undefined ? null : Number(now.current);
+}
+/**
+ * A raise still raises when it runs: the limit in force now must be below the one proposed. A workspace that recovered to
+ * no daily limit, or was raised meanwhile, would otherwise be capped or lowered by an approval that read as a raise.
+ */
+async function stillRaises(d: Deps, wid: string, kind: 'daily' | 'domains', to: number) {
+  const current = await limitNow(d.tx, wid, kind);
+  if (current === null || current >= to) throw new ApiError(409, 'SUPPORT_APPROVAL_TARGET_CHANGED', current === null
+    ? 'The workspace has no daily limit now, so setting one would lower it.' : `The workspace’s ${kind === 'daily' ? 'daily' : 'domain'} limit is already ${count(current)}, at or above the ${count(to)} proposed.`);
+}
+const dollars = (uc: bigint) => (Number(uc / 1_000_000n) / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 /** How an approved proposal is recorded where the console records its reason: fixed words and the conversation, never the agent's. */
 const recorded = (d: Deps, conversationId: string) => ({ reason: `Support proposal ${d.approvalId}, approved in the support inbox.`, ticketRef: conversationId });
 /** Runs one of the console's operator changes and writes its operator audit row, as its route's mutate() would. */
@@ -79,13 +99,15 @@ export const KINDS: Record<Name, ApprovalKind> = {
     label: 'Set the daily sending limit', risky: true, payload: z.object({ workspaceId: Workspace, daily: z.number().int().min(1).max(10_000_000) }).strict(),
     effect: 'The workspace’s daily sending limit is set to the number shown, with no end date, as Set limit on its operator page does. Its score no longer lowers it until an operator clears it.',
     summary: p => `Daily limit ${count(p.daily)} for workspace ${String(p.workspaceId)}`,
-    run: async (d, conversationId, p) => { const wid = await ownWorkspace(d, p); return byConsole(d, wid, ops => ops.operatorChanges.limit(d.tx, d.operator, wid, { daily: Number(p.daily), expiresAt: null, ...recorded(d, conversationId) })); },
+    change: async (db, p) => { const now = await limitNow(db, String(p.workspaceId), 'daily'); return { now: now === null ? 'No daily limit' : `${count(now)} a day`, after: `${count(p.daily)} a day` }; },
+    run: async (d, conversationId, p) => { const wid = await ownWorkspace(d, p); await stillRaises(d, wid, 'daily', Number(p.daily)); return byConsole(d, wid, ops => ops.operatorChanges.limit(d.tx, d.operator, wid, { daily: Number(p.daily), expiresAt: null, ...recorded(d, conversationId) })); },
   },
   raise_domain_limit: {
     label: 'Set the domain limit', risky: true, payload: z.object({ workspaceId: Workspace, limit: z.number().int().min(1).max(10_000) }).strict(),
     effect: 'The number of domains the workspace may add is set to the number shown, as Domain limit on its operator page does.',
     summary: p => `Domain limit ${count(p.limit)} for workspace ${String(p.workspaceId)}`,
-    run: async (d, conversationId, p) => { const wid = await ownWorkspace(d, p); return byConsole(d, wid, ops => ops.operatorChanges.domainLimit(d.tx, wid, { limit: Number(p.limit), ...recorded(d, conversationId) }), false); },
+    change: async (db, p) => { const now = await limitNow(db, String(p.workspaceId), 'domains'); return { now: now === null ? 'No domain limit' : `${count(now)} domains`, after: `${count(p.limit)} domains` }; },
+    run: async (d, conversationId, p) => { const wid = await ownWorkspace(d, p); await stillRaises(d, wid, 'domains', Number(p.limit)); return byConsole(d, wid, ops => ops.operatorChanges.domainLimit(d.tx, wid, { limit: Number(p.limit), ...recorded(d, conversationId) }), false); },
   },
   lift_growth_pace: {
     label: 'Lift the growth pace', risky: true, payload: z.object({ workspaceId: Workspace }).strict(),
@@ -121,6 +143,11 @@ export const KINDS: Record<Name, ApprovalKind> = {
     label: 'Grant promotional credit', risky: true, payload: z.object({ workspaceId: Workspace, amountCents: z.number().int().min(1).max(100_000) }).strict(),
     effect: 'Promotional credit of the amount shown is added to the workspace’s balance (spent first, never refunded), as Grant credit on its billing page does. Once only.',
     summary: p => `${(Number(p.amountCents) / 100).toFixed(2)} of promotional credit for workspace ${String(p.workspaceId)}`,
+    change: async (db, p) => {
+      const { rows: [a] } = await db.execute<{ total: string }>(sql`SELECT (coalesce(sum(balance_uc), 0) + coalesce(sum(promo_uc), 0))::text AS total FROM billing_accounts WHERE workspace_id = ${String(p.workspaceId)}`);
+      const now = BigInt(a?.total ?? '0');
+      return { now: `${dollars(now)} balance`, after: `${dollars(now + BigInt(Number(p.amountCents)) * 1_000_000n)} balance` };
+    },
     run: async (d, conversationId, p) => {
       const wid = await ownWorkspace(d, p), billing = await wrapModuleLoad(() => import('./billing/routes.js'));
       const { result, audit } = await billing.grantPromoCredit(d.tx, d.operator, wid, { amountCents: Number(p.amountCents), ...recorded(d, conversationId) }, `approval:${d.approvalId}`);

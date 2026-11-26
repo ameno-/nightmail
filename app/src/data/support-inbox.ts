@@ -39,6 +39,8 @@ export interface SupportApproval {
   id: string; conversationId: string; kind: string; label: string; effect: string; risky: boolean; reason: string; proposedBy: 'nightmail' | 'agent'
   /** An agent's risky proposal: its exact target in Nightmail's words, with its numbers. */
   summary: string | null
+  /** A limit or balance it changes: its value now (read when opened) and after approving. */
+  change: { now: string; after: string } | null
   state: 'proposed' | 'approved' | 'declined' | 'failed' | 'expired'; createdAt: string; expiresAt: string; decidedAt: string | null
   decidedBy: { userId: string; name: string | null } | null; result: Record<string, unknown> | null
   /** Send the held answer: exactly what would go, and why it can't, when it can't. */

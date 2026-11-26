@@ -9942,6 +9942,13 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await resend(clerkChat), 404);
         error(await recheck(id, theirHost), 404);
         error(await resend(id, theirForward), 404);
+        // A forward its recipient already allowed can't be asked again (no confirm, decline or new destination either: the
+        // tool takes only the forward's ID): refused each time, nothing sent, and its turn given back.
+        const allowed = `con_${hex().slice(0, 24)}`;
+        await db.query(`INSERT INTO mailbox_webhooks(id, workspace_id, type, key, encrypted_target, event_types, verified) VALUES ($1, $2, 'forward', 'allowed', $3, '[]', true)`,
+          [allowed, shop, await encrypt(runtime, 'friend@example.net', `${shop}:endpoint:${allowed}`)]);
+        for (let i = 0; i < 2; i++) error(await resend(id, allowed), 409, 'ALREADY_CONFIRMED');
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM support_action_slots WHERE kind = 'resend_forward' AND target = $1`, [allowed])).rows[0].n, 0);
         for (const done of [id, ownerChat, clerkChat]) ok(reply(await platform.closeConversation(done)));
       });
     });
@@ -10757,7 +10764,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
           // Each kind: the link opens the confirm step and changes nothing; a reader can't approve; an operator's Approve runs it.
           await db.query(`UPDATE sender_standing SET growth_cap = 1000, growth_until = now() + interval '12 hours' WHERE workspace_id = $1`, [acme]);
-          await db.query(`UPDATE sender_standing SET marketing_hold = true, step = 'restrict' WHERE workspace_id = $1`, [acme]);
+          await db.query(`UPDATE sender_standing SET marketing_hold = true, step = 'restrict', daily_limit = 500 WHERE workspace_id = $1`, [acme]);
           const cases: [Json, (s: Json) => unknown, unknown][] = [
             [{ kind: 'raise_daily_limit', daily: 50000 }, s => s.daily, 50000],
             [{ kind: 'raise_domain_limit', limit: 250 }, s => s.domains, 250],
@@ -10775,6 +10782,12 @@ describe('Hosted MCP OAuth and tools', () => {
             const path = `${inbox}/${own}/approvals/${proposed.body.id}`, token = url.searchParams.get('token')!, before = read(await standing());
             const shown = ok(await send('GET', `${path}?token=${token}`, session(reader)));
             assert.deepEqual([shown.kind, shown.risky, shown.state, shown.proposedBy, shown.summary], [body.kind, true, 'proposed', 'agent', proposed.body.summary], body.kind);
+            // The confirm step shows a limit or balance as it is now, read on opening, beside the value after approving.
+            const change = shown.change as Json | null;
+            if (body.kind === 'raise_daily_limit') assert.deepEqual(change, { now: '500 a day', after: '50,000 a day' });
+            else if (body.kind === 'raise_domain_limit') assert.deepEqual(change, { now: `${(before as number | null) ?? 100} domains`, after: '250 domains' });
+            else if (body.kind === 'grant_credit') { const usd = (t: string) => Number(t.replace(/[$, a-z]/g, '')); assert.ok(/^-?\$[\d,]+\.\d\d balance$/.test(change?.now) && Math.abs(usd(change!.after) - usd(change!.now) - 5) < 0.001, JSON.stringify(change)); }
+            else assert.equal(change, null, body.kind);
             assert.deepEqual(read(await standing()), before, `${body.kind}: opening the link changed nothing`);
             error(await send('POST', path, keyed(reader), { token, decision: 'approve' }), 403, 'OPERATOR_REQUIRED');
             assert.deepEqual(read(await standing()), before, `${body.kind}: a reader changed nothing`);
@@ -10795,6 +10808,14 @@ describe('Hosted MCP OAuth and tools', () => {
           const failed = ok(await send('POST', `${inbox}/${own}/approvals/${stale.body.id}`, keyed(operator), { token: staleUrl.searchParams.get('token')!, decision: 'approve' }));
           assert.deepEqual([failed.state, failed.result.error, (await standing()).domains], ['failed', 'SUPPORT_APPROVAL_TARGET_CHANGED', 250]);
           await db.query(`UPDATE workspace_members SET role = 'owner' WHERE workspace_id = $1 AND user_id = $2`, [acme, owner.userId]);
+          // A raise that would lower: the limit in force (50,000 now) is above the proposal, so approving refuses and changes nothing.
+          const lower = reply(await proposeAs(own, { kind: 'raise_daily_limit', daily: 20000, reason }));
+          const lowerUrl = new URL(approvalLink(runtime.config, { id: lower.body.id, conversationId: own, expiresAt: new Date(lower.body.expiresAt) }));
+          const lowered = ok(await send('POST', `${inbox}/${own}/approvals/${lower.body.id}`, keyed(operator), { token: lowerUrl.searchParams.get('token')!, decision: 'approve' }));
+          assert.deepEqual([lowered.state, lowered.result.error, (await standing()).daily], ['failed', 'SUPPORT_APPROVAL_TARGET_CHANGED', 50000]);
+          // Proposals are capped: three waiting per conversation, and a fourth is refused, so the agent can't flood staff.
+          for (const body of [{ kind: 'raise_domain_limit', limit: 900 }, { kind: 'grant_credit', amountCents: 100 }, { kind: 'raise_daily_limit', daily: 90000 }]) assert.equal(reply(await proposeAs(own, { ...body, reason })).status, 201, body.kind);
+          error(reply(await proposeAs(own, { kind: 'raise_domain_limit', limit: 950, reason })), 409, 'SUPPORT_PROPOSALS_OPEN');
           for (const done of [own, memberChat]) ok(reply(await platform.closeConversation(done)));
         });
 

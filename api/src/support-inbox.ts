@@ -874,6 +874,7 @@ export function registerSupportInbox(app: App) {
     reason: z.string().describe('Why it was proposed: the proposer\u2019s words (the agent\u2019s, for a risky one).'), proposedBy: z.enum(['nightmail', 'agent']),
     state: z.enum(['proposed', 'approved', 'declined', 'failed', 'expired']), createdAt: z.string(), expiresAt: z.string(), decidedAt: z.string().nullable(),
     decidedBy: z.object({ userId: z.string(), name: z.string().nullable() }).nullable(), result: z.record(z.string(), z.unknown()).nullable(),
+    change: z.object({ now: z.string(), after: z.string() }).nullable().describe('A limit or balance it changes: its value now, read when this is opened, and after approving.'),
     preview: z.object({ text: z.string().nullable().describe('Exactly what would be sent.'), blocked: z.string().nullable().describe('Why it can\u2019t be, now.') }).nullable()
       .describe('Send the held answer: the answer as it would go, and why it can\u2019t go, when it can\u2019t (it needs a fresh reply, a newer reply reached them, or it was decided).'),
   }).openapi('SupportApproval');
@@ -887,9 +888,9 @@ export function registerSupportInbox(app: App) {
     if (!r || !isKind(r.kind) || !validToken(secret, { id: r.id, conversationId: r.conversation_id, expiresAt: new Date(Number(r.expires_ms)) }, token)) notFound('Approval');
     return r!;
   }
-  const approvalView = (r: ApprovalRow, preview: z.infer<typeof Approval>['preview'] = null): z.infer<typeof Approval> => {
+  const approvalView = (r: ApprovalRow, preview: z.infer<typeof Approval>['preview'] = null, change: z.infer<typeof Approval>['change'] = null): z.infer<typeof Approval> => {
     const kind = KINDS[r.kind as keyof typeof KINDS];
-    return { preview, id: r.id, conversationId: r.conversation_id, kind: r.kind, label: kind.label, effect: kind.effect, risky: kind.risky, summary: kind.summary?.(r.payload) ?? null, reason: r.reason, proposedBy: r.proposed_by,
+    return { preview, change, id: r.id, conversationId: r.conversation_id, kind: r.kind, label: kind.label, effect: kind.effect, risky: kind.risky, summary: kind.summary?.(r.payload) ?? null, reason: r.reason, proposedBy: r.proposed_by,
       state: r.state === 'proposed' && r.expired ? 'expired' : r.state, createdAt: isoTime(r.created_at)!, expiresAt: isoTime(r.expires_at)!, decidedAt: isoTime(r.decided_at),
       decidedBy: r.decided_by ? { userId: r.decided_by, name: r.decided_by_name } : null, result: r.result };
   };
@@ -904,7 +905,8 @@ export function registerSupportInbox(app: App) {
     request: { params: ApprovalParams, query: z.object({ token: z.string().min(1).max(100) }) }, responses: { 200: response(Approval), ...errors } }), async c => {
     await staff(c, 'operator:read');
     const params = c.req.valid('param'), a = await approvalOf(c.env.db, c.env.config.authSecret, params, c.req.valid('query').token);
-    return c.json(approvalView(a, await previewOf(c.env.db, a)), 200);
+    const change = a.state === 'proposed' && !a.expired ? await KINDS[a.kind as keyof typeof KINDS].change?.(c.env.db, a.payload) ?? null : null;
+    return c.json(approvalView(a, await previewOf(c.env.db, a), change), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/approvals/{approvalId}', operationId: 'operatorDecideSupportApproval',
     description: 'Approve or decline it (the operator role), once, before it expires: approving runs it as the dashboard\u2019s own button for it would. On the audit trail and the conversation\u2019s timeline.',
