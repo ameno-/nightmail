@@ -512,6 +512,19 @@ async function audience() {
   check(hasId(await api('listSegments', { query: { search: prefix } }), s.id), 'segment not listed');
   await api('updateContactConsent', { path: c, body: { status: 'subscribed', source: prefix } });
   check((await api('listContactConsentEvents', { path: c })).data.some(e => e.source === prefix && e.status === 'subscribed'), 'no subscription audit');
+  await step('Topics: one made for this run, the contact’s choice about it, and the topic archived', async () => {
+    const topic = await api('createTopic', { body: { name: `${prefix}-topic`, description: subject, subscribedByDefault: true } });
+    const tp = { id: topic.id };
+    defer(`archive topic ${tp.id}`, async () => check(!!(await api('updateTopic', { path: tp, body: { archived: true } })).archivedAt, 'topic not archived'));
+    check(topic.name === `${prefix}-topic` && topic.subscribedByDefault && topic.archivedAt === null, 'topic not made as asked');
+    check((await api('updateTopic', { path: tp, body: { description: prefix } })).description === prefix, 'topic edit not returned');
+    check((await listed(tp.id, cursor => api('listTopics', { query: { cursor, limit: 100 } }))).description === prefix, 'topic edit not listed');
+    check((await api('getContact', { path: c })).topics.find(row => row.topicId === tp.id)?.subscribed === true, 'a new topic does not reach the contact by default');
+    await api('updateContactConsent', { path: c, body: { status: 'unsubscribed', topicId: tp.id, source: prefix } });
+    const after = (await api('getContact', { path: c })).topics.find(row => row.topicId === tp.id);
+    check(after?.subscribed === false && after.chosen && (await api('getContact', { path: c })).marketingConsent === 'subscribed', 'topic opt-out not recorded on its own');
+    check((await api('listContactConsentEvents', { path: c })).data.some(row => row.topicId === tp.id && row.status === 'unsubscribed'), 'no topic consent record');
+  });
   const added = await api('addListMembers', { path: l, body: { contactIds: [c.id] } });
   check(added.added === 1, 'did not add exactly one member');
   defer(`remove membership ${l.id}`, async () => check((await api('removeListMember', { path: { ...l, contactId: c.id } })).deleted, 'membership not removed'));

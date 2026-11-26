@@ -11666,6 +11666,58 @@ describe('Contacts and explicit consent', () => {
     error(await http('POST', '/v1/contacts', key.secret, { email }), 409, 'CONTACT_EXISTS');
   });
 
+  test('topics: owners and admins make and archive them, a contact\u2019s choices about them are its consent with a topic, kept in the consent history and events', async t => {
+    const key = await keyFixture(t), reader = await keyFixture(t, { permissions: ['read'] }), db = await fixtureDatabase(t);
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    const topic = async (body: Json) => { const made = ok(await http('POST', '/v1/topics', key.secret, body), 201); cleanup(t, async () => { ok(await http('PATCH', `/v1/topics/${made.id}`, key.secret, { archived: true })); }); return made; };
+    const name = unique('Product updates');
+    error(await http('POST', '/v1/topics', reader.secret, { name }), 403, 'PERMISSION_DENIED');
+    const updates = await topic({ name, description: 'What we shipped' }), events = await topic({ name: unique('Events'), subscribedByDefault: false });
+    assert.deepEqual([updates.subscribedByDefault, updates.description, updates.archivedAt, events.subscribedByDefault, events.description], [true, 'What we shipped', null, false, '']);
+    error(await http('POST', '/v1/topics', key.secret, { name: name.toUpperCase() }), 409, 'TOPIC_EXISTS');
+    error(await http('PATCH', `/v1/topics/${updates.id}`, key.secret, { subscribedByDefault: false }), 422);
+    error(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { name }), 409, 'TOPIC_EXISTS');
+    error(await http('PATCH', `/v1/topics/${events.id}`, reader.secret, { description: 'Theirs' }), 403, 'PERMISSION_DENIED');
+    assert.equal(ok(await http('PATCH', `/v1/topics/${updates.id}`, key.secret, { description: 'Releases' })).description, 'Releases');
+    const listed = (await allPages('/v1/topics', reader.secret)).map(row => row.id);
+    assert.deepEqual(listed.filter(id => [updates.id, events.id].includes(id)), [updates.id, events.id], 'Topics list oldest first.');
+    const states = async () => Object.fromEntries(ok(await http('GET', `/v1/contacts/${contact.id}`, reader.secret)).topics.filter((row: Json) => [updates.id, events.id].includes(row.topicId)).map((row: Json) => [row.topicId, [row.subscribed, row.chosen]]));
+    assert.deepEqual(await states(), { [updates.id]: [true, false], [events.id]: [false, false] }, 'Without a choice each topic has its default.');
+    const choose = (topicId: string, status: 'subscribed' | 'unsubscribed', extra: Json = {}, bearer = key.secret) => http('POST', `/v1/contacts/${contact.id}/consent`, bearer, { status, topicId, ...extra });
+    assert.equal(ok(await choose(updates.id, 'unsubscribed', { evidence: 'Preference form' })).marketingConsent, 'unknown', 'A topic choice never changes marketing consent.');
+    ok(await choose(events.id, 'subscribed', { evidence: 'Preference form' }));
+    assert.deepEqual(await states(), { [updates.id]: [false, true], [events.id]: [true, true] });
+    const audit = page(await http('GET', `/v1/contacts/${contact.id}/consent`, reader.secret));
+    assert.deepEqual(audit.map((row: Json) => [row.topicId, row.status, row.source, row.evidence]), [[updates.id, 'unsubscribed', 'api', 'Preference form'], [events.id, 'subscribed', 'api', 'Preference form']]);
+    // The same choice again changes nothing: no consent record, no event.
+    ok(await choose(events.id, 'subscribed'));
+    assert.equal(page(await http('GET', `/v1/contacts/${contact.id}/consent`, reader.secret)).length, 2);
+    error(await choose(updates.id, 'subscribed'), 409, 'RESUBSCRIBE_CONFIRMATION_REQUIRED');
+    error(await choose('top_missing', 'subscribed'), 422, 'TOPIC_NOT_FOUND');
+    error(await choose(events.id, 'unsubscribed', {}, reader.secret), 403, 'PERMISSION_DENIED');
+    ok(await choose(updates.id, 'subscribed', { confirmResubscribe: true }));
+    assert.deepEqual((await states())[updates.id], [true, true]);
+    // A global subscription isn't stale because a topic decision came after the last global one.
+    assert.equal(ok(await consent(key.secret, contact.id, 'subscribed')).marketingConsent, 'subscribed');
+    const published = async () => (await db.query(`SELECT data->>'topicId' AS topic, data->>'status' AS status FROM operation_events WHERE type = 'contact.subscription_changed' AND data->>'contactId' = $1 AND data ? 'topicId' ORDER BY id`, [contact.id])).rows;
+    for (const deadline = Date.now() + 10_000; (await published()).length < 3 && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual((await published()).map(row => [row.topic, row.status]), [[updates.id, 'unsubscribed'], [events.id, 'subscribed'], [updates.id, 'subscribed']], 'Each change is a contact.subscription_changed event with its topic.');
+    // An archived topic leaves the topic list and a contact's topics, takes no new choice, keeps the ones made, and comes back.
+    const archived = ok(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: true }));
+    assert.ok(archived.archivedAt);
+    assert.ok(!(await allPages('/v1/topics', reader.secret)).some(row => row.id === events.id));
+    assert.ok((await allPages('/v1/topics?archived=true', reader.secret)).some(row => row.id === events.id));
+    assert.equal((await states())[events.id], undefined);
+    error(await choose(events.id, 'unsubscribed'), 422, 'TOPIC_NOT_FOUND');
+    assert.equal((await db.query('SELECT subscribed FROM audience_contact_topics WHERE contact_id = $1 AND topic_id = $2', [contact.id, events.id])).rows[0]?.subscribed, true);
+    // Its name is free while it is archived; it can't come back while another topic has it.
+    const other = await topic({ name: events.name });
+    error(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: false }), 409, 'TOPIC_EXISTS');
+    ok(await http('PATCH', `/v1/topics/${other.id}`, key.secret, { archived: true }));
+    assert.equal(ok(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: false })).archivedAt, null);
+    assert.deepEqual((await states())[events.id], [true, true]);
+  });
+
   test('two keys in a workspace share one contact and consent history', async t => {
     const first = await keyFixture(t), second = await keyFixture(t);
     const contact = await resource(t, first.secret, '/v1/contacts', { email: address() });
@@ -13597,7 +13649,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
           || (method === 'post' && [...AUTHENTICATED_CREATES, ...MAILBOX_CREATES].some(route => route.test(concrete)))) routes.set(op.operationId, concrete);
       }
       const expires = ['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendDomainTestEmail', 'createInboundThread', 'replyToInboundThread'];
-      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createNewsletter', 'createSegment', 'previewContactImport', 'createCampaignTemplate',
+      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createNewsletter', 'createSegment', 'createTopic', 'previewContactImport', 'createCampaignTemplate',
         'uploadTemplateAsset', 'importTemplateImage', 'uploadAttachment', 'uploadAttachmentBytes', 'createCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'createWebhook',
         'createRoute', 'createEndpoint', 'createInboxConnection', 'createInbox', 'createInboundSubdomain', 'createInboundAddress', 'createInboundWebhook',
         'createBillingTopUp', 'createBillingTopUpLink'];
@@ -20281,6 +20333,85 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.equal(audit.length, 2, 'Initial subscription plus first provider POST must remain the only consent decisions after repeated POST and GET.');
     assert.equal(audit.filter(row => row.source === 'rfc8058-post').length, 1);
     assert.equal(audit.filter(row => row.source === 'footer-get').length, 0, 'Later footer navigation must not relabel provider-originated consent.');
+  });
+
+  test('topics on sends and campaigns: a topic\u2019s opt-outs are refused and skipped, its one-click leaves that topic alone, and an unsubscribe from everything wins', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), form = { 'content-type': 'application/x-www-form-urlencoded' };
+    const topic = async (body: Json) => { const made = ok(await http('POST', '/v1/topics', key.secret, { name: unique('Topic'), ...body }), 201); cleanup(t, async () => { ok(await http('PATCH', `/v1/topics/${made.id}`, key.secret, { archived: true })); }); return made; };
+    const news = await topic({ description: 'Synthetic topic' }), events = await topic({ subscribedByDefault: false });
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('topic-list') });
+    const [ana, ben, cai, dee] = await Promise.all([0, 1, 2, 3].map(async () => { const c = await resource(t, key.secret, '/v1/contacts', { email: address() }); ok(await consent(key.secret, c.id, 'subscribed')); return c; }));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [ana.id, ben.id, cai.id, dee.id] }));
+    const tokenOf = async (emailId: string) => {
+      const [row] = (await db.query('SELECT snapshot FROM sending_emails WHERE id = $1', [emailId])).rows;
+      const url = row.snapshot.unsubscribeUrl ?? /Unsubscribe:\s*(https?:\/\/\S+)/.exec(ok(await http('GET', `/v1/emails/${emailId}/content`, key.secret)).text)![1];
+      const token = url.slice(url.lastIndexOf('/') + 1); secrets.add(token);
+      return token;
+    };
+    const tokenTopic = async (token: string) => (await db.query("SELECT topic_id FROM operation_unsubscribe_tokens WHERE token_hash = encode(sha256(convert_to($1, 'UTF8')), 'hex')", [token])).rows[0]?.topic_id;
+    const topicsOf = async (contact: Json) => Object.fromEntries(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).topics.map((row: Json) => [row.topicId, row.subscribed]));
+    const refusedFor = (reply: Reply) => error(reply, 422, 'RECIPIENT_INELIGIBLE').details.map((row: Json) => row.reason);
+
+    // A topic is for marketing, and one the workspace has and hasn't archived: one read for a whole batch.
+    assert.equal(error(await http('POST', '/v1/emails/send', key.secret, mail({ to: ana.email, topicId: news.id })), 422, 'TOPIC_REQUIRES_MARKETING').field, 'topicId');
+    assert.equal(error(await http('POST', '/v1/emails/batch', key.secret, { emails: [mail({ to: ana.email, kind: 'marketing', topicId: news.id }), mail({ to: ben.email, kind: 'marketing', topicId: 'top_missing' })] }), 422, 'TOPIC_NOT_FOUND').field, 'emails.1.topicId');
+    // A send with a topic: its link is about that topic, and one-click opts out of it alone, synchronously and once.
+    const first = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: ana.email, kind: 'marketing', topicId: news.id })), 202);
+    const anas = await tokenOf(first.id);
+    assert.equal(await tokenTopic(anas), news.id);
+    const prompt = ok(await http('GET', `/unsubscribe/${anas}`));
+    assert.ok(prompt.includes(news.name) && /<form method="post">/.test(prompt) && !prompt.includes(ana.email));
+    assert.equal((await topicsOf(ana))[news.id], true, 'A GET changes nothing.');
+    const clicked = await http('POST', `/unsubscribe/${anas}`, undefined, 'List-Unsubscribe=One-Click', form);
+    assert.match(ok(clicked), /unsubscribed/i);
+    assert.equal(clicked.headers.get('location'), null);
+    ok(await http('POST', `/unsubscribe/${anas}`, undefined, 'List-Unsubscribe=One-Click', form));
+    const anaAfter = ok(await http('GET', `/v1/contacts/${ana.id}`, key.secret));
+    assert.equal(anaAfter.marketingConsent, 'subscribed', 'A topic opt-out leaves the rest of marketing as it was.');
+    const choice = (id: string) => anaAfter.topics.find((row: Json) => row.topicId === id);
+    assert.deepEqual([[choice(news.id).subscribed, choice(news.id).chosen], [choice(events.id).subscribed, choice(events.id).chosen]], [[false, true], [false, false]]);
+    assert.deepEqual(page(await http('GET', `/v1/contacts/${ana.id}/consent`, key.secret)).filter(row => row.topicId).map(row => [row.topicId, row.status, row.source]), [[news.id, 'unsubscribed', 'rfc8058-post']]);
+    // Her next mail about the topic is refused with a plain reason; other marketing still reaches her. A topic nobody gets
+    // by default reaches only those who chose it.
+    assert.deepEqual(refusedFor(await http('POST', '/v1/emails/send', key.secret, mail({ to: ana.email, kind: 'marketing', topicId: news.id }))), ['topic_unsubscribed']);
+    ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: ana.email, kind: 'marketing' })), 202);
+    assert.deepEqual(refusedFor(await http('POST', '/v1/emails/send', key.secret, mail({ to: ben.email, kind: 'marketing', topicId: events.id }))), ['topic_unsubscribed']);
+    ok(await consent(key.secret, ben.id, 'subscribed', { topicId: events.id }));
+    ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: ben.email, kind: 'marketing', topicId: events.id })), 202);
+    // An unsubscribe from everything wins over any topic choice, an explicit one included.
+    ok(await consent(key.secret, cai.id, 'subscribed', { topicId: events.id }));
+    ok(await consent(key.secret, cai.id, 'unsubscribed'));
+    assert.deepEqual(refusedFor(await http('POST', '/v1/emails/send', key.secret, mail({ to: cai.email, kind: 'marketing', topicId: events.id }))), ['unsubscribed']);
+
+    // A campaign with a topic: marketing only, counted and captured without its opt-outs.
+    error(await http('POST', '/v1/campaigns', key.secret, { name: unique('topic'), topicId: 'top_missing' }), 422, 'TOPIC_NOT_FOUND');
+    error(await http('POST', '/v1/campaigns', key.secret, { name: unique('topic'), topicId: news.id, requiredNotice: true }), 422, 'TOPIC_REQUIRES_MARKETING');
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { topicId: news.id });
+    assert.equal(campaign.draft.topicId, news.id);
+    const counted = ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, key.secret));
+    assert.deepEqual([counted.matched, counted.eligible, counted.unsubscribed], [4, 2, 2], 'Ana left the topic and Cai everything: Ben and Dee are reached.');
+    assert.equal(ok(await http('GET', `/v1/campaigns/${(await campaignFixture(t, key.secret, { listId: list.id })).id}/audience`, key.secret)).eligible, 3, 'Without the topic, Ana is reached.');
+    assert.equal(ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202).queued, 2);
+    // Ben leaves the topic after the capture, and the topic is archived: the dispatcher still skips him, as unsubscribed from it.
+    ok(await consent(key.secret, ben.id, 'unsubscribed', { topicId: news.id }));
+    ok(await http('PATCH', `/v1/topics/${news.id}`, key.secret, { archived: true }));
+    await db.query('UPDATE sending_campaigns SET scheduled_at = now() WHERE id = $1', [campaign.id]);
+    await db.query('UPDATE jobs SET available_at = now() WHERE id = $1', [`campaign.run:${campaign.id}`]);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'done' && row.counts.byStatus.delivered === 1 && row.counts.byStatus.suppressed === 1);
+    const sent = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
+    const skipped = sent.find(row => row.to[0].toLowerCase() === ben.email.toLowerCase()), reached = sent.find(row => row.to[0].toLowerCase() === dee.email.toLowerCase());
+    assert.deepEqual([skipped?.status, skipped?.suppressionReason, reached?.status], ['suppressed', 'topic_unsubscribed', 'delivered']);
+    // Dee's link is about the topic; its one-click works after the topic was archived, and leaves her other choices.
+    const dees = await tokenOf(reached!.id);
+    assert.equal(await tokenTopic(dees), news.id);
+    assert.match(ok(await http('POST', `/unsubscribe/${dees}`, undefined, 'List-Unsubscribe=One-Click', form)), /unsubscribed/i);
+    assert.deepEqual([ok(await http('GET', `/v1/contacts/${dee.id}`, key.secret)).marketingConsent, (await db.query('SELECT subscribed FROM audience_contact_topics WHERE contact_id = $1 AND topic_id = $2', [dee.id, news.id])).rows[0]?.subscribed], ['subscribed', false]);
+    // An archived topic can't be launched with; a draft that has it keeps it until then.
+    const late = await campaignFixture(t, key.secret, { listId: list.id }, { topicId: events.id });
+    ok(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: true }));
+    const kept = ok(await http('PATCH', `/v1/campaigns/${late.id}`, key.secret, { revision: late.revision, draft: { ...late.draft, name: unique('renamed') } }));
+    assert.equal(kept.draft.topicId, events.id);
+    error(await http('POST', `/v1/campaigns/${late.id}/send`, key.secret, { revision: kept.revision }), 422, 'TOPIC_NOT_FOUND');
   });
 
   test('a campaign’s own unsubscribe page changes only the footer link: List-Unsubscribe keeps its one HTTPS one-click address', async () => {
