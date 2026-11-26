@@ -4,7 +4,7 @@ import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { RATES } from './billing/money.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { customerNotice, plainAddress, type Notice, type NoticeInput, type ScoreCard } from './notices.js';
-import { LINK_MINUTES, signinLinkUrl } from './signups.js';
+import { LINK_MINUTES, signinLinkUrl, supportLinkUrl } from './signups.js';
 
 // Sending the account emails (src/notices.ts writes them). Three jobs send one each, every one through deliverNotice:
 // standing.notify (standing.ts: paused, marketing on hold, warning, resumed, campaign paused), billing.notify
@@ -201,13 +201,14 @@ export async function waitlistAdmitted(runtime: Runtime, db: DbExecutor, email: 
 /** The status of a waitlist address's email (null: none queued), for a lowercased address column. */
 export const waitlistNoticeStatus = (email: SQL) => sql`(SELECT n.status FROM account_notices n WHERE n.dedupe_key='waitlist:'||${email})`;
 
-/** A sign-in link's email (signups.ts sendSigninLink), queued in the transaction that made the link. Only the link's ID
- * is kept: the job makes the link from it, and sends nothing once it is used or expired. */
+/** A sign-in link's email (signups.ts sendSigninLink, or a support email's, support-conversations.ts), queued in the
+ * transaction that made the link. Only the link's ID is kept: the job makes the link from it, and sends nothing once it
+ * is used or expired. */
 export const signinLink = (workspaceId: string, linkId: string) => noticeInsert({ workspaceId, kind: 'signin_link', dedupe: `signin-link:${linkId}`, data: { linkId } });
 
 type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>; name: string | null; exempt: boolean | null; recipients: string[];
   standing: { phase: string; step: string; daily: number | null } | null; paused: boolean | null; position: { mode?: string; enforcement?: string; availableUc?: string; freeSentLeft?: number } | null;
-  domain: string | null; hasDomain: boolean | null; builtin: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null; link: { email: string } | null };
+  domain: string | null; hasDomain: boolean | null; builtin: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null; link: { email: string; conversation: string | null; message: string | null } | null };
 
 /** What the row says now, or null when the moment has passed (fixed, revoked, or told by a more serious email). */
 function noticeOf(row: Row, origin: string, config: Runtime['config'], score: ScoreCard | null): { to: string[]; input: NoticeInput } | null {
@@ -240,7 +241,11 @@ function noticeOf(row: Row, origin: string, config: Runtime['config'], score: Sc
     }
     case 'waitlist_admitted': return typeof row.data.email === 'string' ? { to: [row.data.email], input: { kind: 'waitlist_admitted' } } : null;
     // Used or expired before it went out: nothing to send.
-    case 'signin_link': return row.link && { to: [row.link.email], input: { kind: 'signin_link', url: signinLinkUrl(config, String(row.data.linkId)), minutes: LINK_MINUTES } };
+    case 'signin_link': {
+      const link = row.link, id = String(row.data.linkId);
+      return link && { to: [link.email], input: link.conversation && link.message ? { kind: 'signin_link', url: supportLinkUrl(config, id, link.conversation, link.message), minutes: LINK_MINUTES, support: true }
+        : { kind: 'signin_link', url: signinLinkUrl(config, id), minutes: LINK_MINUTES } };
+    }
   }
 }
 
@@ -259,7 +264,7 @@ export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime
       CASE WHEN l.kind='no_domain' THEN (SELECT b.name FROM builtin_domains b WHERE b.workspace_id=l.workspace_id AND b.revoked_at IS NULL) END AS builtin,
       (SELECT json_build_object('email',i.email,'role',i.role,'expiresAt',i.expires_at,'inviterEmail',u.email) FROM workspace_invitations i JOIN nightmail_users u ON u.id=i.inviter_id
         WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation,
-      (SELECT json_build_object('email',sl.email) FROM nightmail_signin_links sl WHERE l.kind='signin_link' AND sl.id=l.data->>'linkId' AND sl.expires_at>now()) AS link
+      (SELECT json_build_object('email',sl.email,'conversation',sl.conversation_id,'message',sl.message_id) FROM nightmail_signin_links sl WHERE l.kind='signin_link' AND sl.id=l.data->>'linkId' AND sl.expires_at>now()) AS link
     FROM leased l LEFT JOIN workspaces w ON w.id=l.workspace_id`);
   if (!row) return heldNotice(runtime.db, 'account_notices', noticeId);
   const settle = (status: 'sent' | 'suppressed' | 'failed') => runtime.db.execute(sql`UPDATE account_notices SET status=${status},lease_until=NULL,sent_at=CASE WHEN ${status}='sent' THEN now() END WHERE id=${row.id} AND status='sending'`);

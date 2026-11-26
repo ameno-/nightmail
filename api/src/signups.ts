@@ -133,7 +133,9 @@ export async function placeReady(db: DbExecutor, address: string): Promise<'held
 // takePlace). It goes only to an address that asked for access (a waitlist row) with a place held for it, or while one is
 // open, that no account has and that took no place; at most LINKS_A_DAY a day, and it works once, for LINK_MINUTES.
 // The row keeps the address and expiry; the link carries the row's ID and an HMAC of it, so the table alone makes none.
-// Rows are kept a day for the daily count (maintenance.ts removes them then).
+// Rows are kept a day for the daily count (maintenance.ts removes them then). A support email's Continue page asks for
+// links of its own (migration 571, support-conversations.ts): those rows name the conversation and message, never take a
+// place, and each kind is counted and spent apart from the other.
 export const LINK_MINUTES = 30;
 const LINKS_A_DAY = 3;
 let linkKey: { secret: string; key: Buffer } | undefined;
@@ -143,6 +145,11 @@ const linkMac = (config: Pick<Config, 'authSecret'>, id: string) => {
 };
 /** The link a sign-in link email carries: Overview, which signs in from it and keeps it in the sign-in's return URL. */
 export const signinLinkUrl = (config: Pick<Config, 'authSecret' | 'publicUrl'>, id: string) => `${new URL(config.publicUrl).origin}/overview?link=${id}.${linkMac(config, id)}`;
+/** A support email's sign-in link: its own Continue page, which signs in from it the same way. */
+export const supportLinkUrl = (config: Pick<Config, 'authSecret' | 'publicUrl'>, id: string, conversationId: string, messageId: string) =>
+  `${new URL(config.publicUrl).origin}/support/continue/${conversationId}/${messageId}?link=${id}.${linkMac(config, id)}`;
+/** A new link's ID: the row's key, and what the link's HMAC is of. */
+export const newLinkId = () => Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString('base64url');
 /**
  * Emails a sign-in link to `address` when a place is held for it, or it is waiting while a place is open
  * (account-notices.ts signinLink, queued with the link in one transaction). Otherwise nothing, and the caller answers
@@ -151,7 +158,7 @@ export const signinLinkUrl = (config: Pick<Config, 'authSecret' | 'publicUrl'>, 
 export async function sendSigninLink(runtime: Runtime, address: string) {
   const workspaceId = runtime.config.platformDomainWorkspace, email = address.toLowerCase();
   if (!runtime.config.multiTenant || !workspaceId) return;
-  const id = Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString('base64url'), { signinLink } = await import('./account-notices.js');
+  const id = newLinkId(), { signinLink } = await import('./account-notices.js');
   await runtime.db.transaction(async tx => {
     // One request per address at a time, so the daily count holds.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${email},46400))`);
@@ -159,19 +166,36 @@ export async function sendSigninLink(runtime: Runtime, address: string) {
       WHERE w.email=${email} AND (w.let_in_at IS NOT NULL OR (SELECT l.places>(SELECT count(*) FROM nightmail_signups)+(SELECT count(*) FROM nightmail_waitlist WHERE let_in_at IS NOT NULL)
           FROM nightmail_signup_limit l WHERE l.singleton))
         AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=w.email) AND NOT EXISTS (SELECT FROM nightmail_signups s WHERE s.email=w.email)
-        AND (SELECT count(*) FROM nightmail_signin_links l WHERE l.email=w.email AND l.created_at>now()-interval '1 day')<${LINKS_A_DAY}
+        AND (SELECT count(*) FROM nightmail_signin_links l WHERE l.email=w.email AND l.conversation_id IS NULL AND l.created_at>now()-interval '1 day')<${LINKS_A_DAY}
       RETURNING id`);
     if (link) await tx.execute(signinLink(workspaceId, link.id));
   });
+}
+/** The row ID of a link this installation made (its HMAC checks), else null. */
+function linkId(config: Pick<Config, 'authSecret'>, token: string) {
+  const [id = '', mac = '', ...rest] = token.split('.');
+  return rest.length || !/^[A-Za-z0-9_-]{24}$/.test(id) || !/^[A-Za-z0-9_-]{43}$/.test(mac) || !timingSafeEqual(Buffer.from(mac), Buffer.from(linkMac(config, id))) ? null : id;
 }
 /**
  * The address a sign-in link went to, when `token` is one this installation made and it is unused and unexpired; else
  * null. It is spent in the caller's transaction, the sign-in's, so a sign-in that ends up refused leaves it unspent.
  */
 export async function spendSigninLink(db: DbExecutor, config: Pick<Config, 'authSecret'>, token: string) {
-  const [id = '', mac = '', ...rest] = token.split('.');
-  if (rest.length || !/^[A-Za-z0-9_-]{24}$/.test(id) || !/^[A-Za-z0-9_-]{43}$/.test(mac) || !timingSafeEqual(Buffer.from(mac), Buffer.from(linkMac(config, id)))) return null;
-  const { rows: [link] } = await db.execute<{ email: string }>(sql`DELETE FROM nightmail_signin_links WHERE id=${id} AND expires_at>now() RETURNING email`);
+  const id = linkId(config, token);
+  if (!id) return null;
+  const { rows: [link] } = await db.execute<{ email: string }>(sql`DELETE FROM nightmail_signin_links WHERE id=${id} AND conversation_id IS NULL AND expires_at>now() RETURNING email`);
+  return link?.email ?? null;
+}
+/**
+ * A support email's sign-in link (support-conversations.ts), unused and unexpired, followed by a sign-in whose verified
+ * address (`email`) is the one it went to: that address, now a mailbox proved, and the link spent in the sign-in's
+ * transaction. Anyone else's sign-in leaves it unspent, for the person it went to.
+ */
+export async function spendSupportLink(db: DbExecutor, config: Pick<Config, 'authSecret'>, token: string, email: string) {
+  const id = linkId(config, token);
+  if (!id) return null;
+  const { rows: [link] } = await db.execute<{ email: string }>(sql`DELETE FROM nightmail_signin_links WHERE id=${id} AND conversation_id IS NOT NULL
+    AND email=lower(${email}) AND expires_at>now() RETURNING email`);
   return link?.email ?? null;
 }
 

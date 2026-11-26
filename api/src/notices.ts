@@ -183,7 +183,8 @@ export type NoticeInput =
   | Workspace & { kind: 'credit_expiring'; amount: string; expiresAt: Date | null }
   | { kind: 'invitation'; inviter: { email: string }; role: 'owner' | 'admin' | 'member'; expiresAt: Date; acceptUrl: string }
   | { kind: 'waitlist_admitted' }
-  | { kind: 'signin_link'; url: string; minutes: number };
+  /** support: asked for on a support email's Continue page, whose link opens that page again. */
+  | { kind: 'signin_link'; url: string; minutes: number; support?: boolean };
 export type NoticeKind = NoticeInput['kind'];
 
 /**
@@ -313,7 +314,11 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
         'Sign in with the account you joined with. If that sign-in can’t confirm this address, you can have a sign-in link sent here. Your account is created then.'] });
     // Asked for on the page a refused sign-in lands on, by someone who may not be the person this address belongs to:
     // it says what the link does and that ignoring it is safe.
-    case 'signin_link': return notice({ subject: `Your ${productName} sign-in link`, action: { label: 'Sign in', url: n.url },
+    case 'signin_link': return n.support ? notice({ subject: `Your ${productName} sign-in link`, action: { label: 'Sign in', url: n.url },
+      why: `${productName} sent this because a sign-in link was asked for to continue a support email from this address. If it wasn’t you, ignore it: nothing happens unless the link is used.`, lines: [
+        'Open this link, then sign in with your account for this address. That shows this mailbox is yours, and your support email continues.',
+        `The link works once, for ${n.minutes} minutes.`] })
+      : notice({ subject: `Your ${productName} sign-in link`, action: { label: 'Sign in', url: n.url },
       why: `${productName} sent this because a sign-in link was asked for with this address. If it wasn’t you, ignore it: nothing happens unless the link is used.`, lines: [
         `There’s a place in ${productName} for this address. Open this link, then sign in with any account: that account takes the place.`,
         `The link works once, for ${n.minutes} minutes.`] });

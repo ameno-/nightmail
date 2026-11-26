@@ -98,8 +98,9 @@ function tiles(g: Glass): (key: string) => GlassTileFill {
       // The foot says what's waiting now, in words that fit one row on a phone at two-digit counts: the open conversations,
       // then anyone who got no reply, or emails to the team that couldn't be sent (in red, the tile too; when both, the
       // two counts alone), or, when nothing is wrong, the bug, billing and abuse conversations the share leaves out. The
-      // title has everything.
-      note: <span title={`${plural(support.open, 'conversation')} open now · ${plural(support.noReply, 'person', 'people')} waiting with no reply sent · ${plural(support.staffMailFailed, 'email')} to the team not sent after 3 tries · ${plural(week.apart, 'conversation')} with a bug, billing, abuse, privacy or legal ticket: a person decides those, so the share counts them separately`}>
+      // title has everything, with the emails of the week that passed the sender checks but got only the sign-in reply
+      // because the answering limits refused their general answer (nobody is told of them: a count to watch, never red).
+      note: <span title={`${plural(support.open, 'conversation')} open now · ${plural(support.noReply, 'person', 'people')} waiting with no reply sent · ${plural(support.overLimit, 'email')} in 7 days got only the sign-in reply: over the answering limits · ${plural(support.staffMailFailed, 'email')} to the team not sent after 3 tries · ${plural(week.apart, 'conversation')} with a bug, billing, abuse, privacy or legal ticket: a person decides those, so the share counts them separately`}>
         {support.noReply && support.staffMailFailed ? <span className="ui-tone--danger">{number(support.noReply)} no reply · {number(support.staffMailFailed)} not sent</span>
           : support.staffMailFailed ? <span className="ui-tone--danger">{plural(support.staffMailFailed, 'email')} to team not sent</span>
           : <>{number(support.open)} open · {support.noReply ? <span className="ui-tone--danger">{number(support.noReply)} with no reply</span> : <>{number(week.apart)} bug or billing</>}</>}</span> },

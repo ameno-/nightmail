@@ -555,6 +555,7 @@ describe('support Worker', () => {
 
   test('consent counts only when Nightmail’s scope says so, never on the frame', async () => {
     const chat = await chatIn();
+    await fakeHook('/__inbox', { id: chat.id, channel: 'chat' });
     const ask = async (n: number) => {
       chat.send({ type: 'user.message', clientMessageId: `k${n}`, text: 'Can you look at the content of my promo?' });
       const consent = await chat.until(f => f.type === 'consent.request' && !chat.frames.some(r => r.type === 'consent.resolved' && r.requestId === f.requestId), 60_000);
@@ -577,6 +578,10 @@ describe('support Worker', () => {
     const allowed = await chat.until(f => f.type === 'message.end' && f.text === 'Content access allowed for this conversation.');
     // The agent carries on (a hidden note): let that turn finish before the next test counts calls.
     await chat.until(f => f.type === 'message.end' && f.seq > allowed.seq && f.text === 'OK.', 60_000);
+    // The panel shows it as a notice; the staff inbox gets it as a status line, never a reply (No reply sent ignores it).
+    assert.equal(chat.frames.find(f => f.type === 'message.start' && f.messageId === allowed.messageId)?.kind, 'notice');
+    const line = await eventually(async () => ((await (await (await mf.getWorker('fake-bane')).fetch(`http://fake-bane/__inbox?id=${chat.id}`)).json()) as any)?.messages.find((m: any) => m.id === allowed.messageId));
+    assert.deepEqual([line?.author, line?.kind], ['system', 'status']);
     const calls = await fakeCalls();
     assert.ok(!calls.some(c => c[0] === 'verifyHandoff' && c[1] === frameHandoff), 'The frame’s handoff is never even checked.');
     assert.ok(!calls.some(c => ['mintGrant', 'revokeGrant'].includes(c[0])));
@@ -2603,7 +2608,9 @@ describe('support Worker', () => {
       const reached = recorded.slice(from).flatMap(r => (r.body?.messages ?? []).flatMap(blocksOf)).filter((b: any) => b.type === 'tool_use').map((b: any) => b.name as string);
       assert.ok(['account_context', 'list_domains', 'get_billing', 'bounce_reasons'].every(name => reached.includes(name)), reached.join());
       assert.deepEqual((await stampedCalls(id, calls, instance)).map(c => c[1]).filter(path => path !== '/v1/support/scope'), [], 'No account read reached Nightmail (only whether it was claimed: refused, nobody is bound).');
-      assert.ok(!run.rows.some(r => r.id.endsWith(':claimed')), 'No follow-up: they asked to be answered by email.');
+      // Nothing more is sent now; a follow-up waits for a claim, so someone who later signs in with the account for this
+      // address and confirms it gets the answer from the account the Continue page promises (only what needed it).
+      assert.equal(states(run)['answer:msg_rel_1:claimed'], 'parked', 'A follow-up waits for a claim.');
       // Pressed again, woken again: nothing new.
       await fakeHook('/__release', { conversationId: id, messageId: 'msg_rel_2' }, instance);
       await wake(id);

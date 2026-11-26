@@ -177,10 +177,11 @@ type Meta = {
 /**
  * A transcript entry. Kinds of the support platform's own lines (the inbox shows them as what happened, author system):
  * 'notice' told the customer something that answers them (busy, declined, a chat notice); 'waiting' asked them to do
- * something before we answer (the sign-in reply, the access-changed reply), so it is no reply; 'unanswered' records that
- * an email gets no general answer until its sender claims it (its `source`), and reached nobody.
+ * something before we answer (the sign-in reply, the access-changed reply), so it is no reply; 'status' records their
+ * own choice in the conversation (content access allowed): it asks nothing and answers nothing, so it is no reply either;
+ * 'unanswered' records that an email gets no general answer until its sender claims it (its `source`), and reached nobody.
  */
-type Transcript = { id: string; role: 'user' | 'assistant' | 'staff'; kind: 'first' | 'reply' | 'notice' | 'waiting' | 'unanswered' | 'held' | 'staff' | null; text: string; at: string; tools: { id: string; label: string; ok: boolean }[];
+type Transcript = { id: string; role: 'user' | 'assistant' | 'staff'; kind: 'first' | 'reply' | 'notice' | 'waiting' | 'status' | 'unanswered' | 'held' | 'staff' | null; text: string; at: string; tools: { id: string; label: string; ok: boolean }[];
   attachments?: { id: string; type: string; width: number | null; height: number | null; name: string }[]; author?: string | null; channel?: 'email';
   /** A customer email's: the Nightmail message it came from (an 'unanswered' entry's: the email it is about). A held answer's: why it was held. */
   source?: string; reason?: HeldReason };
@@ -744,7 +745,7 @@ export class SupportConversation extends DurableObject<Env> {
         this.update(m => { m.contentAccess = true; });
         const pending = this.sql.exec<{ id: string }>("SELECT id FROM _support_consent WHERE state = 'pending' AND workspace_id = ?", consent.workspace_id).toArray();
         for (const each of pending) this.resolveConsent(each.id, 'allow');
-        this.notice('Content access allowed for this conversation.');
+        this.notice('Content access allowed for this conversation.', 'status');
         this.enqueueTurn({ text: '[The customer allowed content access for this workspace. Continue where you left off.]', hidden: true });
         return;
       }
@@ -790,7 +791,7 @@ export class SupportConversation extends DurableObject<Env> {
       .map(r => {
         const stored = JSON.parse(r.tools) as Transcript['tools'] | { tools: Transcript['tools']; attachments: NonNullable<Transcript['attachments']> };
         const tools = Array.isArray(stored) ? stored : stored.tools, attachments = Array.isArray(stored) ? [] : stored.attachments;
-        return { id: r.id, role: r.role, ...(r.kind ? { kind: r.kind === 'waiting' ? 'notice' : r.kind } : {}), text: r.text, at: r.at, ...(r.role === 'assistant' ? { tools } : {}), ...(r.role === 'staff' ? { author: r.author } : {}), ...(attachments.length ? { attachments } : {}) };
+        return { id: r.id, role: r.role, ...(r.kind ? { kind: r.kind === 'waiting' || r.kind === 'status' ? 'notice' : r.kind } : {}), text: r.text, at: r.at, ...(r.role === 'assistant' ? { tools } : {}), ...(r.role === 'staff' ? { author: r.author } : {}), ...(attachments.length ? { attachments } : {}) };
       });
   }
   private pendingConsent() {
@@ -1035,8 +1036,8 @@ export class SupportConversation extends DurableObject<Env> {
   private sendTo(ws: WebSocket, message: Outgoing) {
     try { ws.send(JSON.stringify({ v: 1, ...message, seq: ++this.seq })); } catch { /* closed */ }
   }
-  /** A chat notice; `waiting` when it asks them to do something first (the inbox doesn't count it as a reply). */
-  private notice(text: string, kind: 'notice' | 'waiting' = 'notice') {
+  /** A chat notice; `waiting` when it asks them to do something first, `status` when it only records their choice (neither is a reply in the inbox). */
+  private notice(text: string, kind: 'notice' | 'waiting' | 'status' = 'notice') {
     const id = newId('msg');
     this.record({ id, role: 'assistant', kind, text, at: new Date().toISOString(), tools: [] });
     this.broadcast({ type: 'message.start', messageId: id, kind: 'notice' });
@@ -1585,7 +1586,7 @@ export class SupportConversation extends DurableObject<Env> {
    * no held answer (what the gate or a narrowed scope held stays in the staff inbox, out of email).
    */
   private ticketMessages(): TicketMessage[] {
-    return this.sql.exec<{ role: Transcript['role']; text: string; at: string }>("SELECT role, text, at FROM _support_transcript WHERE coalesce(kind, '') NOT IN ('notice', 'waiting', 'unanswered', 'held') ORDER BY seq").toArray()
+    return this.sql.exec<{ role: Transcript['role']; text: string; at: string }>("SELECT role, text, at FROM _support_transcript WHERE coalesce(kind, '') NOT IN ('notice', 'waiting', 'status', 'unanswered', 'held') ORDER BY seq").toArray()
       .map(r => ({ who: r.role === 'user' ? 'customer' as const : r.role === 'staff' ? 'staff' as const : 'agent' as const, at: r.at, text: r.text }));
   }
 
@@ -1912,8 +1913,10 @@ export class SupportConversation extends DurableObject<Env> {
     else this.record({ id: newId('msg'), role: 'assistant', kind: 'reply', text: progress.text, at, tools: [], channel: 'email' });
     // A general answer that offered one from the account: it follows once they claim the email (parked for that, checked
     // now and then as any sign-in is). Unless a ticket took the thread since: then the team answers.
-    // A message that joined a follow-up already waiting has it answer this one too.
-    if (progress.unclaimed && progress.offered && !progress.joinedTo && this.meta()!.status !== 'ticketed')
+    // A message that joined a follow-up already waiting has it answer this one too. So does one released by "Answer me by
+    // email instead" (it offers no sign-in, but the Continue page still does): whoever later claims the email, with the
+    // account for its address, gets the answer from the account the page promises, not nothing.
+    if (progress.unclaimed && (progress.offered || progress.released) && !progress.joinedTo && this.meta()!.status !== 'ticketed')
       return { result: progress, children: [{ kind: 'answer', id: `answer:${answer.messageId}:claimed`, state: 'parked', dueAt: Date.now(),
         payload: { messageId: answer.messageId, threadId: answer.threadId, sender: answer.sender, dmarc: answer.dmarc, route: { addressId: answer.route.addressId, key: `${answer.route.key}:claimed` },
           signin: true, general: true, followup: true, earlier: progress.text.slice(0, 4000), ...answer.linkedTicket ? { linkedTicket: answer.linkedTicket } : {} } satisfies Answer }] };
@@ -2375,7 +2378,7 @@ function mirrored(row: MirrorRow, stored: Map<string, Attachment>): MirroredMess
   const tools = (Array.isArray(saved) ? saved : saved.tools).map(t => ({ label: t.label.slice(0, 80) || 'Done', ok: t.ok })).slice(0, 50);
   const attachments = (Array.isArray(saved) ? [] : saved.attachments).map(a => a.id).filter(id => /^att_[a-z2-7]{16}$/.test(id)).slice(0, 20);
   const files = attachments.flatMap(id => { const a = stored.get(id); return a ? [{ id, name: a.name.slice(0, 80), type: a.type, size: a.size }] : []; });
-  const author = row.role === 'user' ? 'customer' : row.kind === 'notice' || row.kind === 'waiting' || row.kind === 'unanswered' ? 'system' : 'agent';
+  const author = row.role === 'user' ? 'customer' : row.kind === 'notice' || row.kind === 'waiting' || row.kind === 'status' || row.kind === 'unanswered' ? 'system' : 'agent';
   return { id: row.id, author, kind: row.kind, text: row.text.slice(0, 16_000), tools: author === 'agent' ? tools : [], attachments, ...files.length ? { files } : {},
     ...(author === 'customer' || row.kind === 'unanswered') && row.source ? { source: row.source } : {}, ...author === 'agent' && row.kind === 'held' && row.reason ? { reason: row.reason } : {},
     ...author === 'agent' && row.kind === 'held' ? { delivery: 'held' as const } : author === 'agent' && row.channel === 'email' ? { delivery: 'sent' as const } : {}, at: row.at };
