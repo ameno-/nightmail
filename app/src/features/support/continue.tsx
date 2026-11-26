@@ -17,8 +17,9 @@ import './continue.css'
 // signed out signs in from here.
 //
 // A sign-in that proves no mailbox (GitHub, say) gets 403 MAILBOX_SIGN_IN_REQUIRED, which names the address the email came
-// from (masked) and the way through: one press emails a sign-in link there (POST …/sign-in-link), never anywhere else.
-// The link opens this page again with ?link=…, which signs in at once, the account service showing its chooser; the
+// from (masked) and the way through: one press emails a sign-in link there (POST …/sign-in-link), never anywhere else,
+// and only when an account has that address. The answer never says which, so the page says only what happens if there is
+// one. The link opens this page again with ?link=…, which signs in at once, the account service showing its chooser; the
 // sign-in proves the mailbox when its account's address is the one the link went to (api/src/account-login.ts), and the
 // page, back in this tab, confirms the email without another press. Another account signed in here stays signed in.
 //
@@ -36,8 +37,8 @@ const COPY: Record<State, Copy> = {
   other: { title: 'This link is for another account', text: 'Sign in with the account for the address you wrote from.', action: 'Done' },
   limit: { title: 'Too many open conversations', text: 'Try again once an earlier support conversation ends.', action: 'Done' },
   signin: { title: 'Sign in to continue', text: 'Use the account for the address you wrote from.', action: 'Sign in' },
-  mailbox: { title: 'Sign in with an emailed link', text: address => `Your sign-in doesn’t prove you read ${address}, the address this email came from.`, action: 'Email me a sign-in link' },
-  sent: { title: 'Check your inbox', text: address => `Look for a sign-in link at ${address}. It works once, for 30 minutes.`, action: 'Done' },
+  mailbox: { title: 'Sign in with an emailed link', text: address => `You’re signed in, but not as ${address}, the address this conversation was started from.`, action: 'Email me a sign-in link' },
+  sent: { title: 'Check your inbox', text: address => `If ${address} has a ${productName} account, we’ve sent it a sign-in link. It works once, for 30 minutes.`, action: 'Done' },
   links: { title: 'Too many sign-in links', text: 'Use a link already in your inbox, or try again later.', action: 'Done' },
   link: { title: 'Sign in to continue', text: 'Choose the account for the address you wrote from. The link works once.', action: 'Sign in' },
   invalid: { title: 'This link doesn’t work', text: 'Open the link from the support email again.', action: 'Done' },

@@ -2274,7 +2274,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
 // Production (Nov 2026): a member of a new workspace opened a support email's Continue link while signed in with GitHub
 // and got a bare 403 MAILBOX_SIGN_IN_REQUIRED five times. Claiming needs a sign-in that proves the mailbox; the refusal now
 // says the way through, an emailed sign-in link to the address the email came from (support-conversations.ts).
-test('Support email Continue: a sign-in that proves no mailbox gets 403 with the way through, a sign-in link to the email’s own address only, limited per conversation, address and network, with one answer whether or not it went out; following it proves the mailbox, keeps another account signed in, and the email is confirmed', async t => {
+test('Support email Continue: a sign-in that proves no mailbox gets 403 with the way through, a sign-in link to the email’s own address only, made only when an account has it, limited per conversation, address and network, with one answer whether or not it went out; following it proves the mailbox, keeps another account signed in, and the email is confirmed', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
   const {createApp} = await import('./src/app.js');
@@ -2360,6 +2360,8 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 with the
   const ask = (c: { id: string; message: string }, body: object = {}, headers: Record<string,string> = {}) => request(`/v1/support-conversations/${c.id}/sign-in-link`,'POST',{messageId:c.message,...body},headers);
   const links = async (c: { id: string }) => (await db.query(`SELECT l.id,l.email,l.message_id,EXISTS (SELECT FROM account_notices n WHERE n.workspace_id=$2 AND n.kind='signin_link' AND n.data->>'linkId'=l.id) AS emailed
     FROM nightmail_signin_links l WHERE l.conversation_id=$1 ORDER BY l.created_at,l.id`,[c.id,platform])).rows as { id: string; email: string; message_id: string; emailed: boolean }[];
+  const emails = async () => (await db.query("SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1",[platform])).rows[0].n as number;
+  const asked = async (c: { id: string }) => (await db.query('SELECT link_requests FROM support_email_signins WHERE conversation_id=$1',[c.id])).rows[0].link_requests as number;
 
   // Ada signed in with GitHub: her account's address is verified, but GitHub doesn't show she reads that mailbox now.
   const ada = await account(`ada-${hex().slice(0,8)}@example.net`), bob = await account(`bob-${hex().slice(0,8)}@example.org`);
@@ -2391,20 +2393,22 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 with the
   const [first] = await links(mine);
   assert.deepEqual(await links(mine),[{id:first!.id,email:ada.email,message_id:mine.message,emailed:true}]);
   assert.equal((await db.query("SELECT count(*)::int AS n FROM nightmail_signin_links WHERE email LIKE 'mallory%'")).rows[0].n,0);
-  assert.equal((await db.query("SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1",[platform])).rows[0].n,1,'One email, for that one link.');
-  // An address no account has: the same answer, and the request counts the same, but nothing is emailed.
+  assert.equal(await emails(),1,'One email, for that one link.');
+  // Signed in as Ada, an email from an address no account has (tonight's "No account linked"): the same answer, and the
+  // request counts the same, but no link is made and nothing is sent.
   const nobody = await waiting(`ann-${hex().slice(0,8)}@elsewhere.net`);
   assert.deepEqual(await answer(await ask(nobody,{},as(ada))),[202,{requested:true,address:masked}]);
-  assert.deepEqual((await links(nobody)).map(l=>l.emailed),[false]);
+  assert.deepEqual([await links(nobody),await emails(),await asked(nobody)],[[],1,1]);
 
   // Limits on top of each network's: a day, three per conversation, then five per address over its conversations, each
-  // refusal a plain 429. Requests count whether or not mail went out, so the address without an account is refused
-  // exactly as Ada's is.
+  // refusal a plain 429. Every request counts whether or not a link was made, so the address without an account is
+  // refused exactly as Ada's is.
   for (const c of [mine, nobody]) {
-    while ((await links(c)).length < SUPPORT_LINKS.perConversation) assert.equal((await ask(c,{},as(ada))).status,202);
+    for (let i = 1; i < SUPPORT_LINKS.perConversation; i++) assert.equal((await ask(c,{},as(ada))).status,202);
     const [over, refusal] = await answer(await ask(c,{},as(ada)));
-    assert.deepEqual([over,refusal.error.code,refusal.error.retryable],[429,'SIGN_IN_LINK_LIMIT',false]);
+    assert.deepEqual([over,refusal.error.code,refusal.error.retryable,await asked(c)],[429,'SIGN_IN_LINK_LIMIT',false,SUPPORT_LINKS.perConversation]);
   }
+  assert.deepEqual([(await links(mine)).map(l=>l.emailed),await links(nobody),await emails()],[Array(SUPPORT_LINKS.perConversation).fill(true),[],SUPPORT_LINKS.perConversation]);
   const again = await waiting(ada.email);
   for (let i = SUPPORT_LINKS.perConversation; i < SUPPORT_LINKS.perAddress; i++) assert.equal((await ask(again,{},as(ada))).status,202);
   assert.deepEqual(await answer(await ask(again,{},as(ada))).then(([s,b])=>[s,b.error.code]),[429,'SIGN_IN_LINK_LIMIT']);
@@ -2449,7 +2453,7 @@ test('Support email Continue: a sign-in that proves no mailbox gets 403 with the
   const [, whole] = await answer(await pending(hers,as(cara)));
   assert.deepEqual([whole.error.code,whole.error.details[0].address],['MAILBOX_SIGN_IN_REQUIRED',gmail]);
   assert.deepEqual(await answer(await ask(hers,{},as(cara))),[202,{requested:true,address:gmail}]);
-  assert.deepEqual((await links(hers)).map(l=>l.emailed),[false],'No account has that address: nothing is emailed.');
+  assert.deepEqual(await links(hers),[],'No account has that address: no link, nothing emailed.');
 });
 
 test('MCP profiles: one client signed in as two accounts gets two approvals that stay apart', async t => {

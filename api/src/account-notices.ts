@@ -202,9 +202,9 @@ export async function waitlistAdmitted(runtime: Runtime, db: DbExecutor, email: 
 export const waitlistNoticeStatus = (email: SQL) => sql`(SELECT n.status FROM account_notices n WHERE n.dedupe_key='waitlist:'||${email})`;
 
 /** A sign-in link's email (signups.ts sendSigninLink, or a support email's, support-conversations.ts), queued in the
- * transaction that made the link, only while `when` holds. Only the link's ID is kept: the job makes the link from it,
- * and sends nothing once it is used or expired. */
-export const signinLink = (workspaceId: string, linkId: string, when?: SQL) => noticeInsert({ workspaceId, kind: 'signin_link', dedupe: `signin-link:${linkId}`, data: { linkId }, when });
+ * transaction that made the link. Only the link's ID is kept: the job makes the link from it, and sends nothing once it
+ * is used or expired. */
+export const signinLink = (workspaceId: string, linkId: string) => noticeInsert({ workspaceId, kind: 'signin_link', dedupe: `signin-link:${linkId}`, data: { linkId } });
 
 type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>; name: string | null; exempt: boolean | null; recipients: string[];
   standing: { phase: string; step: string; daily: number | null } | null; paused: boolean | null; position: { mode?: string; enforcement?: string; availableUc?: string; freeSentLeft?: number } | null;

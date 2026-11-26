@@ -484,7 +484,7 @@ export function registerSupportConversations(app: App) {
 
   const LinkRequested = z.object({ requested: z.literal(true), address: z.string().describe('Where the link goes, as getSupportConversationClaim’s 403 shows it.') });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/sign-in-link', operationId: 'sendSupportSignInLink',
-    description: `The way through 403 MAILBOX_SIGN_IN_REQUIRED on one email's Continue page: emails a sign-in link to the address that email came from (never another: the body names only the message, and anything else in it is ignored). Following the link and signing in with the account for that address proves its mailbox, and the page opens again to confirm the email. Signed in, from the dashboard. The answer is the same 202 whether or not a link went out (one goes only when an account has that address); at most ${SUPPORT_LINKS.perConversation} a day per conversation and ${SUPPORT_LINKS.perAddress} per address, and as many as pending sign-ins per network, past which it is 429. An email that waits for nobody gets 404.`,
+    description: `The way through 403 MAILBOX_SIGN_IN_REQUIRED on one email's Continue page: emails a sign-in link to the address that email came from (never another: the body names only the message, and anything else in it is ignored). Following the link and signing in with the account for that address proves its mailbox, and the page opens again to confirm the email. Signed in, from the dashboard. The answer is the same 202 whether or not a link went out (one is made and sent only when an account has that address; otherwise nothing is); at most ${SUPPORT_LINKS.perConversation} a day per conversation and ${SUPPORT_LINKS.perAddress} per address, and as many as pending sign-ins per network, past which it is 429. An email that waits for nobody gets 404.`,
     request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the Continue page is for.') })) },
     responses: { 202: response(LinkRequested), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -506,20 +506,25 @@ export function registerSupportConversations(app: App) {
       if (!target) return null;
       const email = target.address.toLowerCase();
       // One request per address at a time (the waitlist's links take the same lock), so both counts hold. Every request
-      // counts, whether or not a link goes out, so a refusal never says whether an account has the address.
+      // counts, whether or not a link is made, so a refusal never says whether an account has the address.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${email},46400))`);
-      const { rows: [sent] } = await tx.execute<{ conversation: number; address: number }>(sql`SELECT
-        (SELECT count(*)::int FROM nightmail_signin_links WHERE conversation_id = ${conversationId} AND created_at > now() - interval '1 day') AS conversation,
-        (SELECT count(*)::int FROM nightmail_signin_links WHERE email = ${email} AND conversation_id IS NOT NULL AND created_at > now() - interval '1 day') AS address`);
-      if (sent!.conversation >= SUPPORT_LINKS.perConversation || sent!.address >= SUPPORT_LINKS.perAddress)
+      const today = sql`link_window_at > now() - interval '1 day'`;
+      const { rows: [asked] } = await tx.execute<{ conversation: number; address: number }>(sql`SELECT
+        (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE conversation_id = ${conversationId} AND ${today}) AS conversation,
+        (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE address = ${target.address} AND ${today}) AS address`);
+      if (asked!.conversation >= SUPPORT_LINKS.perConversation || asked!.address >= SUPPORT_LINKS.perAddress)
         throw new ApiError(429, 'SIGN_IN_LINK_LIMIT', 'Too many sign-in links were asked for today. Use one already sent, or try again tomorrow.');
-      const id = newLinkId();
-      await tx.execute(sql`INSERT INTO nightmail_signin_links(id, email, conversation_id, message_id, expires_at) VALUES (${id}, ${email}, ${conversationId}, ${messageId}, now() + make_interval(mins => ${LINK_MINUTES}::int))`);
-      // Emailed only to an account's verified address that can confirm this email (nobody else bound it): a link to anyone
-      // else proves nothing. The same statement either way.
-      const workspaceId = c.env.config.platformDomainWorkspace;
-      if (workspaceId) await tx.execute(signinLink(workspaceId, id, sql`EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email) = ${email}
-        AND (${target.user_id}::text IS NULL OR u.id = ${target.user_id}) AND (${target.signed_by}::text IS NULL OR u.id = ${target.signed_by}))`));
+      await tx.execute(sql`UPDATE support_email_signins SET link_requests = CASE WHEN ${today} THEN link_requests + 1 ELSE 1 END,
+        link_window_at = CASE WHEN ${today} THEN link_window_at ELSE now() END WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+      // A link, and its email, only for an account's verified address that can confirm this email (nobody else bound it):
+      // a link to anyone else would prove nothing. Otherwise nothing is made or sent, and the answer is the same.
+      const workspaceId = c.env.config.platformDomainWorkspace, id = newLinkId();
+      const { rows: [link] } = workspaceId ? await tx.execute<{ id: string }>(sql`INSERT INTO nightmail_signin_links(id, email, conversation_id, message_id, expires_at)
+        SELECT ${id}, ${email}, ${conversationId}, ${messageId}, now() + make_interval(mins => ${LINK_MINUTES}::int)
+        WHERE EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email) = ${email}
+          AND (${target.user_id}::text IS NULL OR u.id = ${target.user_id}) AND (${target.signed_by}::text IS NULL OR u.id = ${target.signed_by}))
+        RETURNING id`) : { rows: [] };
+      if (link) await tx.execute(signinLink(workspaceId!, link.id));
       return target.address;
     });
     if (!address) return notFound('Support conversation');
