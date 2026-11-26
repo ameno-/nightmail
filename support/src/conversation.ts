@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { nightmailApi, NightmailError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction } from './nightmail.js';
 import type { Env } from './env.js';
-import { gate, LINK_ORIGINS, plainText } from './gate.js';
+import { gate, LINK_ORIGINS, namedIn, plainText } from './gate.js';
 import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext, type TicketMessage } from './tickets.js';
 import { addressHash, MissingSecret, newId } from './tokens.js';
 import { alertOnce, countToday, holdOverCap, limits, mailAllowed, registrableDomain, ticketAllowed } from './limits.js';
@@ -345,7 +345,8 @@ export class SupportConversation extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS _support_client_ids (id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS _support_attachments (id TEXT PRIMARY KEY, key TEXT NOT NULL, type TEXT NOT NULL, size INTEGER NOT NULL, width INTEGER, height INTEGER, source TEXT NOT NULL, name TEXT NOT NULL, message_id TEXT, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS _support_consent (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, why TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS _support_actions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_check_at INTEGER NOT NULL DEFAULT 0);`);
+      CREATE TABLE IF NOT EXISTS _support_actions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_check_at INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS _support_theirs (value TEXT NOT NULL, access TEXT NOT NULL, PRIMARY KEY (value, access));`);
     // A staff reply's author, an entry that arrived by email (the inbox marks a delivered agent answer sent), a customer
     // email's Nightmail message, and why an answer was held.
     const columns = new Set(this.sql.exec<{ name: string }>('PRAGMA table_info(_support_transcript)').toArray().map(c => c.name));
@@ -440,6 +441,7 @@ export class SupportConversation extends DurableObject<Env> {
       const reply = await this.stamped('GET', `/v1/support/context?workspaceId=${encodeURIComponent(workspace)}`);
       if (reply.status !== 200) return null;
       const body = meta.channel === 'email' ? emailView('/v1/support/context', reply.body) : reply.body;
+      this.keepRead(`/v1/support/context?workspaceId=${workspace}`, body);
       this.context = { workspaceId: workspace, at, text: `<account read="${new Date(at).toISOString().slice(0, 16)}Z">\n${toolResult(body, this.hidden())}\n</account>` };
       return this.context.text;
     } catch (error) { logError(error, { event: 'support', code: 'CONTEXT_READ_FAILED' }, 'warn'); return null; }
@@ -464,6 +466,7 @@ export class SupportConversation extends DurableObject<Env> {
   /** The model session ends for good: its history (and anything it read) is never used for another turn. */
   private async retireModel() {
     this.context = null; this.booting = null;
+    this.sql.exec('DELETE FROM _support_theirs');
     this.update(m => { m.modelRetired = true; });
     await this.ctx.storage.delete(['support:opencode-session', 'support:opencode-model']);
   }
@@ -792,18 +795,20 @@ export class SupportConversation extends DurableObject<Env> {
     return true;
   }
   /**
-   * Whether staff have paused the agent here. A conversation Nightmail hasn't registered is never paused. `strict`: a
-   * send waits (throws, so its work is retried) when Nightmail can't say; a chat turn goes ahead.
+   * Who paused the agent here, if anyone: staff, or an emailed ticket (later mail goes to the ticket). A conversation
+   * Nightmail hasn't registered is never paused. `strict`: a send waits (throws, so its work is retried) when Nightmail
+   * can't say; a chat turn goes ahead.
    */
-  private async paused(meta: Meta, strict: boolean): Promise<boolean> {
+  private async pausedBy(meta: Meta, strict: boolean): Promise<'staff' | 'ticket' | null> {
     try {
       const reply = await this.env.BANE.inboxState(meta.conversationId);
-      if (reply.status === 404) return false;
-      return platformBody(reply).agentState === 'paused';
+      if (reply.status === 404) return null;
+      const state = platformBody(reply);
+      return state.agentState !== 'paused' ? null : state.pausedBy === 'ticket' ? 'ticket' : 'staff';
     } catch (error) {
       if (strict) throw error instanceof NightmailError ? error : new NightmailError(503, 'INBOX_STATE_UNAVAILABLE', 'The inbox state could not be read');
       logError(error, { event: 'inbox', code: 'INBOX_STATE_UNAVAILABLE' }, 'warn');
-      return false;
+      return null;
     }
   }
 
@@ -1093,7 +1098,7 @@ export class SupportConversation extends DurableObject<Env> {
     }
     // Staff have paused the agent (api/src/support-inbox.ts): the message is recorded and mirrored, and no turn runs. The
     // customer is told once per pause.
-    if (await this.paused(meta, false)) {
+    if (await this.pausedBy(meta, false)) {
       if (!meta.pauseNotice) { this.notice(PAUSED); this.update(m => { m.pauseNotice = true; }); }
       return;
     }
@@ -1207,9 +1212,36 @@ export class SupportConversation extends DurableObject<Env> {
     return labels(tool, args);
   }
 
-  /** What an answer may name: the scope's workspaces (as last read), this conversation and its ticket. */
-  private gateScope(meta: Meta) {
-    return { emails: meta.email ? [meta.email] : [], allowedIds: [...meta.workspaces.map(w => w.id), meta.conversationId, ...(meta.ticketId ? [meta.ticketId] : [])], allowedNames: meta.workspaces.map(w => w.name), promptFragments: promptFragments(), supportAddress: this.env.SUPPORT_ADDRESS };
+  /**
+   * What an answer may name: the scope's workspaces (as last read), this conversation and its ticket, and what the person
+   * already has (theirs). `reads`: what reads returned counts too (a general email answer reads nothing, so none does).
+   */
+  private gateScope(meta: Meta, reads = true) {
+    return { emails: meta.email ? [meta.email] : [], allowedIds: [...meta.workspaces.map(w => w.id), meta.conversationId, ...(meta.ticketId ? [meta.ticketId] : [])], allowedNames: meta.workspaces.map(w => w.name), promptFragments: promptFragments(), supportAddress: this.env.SUPPORT_ADDRESS,
+      theirs: this.theirs(meta, reads) };
+  }
+  /**
+   * Addresses and IDs the person already has: those their own messages (and an email's subject) name, and, with `reads`,
+   * those reads made for them returned, while every workspace a read answered for is still theirs at the role it was read
+   * with. Anyone else's stays held.
+   */
+  private theirs(meta: Meta, reads: boolean): string[] {
+    const own = this.sql.exec<{ text: string }>("SELECT text FROM _support_transcript WHERE role = 'user'").toArray().flatMap(r => namedIn(r.text));
+    if (meta.subject) own.push(...namedIn(meta.subject));
+    if (!reads) return own;
+    const now = new Map(meta.workspaces.map(w => [w.id, RANK[w.role] ?? 0]));
+    return [...own, ...this.sql.exec<{ value: string; access: string }>('SELECT value, access FROM _support_theirs').toArray()
+      .filter(r => (JSON.parse(r.access) as [string, string][]).every(([id, role]) => (now.get(id) ?? -1) >= (RANK[role] ?? 0))).map(r => r.value)];
+  }
+  /**
+   * A read made for this person (a tool's, or <account>'s): the addresses and IDs the model saw in it are kept with the
+   * workspaces it could answer for (the one it asked for, the one in scope, or all of them) and the person's role in each.
+   */
+  private keepRead(path: string, body: unknown) {
+    const meta = this.meta()!, asked = new URLSearchParams(path.split('?')[1] ?? '').get('workspaceId') ?? meta.workspace?.id ?? null;
+    const access = meta.workspaces.filter(w => !asked || w.id === asked).map(w => [w.id, w.role]).sort();
+    if (!access.length || this.sql.exec<{ n: number }>('SELECT count(*) AS n FROM _support_theirs').one().n >= THEIRS_MAX) return;
+    for (const value of namedIn(toolResult(body, this.hidden())).slice(0, 200)) this.sql.exec('INSERT INTO _support_theirs (value, access) VALUES (?, ?) ON CONFLICT DO NOTHING', value, JSON.stringify(access));
   }
 
   /** Whether a workspace in scope is one this person owns or administers: the owner/admin tools are offered then. */
@@ -1260,7 +1292,7 @@ export class SupportConversation extends DurableObject<Env> {
         // Only Nightmail's stamp reads: a conversation it never registered has no account access at all.
         if (!meta.registered) throw new ToolFailure('You have no account access in this conversation. Answer general questions only.');
         const reply = await this.stamped('GET', path);
-        if (reply.status === 200) return meta.channel === 'email' ? emailView(path, reply.body) : reply.body;
+        if (reply.status === 200) { const body = meta.channel === 'email' ? emailView(path, reply.body) : reply.body; this.keepRead(path, body); return body; }
         const code = codeOf(reply.body) ?? `HTTP_${reply.status}`;
         // Nightmail's refusal of a chat's read for email: answered in Help, and access goes on.
         if (reply.status === 403 && code === 'SUPPORT_CHAT_ONLY') throw new ToolFailure(EMAIL_READS_ONLY);
@@ -1657,8 +1689,10 @@ export class SupportConversation extends DurableObject<Env> {
       log('warn', { event: 'email', code: 'EARLIER_ANSWER_HELD', conversation: meta.conversationId });
       return { state: 'held', result: progress };
     }
-    // Staff took over after this answer was written: it stays a held draft in the inbox and is never sent.
-    if (!progress.fixed && await this.paused(this.meta()!, true)) {
+    // Staff took over after this answer was written: it stays a held draft in the inbox and is never sent. A ticket's
+    // pause is not a take-over: it is for later mail (compose), so the answer of the turn that filed the ticket, or the
+    // short note that it was passed on, still goes. Any pause before the turn stopped it from being written at all.
+    if (!progress.fixed && await this.pausedBy(this.meta()!, true) === 'staff') {
       if (!progress.held) { progress.held = newId('msg'); save(); }
       this.record({ id: progress.held, role: 'assistant', kind: 'held', text: progress.text, at: new Date().toISOString(), tools: [], channel: 'email', reason: 'paused' });
       return { result: progress };
@@ -1730,6 +1764,7 @@ export class SupportConversation extends DurableObject<Env> {
   /** A fresh model session for a general turn, so nothing an account turn read reaches it (the conversation goes on). */
   private async freshSession() {
     this.context = null;
+    this.sql.exec('DELETE FROM _support_theirs');
     this.update(m => { m.accountRead = false; });
     await this.ctx.storage.delete(['support:opencode-session', 'support:opencode-tools']);
   }
@@ -1760,12 +1795,12 @@ export class SupportConversation extends DurableObject<Env> {
       return;
     }
     // Staff have paused the agent: no model turn, and nothing is sent. Decided once, before the model runs.
-    if (progress.model === undefined && progress.allowed === undefined && await this.paused(meta, true)) { progress.paused = true; progress.text = null; save(); return; }
+    if (progress.model === undefined && progress.allowed === undefined && await this.pausedBy(meta, true)) { progress.paused = true; progress.text = null; save(); return; }
     // Fail closed: without the gateway key the answer waits, blocked, until the key is set.
     if (!this.env.CONSOLE_GATEWAY_KEY) throw new MissingSecret('CONSOLE_GATEWAY_KEY');
     if (meta.email !== answer.sender) throw new Error('An answer goes only to the address that wrote');
     // Email gets the link rule too: any URL outside Nightmail's own sites holds the reply.
-    const gateScope = () => ({ ...this.gateScope(this.meta()!), emails: [answer.sender], linkOrigins: LINK_ORIGINS });
+    const gateScope = () => ({ ...this.gateScope(this.meta()!, progress.mode === 'verified'), emails: [answer.sender], linkOrigins: LINK_ORIGINS });
     if (progress.model === undefined) {
       if (progress.verified === undefined) {
         if (answer.member || answer.signin) {
@@ -2186,6 +2221,8 @@ const bodyOf = (message: Snapshot) => (message.replyText || message.text || '').
 /** A thread key of its own for a new conversation a message is handed to (D1 conversations.thread_id is unique). */
 const freshKey = async (threadId: string, sender: string) => `${threadId}#${await addressHash(sender)}#${newId('msg').slice(4, 12)}`;
 const RANK: Record<string, number> = { member: 1, admin: 2, owner: 3 };
+/** Addresses and IDs kept from reads per conversation (keepRead): past this, later reads add none. */
+const THEIRS_MAX = 5000;
 /** The access a chat's scope gives, as the next turn compares it: workspaces and roles, content access, and its workspace. */
 function effective(scope: Scope): Effective {
   return { workspaces: scope.workspaces.map(w => ({ id: w.id, role: w.role })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0), content: scope.contentWorkspaceId ?? null, bound: scope.workspace?.id ?? null };

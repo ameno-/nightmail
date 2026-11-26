@@ -76,7 +76,7 @@ const EmailSource = z.object({
 const Ticket = z.object({ id: z.string(), type: z.string().nullable(), severity: z.string().nullable(), resolvedAt: z.string().nullable() });
 const ConversationParam = z.object({ id: z.string().regex(CONVERSATION_ID) });
 const DoneBody = z.object({ ticketId: z.string().max(100).nullable().optional().describe('The ticket on screen when Done was pressed (null for none). Omit to resolve whatever ticket is open.') }).strict();
-const TRIAGE_REASONS = ['ticket', 'blocked', 'failed', 'paused'] as const;
+const TRIAGE_REASONS = ['ticket', 'blocked', 'failed', 'paused', 'no_reply'] as const;
 
 const Message = z.object({
   id: z.string(), seq: z.number().int(), author: Author, kind: z.string().nullable(), text: z.string(),
@@ -107,7 +107,7 @@ const Item = z.object({
   blockedWork: z.number().int().describe('Work the support platform could not finish for this conversation.'),
   firstLine: z.string().nullable().describe('The first line of the customer’s first message: what a conversation without a subject is about.'),
   needsYou: z.object({
-    reasons: z.array(z.enum(TRIAGE_REASONS)).min(1).describe('ticket: its ticket is open; blocked: the support platform could not finish work for it; failed: its latest answer or staff reply failed to send; paused: the agent is paused and staff owe the next message.'),
+    reasons: z.array(z.enum(TRIAGE_REASONS)).min(1).describe('ticket: its ticket is open; blocked: the support platform could not finish work for it; failed: its latest answer or staff reply failed to send; paused: the agent is paused and staff owe the next message; no_reply: the customer wrote and nothing was sent back for 10 minutes (a held draft or a failed reply reaches nobody).'),
     urgent: z.boolean().describe('A P1 ticket, or a customer nobody else will answer.'),
     since: z.string().describe('When it started waiting on staff.'),
   }).nullable().describe('Why staff must handle it (the needs_you view), or null.'),
@@ -159,7 +159,7 @@ const itemColumns = sql`c.id, c.channel, c.mode, c.verification, c.status, c.sub
   last.author AS last_author, last.text AS last_text, last.held AS last_held, (SELECT count(*)::int FROM support_messages q WHERE q.conversation_id = c.id AND q.delivery = 'queued') AS queued,
   opening.text AS opening, c.done_at::text AS done_at, c.done_by, (SELECT name FROM nightmail_users WHERE id = c.done_by) AS done_by_name,
   c.messages > coalesce(rd.seq, 0) AS unread, triage.needs_you, triage.urgency, triage.since::text AS since,
-  why.ticket AS why_ticket, why.blocked AS why_blocked, why.failed AS why_failed, why.paused AS why_paused`;
+  why.ticket AS why_ticket, why.blocked AS why_blocked, why.failed AS why_failed, why.paused AS why_paused, why.no_reply AS why_no_reply`;
 // One conversation as the inbox lists it to one operator (`me`: their read marker), with its triage (Needs you, above).
 const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN nightmail_users u ON u.id = c.user_id LEFT JOIN workspaces w ON w.id = c.workspace_id
   LEFT JOIN nightmail_users p ON p.id = c.paused_by
@@ -171,13 +171,24 @@ const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN nightmail
     WHERE a.conversation_id = c.id AND a.author IN ('agent','staff') AND a.delivery IN ('queued','sent','failed') ORDER BY a.seq DESC LIMIT 1) answer ON true
   LEFT JOIN LATERAL (SELECT min(m.created_at) AS at FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
     AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND o.author NOT IN ('customer','system') AND o.kind IS DISTINCT FROM 'note'), 0)) waiting ON true
+  CROSS JOIN LATERAL (SELECT ${unansweredSince} AS at) unanswered
   CROSS JOIN LATERAL (SELECT c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL AS ticket, c.blocked_work > 0 AS blocked, coalesce(answer.failed, false) AS failed,
-    c.agent_state = 'paused' AND c.status <> 'closed' AND last.author IS DISTINCT FROM 'staff' AS paused) why
-  CROSS JOIN LATERAL (SELECT c.done_at IS NULL AND (why.ticket OR why.blocked OR why.failed OR why.paused) AS needs_you,
-    CASE WHEN why.ticket AND c.ticket_severity = 'P1' THEN 1 WHEN why.failed OR (last.author = 'customer' AND (why.paused OR why.blocked)) THEN 2
+    c.agent_state = 'paused' AND c.status <> 'closed' AND last.author IS DISTINCT FROM 'staff' AS paused, ${noReply(sql`unanswered.at`)} AS no_reply) why
+  CROSS JOIN LATERAL (SELECT c.done_at IS NULL AND (why.ticket OR why.blocked OR why.failed OR why.paused OR why.no_reply) AS needs_you,
+    CASE WHEN why.ticket AND c.ticket_severity = 'P1' THEN 1 WHEN why.failed OR why.no_reply OR (last.author = 'customer' AND (why.paused OR why.blocked)) THEN 2
       WHEN why.ticket AND c.ticket_severity = 'P2' THEN 3 ELSE 4 END AS urgency,
     least(CASE WHEN why.ticket THEN coalesce(c.ticket_at, c.created_at) END, CASE WHEN why.paused THEN coalesce(waiting.at, c.paused_at) END,
-      CASE WHEN why.failed THEN answer.created_at END, CASE WHEN why.blocked THEN coalesce(c.last_message_at, c.created_at) END) AS since) triage`;
+      CASE WHEN why.failed THEN answer.created_at END, CASE WHEN why.blocked THEN coalesce(c.last_message_at, c.created_at) END, CASE WHEN why.no_reply THEN unanswered.at END) AS since) triage`;
+/**
+ * No reply sent: since the customer's first message after the last thing that reached them (an answer or notice the
+ * support platform sent, or a staff reply, queued or sent; a held draft or a failed reply reaches nobody). Over
+ * NO_REPLY_AFTER, a conversation (not agent feedback, which has nobody to reply to) needs you for it, and Glass counts it.
+ */
+const unansweredSince = sql`(SELECT min(m.created_at) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
+  AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND o.kind IS DISTINCT FROM 'note' AND (o.author = 'system'
+    OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed') OR (o.author = 'staff' AND o.delivery IN ('queued','sent')))), 0))`;
+const NO_REPLY_AFTER = sql`interval '10 minutes'`;
+const noReply = (since: SQL) => sql`(c.channel <> 'agent_feedback' AND coalesce(${since} < now() - ${NO_REPLY_AFTER}, false))`;
 /** The conversations Needs you and Agent handling can hold: open ones, and closed ones with an open ticket, blocked work or a transcript (failed deliveries). */
 const triageCandidates = sql`(c.status <> 'closed' OR c.closed_at > now() - interval '90 days' OR c.blocked_work > 0 OR (c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL))`;
 /** Answered: the last message is the agent's (sent) or staff's, so the customer has the next word. */
@@ -185,6 +196,8 @@ const answered = sql`(last.author IN ('agent','staff') AND last.held IS NOT TRUE
 // Agent feedback has no agent behind it, and nobody to reply to: it needs you or it is done.
 const handling = sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND c.agent_state = 'active' AND NOT triage.needs_you AND c.done_at IS NULL AND NOT ${answered}`;
 const waitingOnCustomer = sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND NOT triage.needs_you AND c.done_at IS NULL AND ${answered}`;
+/** Glass's count of conversations that need you because no reply was sent (the same rule as Needs you). */
+export const noReplyCount = sql`(SELECT count(*) FROM support_conversations c WHERE c.done_at IS NULL AND ${triageCandidates} AND ${noReply(unansweredSince)})`;
 const finished = sql`NOT triage.needs_you AND (c.done_at IS NOT NULL OR c.status = 'closed' OR (c.channel = 'agent_feedback' AND c.ticket_resolved_at IS NOT NULL))`;
 const firstLine = (text: string | null) => text?.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, 200) ?? null;
 /** A message as one line for the list: its own words, white space folded, the first 200 characters. */

@@ -88,8 +88,9 @@ function tiles(g: Glass): (key: string) => GlassTileFill {
       meter: { value: builtin.ready, max: Math.max(1, builtin.active), tone: tripped ? 'danger' : 'neutral', label: `${number(builtin.ready)} of ${number(builtin.active)} built-in domains ready` } },
     visitors: { value: visitors.visitors.atLeast ? count(visitors.visitors, 'told apart among the first 50,000 visitor codes') : <Tick value={visitors.visitors.n} />, hint: `${number(visitors.views)} page views today`, spark: visitors.hourly, delta: delta(visitors.day.last, visitors.day.previous, 'up', 'Page views') },
     // A support channel that isn't set up is said here (its registrations answer 404 SUPPORT_NOT_CONFIGURED).
-    support: { value: <Tick value={support.open} />, tone: support.configured.chat && support.configured.email ? undefined : 'warning',
-      hint: !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? `${number(support.day.last)} new · email not configured`
+    // Someone who wrote and got nothing back is said first: it should always be none.
+    support: { value: <Tick value={support.open} />, tone: support.noReply ? 'danger' : support.configured.chat && support.configured.email ? undefined : 'warning',
+      hint: support.noReply ? `${number(support.noReply)} with no reply sent` : !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? `${number(support.day.last)} new · email not configured`
         : !support.configured.chat ? `${number(support.day.last)} new · chat not configured` : `${number(support.day.last)} new · ${number(support.ticketed)} ticketed`, spark: support.hourly, delta: delta(support.day.last, support.day.previous, null, 'New conversations') },
     screened: { value: <Tick value={screening.screened} />, hint: `${number(screening.rejected)} rejected`, spark: screening.hourly },
     classifiers: { value: screening.agree === null ? '—' : <Tick value={screening.agree} format={pct(1)} />, hint: `flagged: Jev ${number(screening.jevFlagged)} · JevF ${number(screening.jevfFlagged)}`,
