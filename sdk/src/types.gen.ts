@@ -6558,7 +6558,7 @@ export type OverviewSetup = {
         pending: number;
     } | null;
     /**
-     * The first steps of each focus (focus in getWorkspaceSettings), as yes or no. Null unless the caller manages the whole workspace.
+     * The first steps of each focus (focus in getWorkspaceSettings) and whether an agent is connected, as yes or no. Null unless the caller manages the whole workspace.
      */
     progress?: {
         /**
@@ -6593,6 +6593,10 @@ export type OverviewSetup = {
          * A campaign to a newsletter was launched.
          */
         issueSent: boolean;
+        /**
+         * An agent is connected: an unrevoked API key an agent setup made (the agent prompt's setup token or a device code), or a member's active MCP sign-in that defaults to this workspace or made agent tokens here.
+         */
+        agent: boolean;
     } | null;
 };
 

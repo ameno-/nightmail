@@ -7,17 +7,19 @@ import { matches, PHONE, SHELL_COMPACT } from '../../lib/media'
 // (32), the table head (30: its 28px bar and the split under it, ui.css) and the page's 16px bottom gutter. A notice
 // above the strip (standing, billing, notice) takes its own height. The list runs to the window's bottom. The compact shell (tablets and phones) scrolls the document, so it keeps seven, and a phone five.
 const ROW = 32, FIXED = 44 + 44 + 82 + 8 + 172 + 32 + 30
-/** `above`: anything else over the figures (the no-domain card), in pixels with its spacing. */
+/** `above`: anything else over the figures (the get-started strip), in pixels with its spacing. */
 export function latestRowCount(above = 0) {
   if (typeof window === 'undefined' || matches(SHELL_COMPACT)) return typeof window !== 'undefined' && matches(PHONE) ? 5 : 7
   const banners = [...document.querySelectorAll<HTMLElement>('.page-surface > :is(.standing-banner, .page-notice)')].reduce((sum, el) => { const style = getComputedStyle(el); return sum + el.offsetHeight + parseFloat(style.marginTop) + parseFloat(style.marginBottom) }, 0)
   return Math.min(50, Math.max(7, Math.floor((window.innerHeight - FIXED - banners - above) / ROW)))
 }
 
-// The count for this visit, read once on mount and again only after the window has been resized (debounced), so it
-// never changes during a load.
+// The count for this visit, read once on mount, again when what sits above the figures changes (the get-started strip
+// arriving with the page or leaving it) and after the window has been resized (debounced), so it never changes during a load.
 export function useLatestRowCount(above = 0) {
   const [count, setCount] = useState(() => latestRowCount(above))
+  const [counted, setCounted] = useState(above)
+  if (counted !== above) { setCounted(above); setCount(latestRowCount(above)) }
   useEffect(() => {
     let timer = 0
     const resized = () => { window.clearTimeout(timer); timer = window.setTimeout(() => setCount(latestRowCount(above)), 200) }

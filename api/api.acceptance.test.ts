@@ -4731,7 +4731,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         });
         const { progress, ...owner } = ok(await local('GET', '/v1/overview/setup', undefined, a.cookie));
         assert.deepEqual(owner, await own());
-        assert.deepEqual(Object.keys(progress).sort(), ['campaign', 'campaignSent', 'contacts', 'inbox', 'issueSent', 'newsletter', 'readers', 'received']);
+        assert.deepEqual(Object.keys(progress).sort(), ['agent', 'campaign', 'campaignSent', 'contacts', 'inbox', 'issueSent', 'newsletter', 'readers', 'received']);
         assert.ok(Object.values(progress).every(value => typeof value === 'boolean'), 'Each focus step is yes or no.');
         assert.ok(owner.apiKeys.active >= 1 && owner.invitations.pending === 1 && owner.emails.any, 'The new key and invitation count; the revoked key does not.');
         // A member reads mail but none of the owner/admin lists: those parts are null, exactly where their endpoints refuse.
@@ -4944,9 +4944,13 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.ok(!JSON.stringify(stored).includes(verifier));
       assert.deepEqual([stored.kind, stored.workspace_id, stored.user_id, stored.status], ['prompt', w, owner.userId, 'pending']);
       assert.equal(ok(await request('GET', `/v1/agent/setup-tokens/${minted.id}`, undefined, undefined, as(owner))).status, 'waiting');
+      // Overview's get-started strip ticks "Connect your agent" from the key the exchange makes, not from the copy.
+      const agentStep = async () => ok(await request('GET', '/v1/overview/setup', undefined, undefined, as(owner))).progress.agent;
+      assert.equal(await agentStep(), false);
 
       // The agent needs nothing but the token; the name it gives names its key.
       const agent = ok(await exchange(request, minted.token, 'Claude Code'), 201);
+      assert.equal(await agentStep(), true);
       secrets.add(agent.key);
       assert.match(agent.key, /^nm_[0-9a-f]{64}$/);
       assert.deepEqual([agent.workspaceId, agent.workspaceName], [w, w]);
@@ -5007,6 +5011,7 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.match(error(await request('GET', '/v1/me', agent.key), 401, 'KEY_REVOKED').message,
         new RegExp(`^This key was revoked on \\d{4}-\\d{2}-\\d{2} at \\d{2}:\\d{2}:\\d{2} UTC ${({ dashboard: 'from the dashboard', api: 'with an API key' } as Json)[revocation.via]}; get a new one by running setup again`));
       assert.match(error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED').message, /has since been revoked\. Ask them to copy the prompt again\.$/);
+      assert.equal(await agentStep(), false, 'A revoked agent key no longer counts as a connected agent.');
     });
   });
 
@@ -21143,7 +21148,7 @@ describe('Workspace focus', () => {
       assert.deepEqual(audits.map(a => [a.before?.focus ?? null, a.after?.focus ?? null]), [[null, ['agents', 'developer']], [['agents', 'developer'], ['newsletter', 'marketing', 'agents', 'developer']], [['newsletter', 'marketing', 'agents', 'developer'], ['personal', 'newsletter', 'marketing', 'agents', 'developer']], [['personal', 'newsletter', 'marketing', 'agents', 'developer'], []], [[], null], [null, ['marketing']]]);
       // Overview setup: each focus's first steps, for whoever can set the focus; a member gets none.
       const progress = async (headers?: Record<string, string>) => ok(await local('GET', '/v1/overview/setup', undefined, 'live', headers)).progress;
-      const none = { inbox: false, received: false, contacts: false, campaign: false, campaignSent: false, newsletter: false, readers: false, issueSent: false };
+      const none = { inbox: false, received: false, contacts: false, campaign: false, campaignSent: false, newsletter: false, readers: false, issueSent: false, agent: false };
       assert.deepEqual(await progress(), none, 'A new workspace has done none of them.');
       assert.equal(await progress({ cookie: member.cookie }), null);
       const contact = ok(await local('POST', '/v1/contacts', { email: `${unique('focus-reader')}@example.net` }), 201);

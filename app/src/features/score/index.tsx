@@ -100,7 +100,7 @@ export function useNextSteps(report: SenderScore | undefined): { items: NextItem
   const candidate = list.find(d => d.status === 'verified')
   if (candidate && !receiving) items.push({ key: 'receive', text: `Receive replies on ${candidate.name}`, to: `/domains/${candidate.id}` })
   else if (receiving && inbound.data && !inbound.data.some(domain => domain.addressCount > 0)) items.push({ key: 'address', text: `Create an address on ${(inbound.data.find(domain => domain.status === 'active') ?? receiving).name}`, to: '/receiving' })
-  items.push({ key: 'agent', text: 'Connect your agent', to: '/api-keys?connect=1' })
+  if (!setup.data?.progress?.agent) items.push({ key: 'agent', text: 'Connect your agent', to: '/api-keys?connect=1' })
   if (setup.data?.webhooks?.total === 0) items.push({ key: 'webhook', text: 'Get bounce events by webhook', to: '/settings/webhooks/new' })
   const pending = setup.data?.invitations?.pending ?? 0
   if (pending) items.push({ key: 'invite', text: pending === 1 ? 'Share your pending invitation link' : `Share ${number(pending)} pending invitation links`, to: '/settings#members' })

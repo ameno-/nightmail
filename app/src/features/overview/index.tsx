@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiDef, useRegion, useWorkspaceAccess , useSession } from '../../data/context'
+import { useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
@@ -16,22 +16,20 @@ import { latestRequest, useLatestRowCount } from './latest'
 import { logHref, logRowLabel, useLogRowIntent } from '../logs/rows'
 import { routeChunks, usePrefetchQueries } from '../../data/prefetch'
 import { composer } from '../campaigns/composer-chunk'
-import { DailyLimit, SetupRail, useSendingLimitPending, useSetupSteps } from './setup'
+import { DailyLimit, useSendingLimitPending, useSetupRead, type SetupRead } from './setup'
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 import { setPanelHidden } from './panel'
 import { DomainSetupAlert } from '../settings/domain-setup-alert'
-import { ONBOARDING_CARD_SPACE, OnboardingCard, cardActions, useOnboardingCard } from './onboarding-card'
-import { leadFocus } from '../../data/focus'
-import { useQueryClient } from '@tanstack/react-query'
-import { resourceOf } from '../../data/invalidation'
+import { FirstRunStrip, stripSpace, useFirstRun, useStripExit } from './first-run'
 import { useSettlingEmail } from '../docs/first-send'
 
 // Overview: is sending healthy? An edge-to-edge console: a 44px control strip (the title, then the range, stream and
-// panel toggle), one hairline-divided strip of four figures across the page, each a link to that mail in Logs; then
-// the activity band over the latest emails (failures first, dense rows down to the window's bottom) beside a 296px
-// inspector rail with the standing (Warn and up), setup (until the first email), the daily limit, next steps and the
-// recent campaigns. The sender score is the sidebar's readout; where there is no sidebar (the compact shell) it is a
-// row under the figures, so health comes before everything else.
+// panel toggle), a new workspace's get-started strip (first-run.tsx), one strip of four figures across the page, each a
+// link to that mail in Logs; then the activity band over the latest emails (failures first, dense rows down to the
+// window's bottom) beside a 296px inspector rail with the standing (Warn and up), the daily limit and why, next steps
+// (not while the get-started strip leads) and the recent campaigns. Empty, each panel says so quietly in its own space:
+// the figures as one well, the chart a bare baseline, the list a sentence. The sender score is the sidebar's readout;
+// where there is no sidebar (the compact shell) it is a row under the figures, so health comes before everything else.
 // In one column (960px and under) the rail follows the chart and the list closes the page.
 // Every async block reserves its final size, and refetches keep the previous data on screen. A new range or stream keeps
 // the old figures up (dimmed if the new ones take over 100 ms), then numbers tween and charts morph or crossfade.
@@ -56,23 +54,23 @@ export function OverviewPage() {
     <Select aria-label="Email stream" value={stream} onValueChange={value => setSearchParams(previous => { const next = new URLSearchParams(previous); if (value === 'all') next.delete('stream'); else next.set('stream', value); return next })} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} />
   </div>
   const data = query.data
-  // Where the detail column stacks under the main one (overview.css, 960px), the setup steps lead the page, above the figures. Whether they show is only known once the setup read
-  // lands, so until then the main column holds its skeletons and swaps in whole (new nodes, nothing moves).
+  // Where the detail column stacks under the main one (overview.css, 960px), the domain banner leads the page, above the
+  // figures. Whether the get-started strip shows (and its steps) is only known once the setup read and the score land:
+  // until then the main column holds its skeletons and swaps in whole (new nodes, nothing moves).
   const stacked = useMediaQuery('(max-width: 960px)'), compact = useCompactShell()
-  const setup = useSetupSteps()
+  const setup = useSetupRead()
   const detail = useDetail(setup, Boolean(recent.data || recent.isError))
-  const held = stacked && setup.loading
-  const card = useOnboardingCard(setup)
-  const client = useQueryClient()
-  // A test from the first-send card shows in Latest emails and the figures; the card keeps its confirmation for this visit.
-  const sentFromCard = () => void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['overview', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(resourceOf(query.queryKey)) }).catch(() => {})
-  // The card leads with its own actions, so the setup steps don't offer them again beside it (the key stays there: the
-  // first-send card copies the agent prompt instead).
-  const lead = leadFocus(useSession()?.identity)
-  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : cardActions[lead]) : setup
+  const [sentHere, setSentHere] = useState(false)
+  const firstRun = useFirstRun(setup, detail.score, sentHere)
+  const exit = useStripExit(firstRun.workspaceId), stripRow = useRef<HTMLDivElement>(null)
+  const strip = firstRun.show && !exit.gone
+  // Next steps stay out for this visit once the strip has led it, so the rail never grows under a leaving strip.
+  const led = useRef(false)
+  if (firstRun.show) led.current = true
+  const held = (stacked && setup.loading) || firstRun.pending
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again (unless metrics already failed, so we never hammer an over-budget query).
-  const count = useLatestRowCount(card ? ONBOARDING_CARD_SPACE[card] : 0)
+  const count = useLatestRowCount(strip ? stripSpace() : 0)
   // A stream picked in the header scopes Latest emails too: its sent mail (received mail has no stream).
   const latestParams = latestRequest(regionId, stream)
   const latest = useApiDef(queries.logs(latestParams), { interval: 60_000, keepPrevious: sameRegion(regionId) })
@@ -89,14 +87,14 @@ export function OverviewPage() {
   const failed = query.isError && !data
   return <div className="ov-page">
     <PageHeader className="ov-strip" title="Overview" actions={<>{controls}<PanelToggle /></>} />
-    {card && (card === 'no-domain' || !held) && <div className="ov-lead"><OnboardingCard kind={card} domain={setup.verifiedDomain} onSent={sentFromCard} progress={setup.progress} /></div>}
-    {stacked && setup.stuck && <div className="ov-lead"><DomainSetupAlert domain={setup.stuck.domain} gap={setup.stuck.gap} /></div>}
-    {stacked && rail.steps && <div className="ov-lead"><SetupRail steps={rail.steps} current={rail.current} open={rail.open} /></div>}
-    {stacked && setup.error ? <div className="ov-lead"><ErrorState error={setup.error} onRetry={setup.retry} /></div> : null}
+    {strip && <div ref={stripRow} className="ov-lead"><FirstRunStrip setup={setup} done={firstRun.done} onSent={() => setSentHere(true)} onLeave={how => { if (stripRow.current) exit.leave(stripRow.current, how) }} /></div>}
+    {/* With the main column, never before it: the strip (if any) is known first and goes above them. */}
+    {stacked && !held && setup.stuck && <div className="ov-lead"><DomainSetupAlert domain={setup.stuck.domain} gap={setup.stuck.gap} /></div>}
+    {stacked && !held && setup.error ? <div className="ov-lead"><ErrorState error={setup.error} onRetry={setup.retry} /></div> : null}
     <Fragment key={held ? 'held' : 'ready'}>
       {/* The score has its own read: it neither waits for the figures nor dims with them. */}
       {failed ? <div className="ov-lead"><ErrorState error={query.error} onRetry={() => query.refetch()} /></div>
-        : <div className="ov-kpis" role="group" aria-label="Figures" data-stale={query.isPlaceholderData || undefined}>{data && !held ? <Facts data={data} range={range} stream={stream} /> : <FactTilesSkeleton />}{compact && (held ? <ScoreTileSkeleton /> : <SidebarScore />)}</div>}
+        : <div className="ov-kpis" role="group" aria-label="Figures" data-stale={query.isPlaceholderData || undefined}>{data && !held ? <Facts data={data} range={range} stream={stream} fresh={firstRun.empty && firstRun.show} /> : <FactTilesSkeleton />}{compact && (held ? <ScoreTileSkeleton /> : <SidebarScore />)}</div>}
     </Fragment>
     <div key={held ? 'split-held' : 'split-ready'} className="ov-split">
       <div className="ov-split__main">
@@ -105,21 +103,15 @@ export function OverviewPage() {
           {!stacked && latestEmails}
         </Fragment>
       </div>
-      <Aside setup={rail} detail={detail} showSetup={!stacked} placeholder={!stacked} campaigns={recent.data?.items} range={range} />
+      <Aside setup={setup} detail={detail} showSetup={!stacked} showNext={!led.current} placeholder={!stacked} campaigns={recent.data?.items} range={range} />
       {/* Under the rail, once that rail has its final height (its own reads and the figures' campaigns). */}
       {stacked && detail.ready && (data || query.isError) ? latestEmails : null}
     </div>
   </div>
 }
 
-function withoutActions(setup: ReturnType<typeof useSetupSteps>, keys: string[]) {
-  if (!setup.steps) return setup
-  const same = new Map(setup.steps.map(step => [step, keys.includes(step.key) ? { ...step, action: undefined } : step]))
-  return { ...setup, steps: setup.steps.map(step => same.get(step)!), current: setup.current && same.get(setup.current), open: setup.open?.map(step => same.get(step)!) }
-}
-
 // What the detail column shows, and whether all of it is known (the page also waits on this to place the list under it).
-function useDetail(setup: ReturnType<typeof useSetupSteps>, recentReady: boolean) {
+function useDetail(setup: SetupRead, recentReady: boolean) {
   const score = useSenderScore()
   const next = useNextSteps(score.data)
   const limitPending = useSendingLimitPending()
@@ -129,8 +121,8 @@ function useDetail(setup: ReturnType<typeof useSetupSteps>, recentReady: boolean
 // The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash. Recent
 // campaigns come with the overview's figures and close the column, so arriving later moves nothing above them.
 // In one column it has no placeholder while it loads: it sits under the chart there, in view, and may turn out empty
-// (a new workspace's setup leads the page instead), so it takes up room only once it has something to show.
-function Aside({ setup, detail: { score, next, ready }, showSetup, placeholder, campaigns, range }: { setup: ReturnType<typeof useSetupSteps>; detail: ReturnType<typeof useDetail>; showSetup: boolean; placeholder: boolean; campaigns?: Overview['recentCampaigns']; range: TimeRange }) {
+// (a new workspace's strip leads the page instead), so it takes up room only once it has something to show.
+function Aside({ setup, detail: { score, next, ready }, showSetup, showNext, placeholder, campaigns, range }: { setup: SetupRead; detail: ReturnType<typeof useDetail>; showSetup: boolean; showNext: boolean; placeholder: boolean; campaigns?: Overview['recentCampaigns']; range: TimeRange }) {
   // One score per screen: the sidebar's card; under the tiles where the sidebar isn't on screen (the compact shell);
   // or this column's copy where the sidebar doesn't carry it (self-hosted).
   const { multiTenant } = useWorkspaceAccess()
@@ -146,12 +138,11 @@ function Aside({ setup, detail: { score, next, ready }, showSetup, placeholder, 
   return <aside id="overview-panel" className="ov-split__aside" aria-label="Status">{!ready ? placeholder && <AsideSkeleton /> : <>
     {score.data && <StandingCard report={score.data} />}
     {showSetup && setup.stuck && <section aria-label="Domain setup"><DomainSetupAlert domain={setup.stuck.domain} gap={setup.stuck.gap} /></section>}
-    {showSetup && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
     {showSetup && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
     {compact ? null : score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : !multiTenant && <SidebarScore />}
     <DailyLimit report={score.data} />
-    {/* Next steps follow setup: never in its place while setup is unknown. */}
-    {!setup.steps && !setup.error && next.items.length > 0 && <section className="ov-rail-section" aria-labelledby="overview-next"><h2 id="overview-next" className="ov-label">Next steps</h2><NextSteps items={next.items.map(item => ({ ...item, to: logsHref(item.to, range) }))} /></section>}
+    {/* Next steps follow setup: never while it is unknown, nor while the get-started strip leads the page. */}
+    {showNext && !setup.error && next.items.length > 0 && <section className="ov-rail-section" aria-labelledby="overview-next"><h2 id="overview-next" className="ov-label">Next steps</h2><NextSteps items={next.items.map(item => ({ ...item, to: logsHref(item.to, range) }))} /></section>}
     {campaigns && campaigns.length > 0 && <Campaigns rows={campaigns.slice(0, 3)} />}
   </>}</aside>
 }
@@ -174,7 +165,9 @@ const hourRate = (part: number, sent: number) => sent >= BAND_VOLUME ? part / se
 // A rate too small for two decimals keeps a third, so one complaint never reads as 0.00%.
 const rateText = (rate: number) => rate > 0 && rate < 0.0001 ? percent(rate, 3) : percent(rate)
 const limitText = (limit: number) => percent(limit, limit < 0.01 ? 1 : 0)
-function Facts({ data, range, stream }: { data: Overview; range: TimeRange; stream: 'all' | 'transactional' | 'marketing' }) {
+// No mail in the period: the four wells are one quiet well that says so in their place (a new workspace's: none yet).
+const periods: Record<TimeRange, string> = { '24h': 'the last 24 hours', '7d': 'the last 7 days', '30d': 'the last 30 days' }
+function Facts({ data, range, stream, fresh }: { data: Overview; range: TimeRange; stream: 'all' | 'transactional' | 'marketing'; fresh: boolean }) {
   const sent = useTween(data.sent, swap), delivered = useTween(data.sent ? data.delivered / data.sent : 0, swap), bounced = useTween(data.sent ? data.bounced / data.sent : 0, swap), complaints = useTween(data.sent ? data.complaints / data.sent : 0, swap)
   const deliveredCount = useTween(data.delivered, swap), bouncedCount = useTween(data.bounced, swap), complaintCount = useTween(data.complaints, swap)
   const change = useTween(data.previousSent ? (data.sent - data.previousSent) / data.previousSent : undefined, swap)
@@ -186,6 +179,7 @@ function Facts({ data, range, stream }: { data: Overview; range: TimeRange; stre
     { title: factTitles[2], to: to('bounced'), hint: number(Math.round(bouncedCount)), value: data.sent ? rateText(bounced) : '—', rate: data.sent ? data.bounced / data.sent : 0, limit: BOUNCE_LINE },
     { title: factTitles[3], to: to('complained'), hint: number(Math.round(complaintCount)), value: data.sent ? rateText(complaints) : '—', rate: data.sent ? data.complaints / data.sent : 0, limit: COMPLAINT_LINE },
   ]
+  if (!data.sent) return <div className="ov-kpi ov-kpi--empty" role="status"><div className="ov-kpi__head"><span>{factTitles[0]}</span></div><p>{fresh ? 'No emails yet.' : `No ${stream === 'all' ? '' : `${stream} `}emails in ${periods[range]}.`}</p></div>
   return <>{tiles.map(tile => <Link key={tile.title} to={tile.to} className="ov-kpi" data-zone={tile.limit === undefined ? undefined : zone(tile.rate, tile.limit)} onPointerEnter={warm} onFocus={warm}>
     <div className="ov-kpi__head"><span>{tile.title}</span><span className="ov-kpi__hint"><span>{tile.hint}</span></span></div>
     <div className="ov-kpi__value"><span className="ov-kpi__figure">{tile.value}</span>{tile.limit !== undefined && <span className="ov-kpi__limit">· {limitText(tile.limit)} max</span>}</div>
@@ -214,8 +208,9 @@ function Columns({ values: raw, tone }: { values: number[]; tone: 'sent' | 'deli
 
 function Chart({ data, stale }: { data: Overview; stale: boolean }) {
   return <section className="ov-chart" aria-label="Sending activity" data-stale={stale || undefined}>
-    <div className="ov-chart__head"><span className="ov-label">Activity</span><span className="ov-legend" aria-hidden="true"><span><i className="ov-key--sent" />Emails</span><span><i className="ov-key--bounces" />Bounced</span><span><i className="ov-key--complaints" />Complaints</span></span></div>
-    <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot">{data.sent ? <ActivityChart data={data} /> : <EmptyState title="No emails in this period" />}</Crossfade>
+    <div className="ov-chart__head"><span className="ov-label">Activity</span><span className="ov-legend" aria-hidden="true" data-hidden={!data.sent || undefined}><span><i className="ov-key--sent" />Emails</span><span><i className="ov-key--bounces" />Bounced</span><span><i className="ov-key--complaints" />Complaints</span></span></div>
+    {/* Nothing to draw: the period's time axis alone, since the figures above already say there was no mail. */}
+    <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot"><ActivityChart data={data} empty={!data.sent} /></Crossfade>
   </section>
 }
 
@@ -239,7 +234,7 @@ function LatestEmails({ params, count, reserve, held, range, figures, figuresFai
   const failures = items.filter(row => row.direction === 'sent' && failed.has(row.status) && Date.parse(row.at) >= since)
   const rows = [...failures, ...items.filter(row => !failures.includes(row))].slice(0, count)
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to={logsHref(stream ? `/logs?view=sent&stream=${stream}` : '/logs', range)}>Logs <Icon icon={ArrowUpRight} size="sm" /></Link>} />
-    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && settled ? rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',') : undefined}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held || !settled} skeletonRows={count} minRows={reserve ? count : 0} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && settled ? rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',') : undefined}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held || !settled} skeletonRows={count} minRows={reserve ? count : 0} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} empty={<p className="ov-latest__empty">Emails you send and receive show here.</p>} columns={logColumns} /></Crossfade>}
   </section>
 }
 // Up to three, in the detail column's list style: the name, then how it went (or its status while not sent).
@@ -349,7 +344,7 @@ function Line({ xs, ys, minY, maxY, tone, keep = () => true }: { xs: number[]; y
 // missing buckets zero-filled so there are no gaps or cutoffs. Emails draw as a smooth monotone line with a subtle wash
 // scaled strictly to visible data; bounces and complaints appear as count-scaled baseline markers only in buckets where
 // they are > 0, and a hover crosshair + readout inspect exact raw bucket counts. New counts over the same buckets morph.
-function ActivityChart({ data }: { data: Overview }) {
+function ActivityChart({ data, empty = false }: { data: Overview; empty?: boolean }) {
   const target = data.points
   const washId = useId()
   const [active, setActive] = useState<number | null>(null)
@@ -372,7 +367,7 @@ function ActivityChart({ data }: { data: Overview }) {
   const plotSent = step < HOUR ? smoothSeries(rawSent) : rawSent
   const visibleSentMax = Math.max(0, ...plotSent)
   const shown = useMorph([...plotSent, niceMax(visibleSentMax)], swap)
-  if (!n) return <EmptyState title="No activity" />
+  if (!n && !empty) return <EmptyState title="No activity" />
   const sent = shown.slice(0, n), max = Math.max(1, shown[n])
   const compact = width < 520, height = 135, top = 10, bottom = height - 22, left = compact ? 38 : 48, right = width - (compact ? 26 : 36)
   const domainStart = Date.parse(data.periodStart), domainEnd = Math.max(domainStart + 1, Date.parse(data.periodEnd))
@@ -399,6 +394,12 @@ function ActivityChart({ data }: { data: Overview }) {
   }
   const dot = (x: number, y: number, tone: string, key: string, r = 2.75) => <circle key={key} cx={x} cy={y} r={r} className={`ov-dot ov-dot--${tone}`} />
   const point = active === null ? undefined : target[active]
+  if (empty) return <div ref={container} className="ov-activity">
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="No emails in this period">
+      <line x1={left} x2={right} y1={bottom} y2={bottom} className="chart-grid chart-grid--base" />
+      {domainTicks(domainStart, domainEnd, left, right, compact ? 64 : 84).map(t => <text key={t.key} x={t.x} y={height - 6} textAnchor={t.anchor} className="chart-label">{t.text}</text>)}
+    </svg>
+  </div>
   const washPath = n > 1 ? `M ${xs[0].toFixed(2)} ${bottom} L ${xs[0].toFixed(2)} ${emailsY[0].toFixed(2)} ${monotone(xs, emailsY, top, bottom).join(' ')} L ${xs[lastIdx].toFixed(2)} ${bottom} Z` : ''
   return <div ref={container} className="ov-activity" onMouseLeave={() => setActive(null)} onPointerDown={scrub} onPointerMove={scrub}>
     <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label="Emails per bucket; bounces and complaints marked on the baseline where present">

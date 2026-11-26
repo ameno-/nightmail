@@ -8,6 +8,7 @@ import type { LogEntry } from '../../data/types'
 import { LogParty, logColumnDefs, logColumns } from '../logs/rows'
 import { useLatestRowCount } from './latest'
 import { setPanelHidden, usePanelHidden } from './panel'
+import { FirstRunSkeleton, stripSpace, useStripRemembered } from './first-run'
 import '../score/score.css'
 import './overview.css'
 
@@ -54,17 +55,19 @@ export function ChartSkeleton() {
 export function AsideSkeleton() {
   return <div className="ov-aside-skeleton" aria-hidden="true"><span /><span /></div>
 }
-// The route-level placeholder while the Overview code loads: the same header, columns and blocks, and as many latest
-// email rows as the page will reserve (latest.ts). In one column the list comes last, after the detail column has
-// loaded, so it has no place here.
+// The route-level placeholder while the Overview code loads: the same header, columns and blocks (the get-started strip
+// where this browser already shows it), and as many latest email rows as the page will reserve (latest.ts). In one
+// column the list comes last, after the detail column has loaded, so it has no place here.
 export function OverviewRouteSkeleton() {
   const { regionId } = useRegion()
   const { multiTenant, canAdminister } = useWorkspaceAccess()
-  const count = useLatestRowCount()
+  const strip = useStripRemembered()
+  const count = useLatestRowCount(strip ? stripSpace() : 0)
   const stacked = useMediaQuery('(max-width: 960px)'), compact = useCompactShell()
   return <div className="ov-page">
     <PageHeader className="ov-strip" title="Overview" actions={<><div className="cluster ov-controls" data-wide={!multiTenant || undefined}>{!multiTenant && <>{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus /></>}<Tabs value="24h" onValueChange={() => {}} disabled items={[{ value: '24h', label: '24h' }, { value: '7d', label: '7d' }, { value: '30d', label: '30d' }]} label="Time range" /><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div><PanelToggle /></>} />
     <LoadingRegion label="Loading overview">
+      {strip && <div className="ov-lead"><FirstRunSkeleton /></div>}
       <div className="ov-kpis" aria-hidden="true"><FactTilesSkeleton />{compact && <ScoreTileSkeleton />}</div>
       <div className="ov-split">
         <div className="ov-split__main"><ChartSkeleton />{!stacked && <section className="ov-latest"><SectionHeader title="Latest emails" actions={<span className="ui-button ui-button--ghost ui-button--sm" aria-disabled="true">Logs <Icon icon={ArrowUpRight} size="sm" /></span>} /><TableSkeleton className="logs-table ov-table" columns={latestColumnDefs} rows={count} /></section>}</div>
