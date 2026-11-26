@@ -149,7 +149,8 @@ function ApprovalPrompt({ conversationId, canAct }: { conversationId: string; ca
 /** Who wrote a message, as the chat shows them: the customer's words, the agent's or staff's, a note (staff's, or the
  *  triage agent's on an agent report), or the agent's held answer, a draft until someone decides. */
 type Role = 'customer' | 'agent' | 'staff' | 'note' | 'draft'
-type ChatMessage = { type: 'message'; key: string; m: SupportMessage; role: Role; author: string; first: boolean; last: boolean }
+/** `filedNext`: the next message of its run was filed too, and carries the run's one Filed mark. */
+type ChatMessage = { type: 'message'; key: string; m: SupportMessage; role: Role; author: string; first: boolean; last: boolean; filedNext?: boolean }
 type ChatRow = { type: 'day'; key: string; label: string } | { type: 'proposal'; key: string; at: string; text: string } | ChatMessage
 
 const day = (iso: string) => new Date(iso).toISOString().slice(0, 10)
@@ -204,7 +205,7 @@ function chatRows(detail: SupportDetail): ChatRow[] {
     if (entry.event) { rows.push({ type: 'proposal', key: entry.key, at: entry.at, text: `Waiting for approval: ${sentenceCase(String(entry.event.details.label ?? 'a change'))}` }); previous = null; continue }
     const m = entry.message!, { author, role } = describe(m, c)
     const row: ChatMessage = { type: 'message', key: entry.key, m, role, author, first: true, last: true }
-    if (previous && previous.author === author && previous.role === role && role !== 'draft' && !m.email && !previous.m.email && Date.parse(m.at) - Date.parse(previous.m.at) < GROUP_MS) { previous.last = false; row.first = false }
+    if (previous && previous.author === author && previous.role === role && role !== 'draft' && !m.email && !previous.m.email && Date.parse(m.at) - Date.parse(previous.m.at) < GROUP_MS) { previous.last = false; row.first = false; previous.filedNext = m.kind === 'filed' && previous.m.kind === 'filed' }
     rows.push(row)
     previous = row
   }
@@ -269,13 +270,14 @@ function Thread({ detail, canAct, actions, composer, onConfirm }: { detail: Supp
 }
 
 /** One message: its sender and time (the first of a run), then the customer's words in a bubble, ours as text under the
- *  mark, a note or a held answer as a card. Delivery shows only when it isn't plain: Queued, or Not sent; a customer
- *  message filed while the chat couldn't answer is marked Filed. */
+ *  mark, a note or a held answer as a card. Delivery shows only when it isn't plain: Queued, or Not sent; customer
+ *  messages filed while the chat couldn't answer are marked Filed, once under the last of a run. */
 function Message({ row, c, canAct, actions, onEdit }: { row: ChatMessage; c: SupportConversation; canAct: boolean; actions: Actions; onEdit: (m: SupportMessage, fresh: boolean) => void }) {
   const { m, role } = row, customer = role === 'customer', pending = m.id.startsWith('pending:')
   const queued = m.author === 'staff' && m.kind !== 'note' && (m.delivery === 'queued' || pending)
-  // A message the support chat couldn't take, filed by the dashboard (kind filed): why and when are in Activity.
-  const filed = customer && m.kind === 'filed'
+  // A message the support chat couldn't take, filed by the dashboard (kind filed), one mark for a run of them: why and
+  // when are in Activity.
+  const filed = customer && m.kind === 'filed' && !row.filedNext
   return <div className="sinbox-msg" data-role={role} data-first={row.first || undefined} data-last={row.last || undefined} data-email={m.email ? '' : undefined} data-pending={pending || undefined}>
     {row.first && <p className="sinbox-msg__meta">
       {!customer && <Mark name={row.author} agent={m.author === 'agent'} />}
