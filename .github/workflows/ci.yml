@@ -42,6 +42,7 @@ jobs:
       - id: scope
         env:
           EVENT_BASE: ${{ github.event.merge_group.base_sha || github.event.before }}
+          PR_HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
         run: bash .github/scripts/ci-scope.sh
 
   build-work:
@@ -91,7 +92,7 @@ jobs:
         if: needs.changes.outputs.api == 'true' && needs.changes.outputs.dashboard != 'true'
         run: cd app && ./node_modules/.bin/vite build
       - name: Build API and bundle both Workers without deploying
-        if: needs.changes.outputs.preview == 'true'
+        if: needs.changes.outputs.api == 'true' || needs.changes.outputs.dashboard == 'true'
         working-directory: api
         env:
           WRANGLER_SEND_METRICS: 'false'
