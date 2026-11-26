@@ -19,13 +19,15 @@ export const isPublicPage = (pathname: string) => pathname === '/' || /^\/(?:pri
 
 /** The site's own pages at the top level that the build writes (app/price-pages.ts: the use-case pages, docs/agents.ts).
  *  The Worker serves them from the build's files, as it does the pages under isSitePage's directories. */
-export const SITE_ROOT_PAGES = ['/email-for-ai-agents'];
+export const SITE_ROOT_PAGES = ['/email-for-ai-agents', '/cheapest-email-api'];
+/** One of those, or its address with a trailing slash (which the build's files answer with a redirect). */
+export const isSiteRootPage = (pathname: string) => SITE_ROOT_PAGES.some(page => pathname === page || pathname === `${page}/`);
 /** An address under the directories the build writes the site's own pages into (app/price-pages.ts): a comparison
  *  (/compare/<vendor>), a vendor's pricing page (/pricing/<vendor>) or its alternatives page (/alternatives/<vendor>). The
  *  Worker serves them from the build's files. */
 export const isSitePage = (pathname: string) => /^\/(?:compare|pricing|alternatives)\//.test(pathname);
 /** Where one of those the build didn't make is (and /compare, without its page): nowhere (404), never the dashboard. */
-export const isMissingComparePage = (pathname: string) => pathname === '/compare' || isSitePage(pathname);
+export const isMissingComparePage = (pathname: string) => pathname === '/compare' || isSitePage(pathname) || (SITE_ROOT_PAGES.some(page => pathname.startsWith(`${page}/`)) && !isSiteRootPage(pathname));
 /** Where a reference page the build didn't make is (app/site-pages.ts writes one per operation): not found, rather than
  *  the docs' "Page not found" with 200, which search engines count as a soft 404. */
 export const isMissingDocsPage = (pathname: string) => pathname.startsWith('/docs/api/');

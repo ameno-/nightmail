@@ -52,7 +52,8 @@ export function hubDoc(): PageDoc {
     sections,
     // The vendors' alternatives pages (docs/registry.ts), which link back here.
     questions: [], sources: [], related: [...ALTERNATIVES_VENDORS.flatMap(slug => { const c = ORDERED.find(o => o.slug === slug); return c ? [{ title: `${c.offer.vendor} alternatives`, path: `/alternatives/${slug}`, line: `${productName} and the services nearest ${c.offer.vendor} in price.` }] : [] }),
-      { title: 'Email for AI agents', path: '/email-for-ai-agents', line: `${productName} and every agent-inbox service, a month at three numbers of inboxes.` }],
+      { title: 'Email for AI agents', path: '/email-for-ai-agents', line: `${productName} and every agent-inbox service, a month at three numbers of inboxes.` },
+      { title: 'Email API prices', path: '/cheapest-email-api', line: `${productName} and the email APIs it has compared itself with, a month at three sizes.` }],
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }],
     modified,
     llms: `What a month costs on ${productName} and on ${counts.join(', ')}, at three sizes each, read ${dayOf(modified)}.`,
