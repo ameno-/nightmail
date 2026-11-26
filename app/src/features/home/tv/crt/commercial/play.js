@@ -76,6 +76,23 @@ const stopped = (signal) => {
 // view, then a clip rect (x, y, w, h, corner radius) for anything drawn with the CLIP flag
 const plain = (w, h, t, c = [0, 0, w, h, 0]) => [w, h, 1, t, c[0], c[1], c[2], c[3], c[4], 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1]
 
+// An announcer's clip as subtitles: its words ([word, seconds] from the manifest) in phrases of at most WIDE characters,
+// a new one after each sentence, each shown from its first word until the next begins (the last until the clip ends).
+const WIDE = 26
+const phrases = (words, dur) => {
+  const out = []
+  let ended = true
+  for (const [word, sec] of words) {
+    const last = out[out.length - 1]
+    if (ended || (last.text + " " + word).length > WIDE) {
+      if (last) last.to = sec
+      out.push({ text: word, from: sec, to: dur + 0.2 })
+    } else last.text += " " + word
+    ended = /[.!?]$/.test(word)
+  }
+  return out
+}
+
 export async function start({ sound, signal, onEnd }) {
   const canvas = document.createElement("canvas")
   canvas.width = 640
@@ -138,8 +155,16 @@ export async function start({ sound, signal, onEnd }) {
     const level = new Float32Array(analyser?.fftSize ?? 0)
     let t0 = null
     let ended = false
+    const subtitles = new Map()
     return {
       canvas,
+      caption() {
+        const line = show.line
+        if (!line) return null
+        if (!subtitles.has(line.name)) subtitles.set(line.name, phrases(cues.words[line.name] ?? [], cues.dur[line.name] ?? 0))
+        const at = show.t - line.at
+        return subtitles.get(line.name).find((phrase) => at >= phrase.from && at < phrase.to)?.text ?? null
+      },
       frame(width) {
         const now = clock()
         t0 ??= now

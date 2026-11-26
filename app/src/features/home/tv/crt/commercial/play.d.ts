@@ -4,6 +4,8 @@ export type Broadcast = {
   /** Runs the show on to its clock and draws it `width` px wide. Returns what the show does to the tube it is on:
    *  static (0..1), roll (the picture sliding up through a frame, 0..1) and tilt (radians: the camera knocked). */
   frame: (width: number) => { readonly static: number; readonly roll: number; readonly tilt: number }
+  /** What the announcer is saying now, as a subtitle (one line, at most 26 characters), or null between his lines. */
+  caption: () => string | null
   /** Stops the show at once: its sound fades out over a few ms and lets go of the speaker; the GPU device is destroyed. */
   stop: () => void
 }

@@ -140,6 +140,8 @@ export class Show {
     this.fineKey = FINE_OF[name] || null
     this.fineT = this.t
     this.talkUntil = this.t + dur
+    // which line of the pitch is being said, and since when (play.js: its words as subtitles)
+    this.line = { name, at: this.t }
     this.handles.voice = this.sfx(name, { bus: "voice" })
   }
   loop(name, o = {}) {
