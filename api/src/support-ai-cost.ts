@@ -25,15 +25,18 @@ const period = (since: SQL) => sql`(SELECT json_build_object('costUsd',coalesce(
   FROM support_ai_usage WHERE at>=${since})`;
 /**
  * Glass's view of the spend, one JSON value: today (UTC), the last 7 and 30 days with the conversations and turns behind
- * each, each of the last 30 UTC days, the cost per conversation the AI answered in those 30 days, and the conversations
- * that cost the most in them. A conversation is answered when it spent in those 30 days and an agent message of it reached
- * the customer (the inbox's own rule, support-inbox.ts reached).
+ * each, each of the last 30 UTC days, the conversations the AI answered in those 30 days and what they cost, and the
+ * conversations that cost the most in them. A conversation is answered when the answering agent spent on it in those 30
+ * days and an agent message of it reached the customer (the inbox's own rule, support-inbox.ts reached). The totals, the
+ * days and the most expensive include the triage agent's spend; the answered ones' cost doesn't (it answers nobody), nor
+ * conversations the AI never answered.
  */
 export const supportAiSql = (reached: SQL) => sql`(SELECT json_build_object('line',${SUPPORT_AI.dailyLineUsd}::float8,
     'today',${period(sql`date_trunc('day',now(),'UTC')`)},'week',${period(sql`now()-interval '7 days'`)},'month',${period(sql`now()-interval '30 days'`)},
     'daily',(SELECT coalesce(json_agg(coalesce(d.cost,0) ORDER BY g.day),'[]') FROM generate_series(date_trunc('day',now(),'UTC')-interval '29 days',date_trunc('day',now(),'UTC'),interval '1 day') g(day)
       LEFT JOIN (SELECT date_trunc('day',at,'UTC') AS day,sum(cost_usd)::float8 AS cost FROM support_ai_usage WHERE at>=date_trunc('day',now(),'UTC')-interval '29 days' GROUP BY 1) d ON d.day=g.day),
-    'answered',(SELECT count(*)::int FROM (SELECT DISTINCT conversation_id FROM support_ai_usage WHERE at>=now()-interval '30 days' AND conversation_id IS NOT NULL) u
+    'answered',(SELECT json_build_object('n',count(*)::int,'costUsd',coalesce(sum(u.cost),0)::float8)
+      FROM (SELECT conversation_id,sum(cost_usd) AS cost FROM support_ai_usage WHERE at>=now()-interval '30 days' AND agent='support' AND conversation_id IS NOT NULL GROUP BY 1) u
       WHERE EXISTS (SELECT FROM support_messages o WHERE o.conversation_id=u.conversation_id AND o.author='agent' AND ${reached})),
     'top',(SELECT coalesce(json_agg(json_build_object('id',t.conversation_id,'channel',c.channel,'workspace',CASE WHEN w.id IS NOT NULL THEN json_build_object('id',w.id,'name',w.name) END,
         'costUsd',t.cost,'turns',t.turns) ORDER BY t.cost DESC,t.conversation_id),'[]')

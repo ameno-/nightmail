@@ -94,7 +94,8 @@ const Glass = z.object({
     line: z.number().describe('The daily line in US dollars: past it, Health shows support-ai-cost and the operators\u2019 Slack gets one card that UTC day (src/health-thresholds.ts SUPPORT_AI).'),
     today: AiPeriod.describe('Since UTC midnight.'), week: AiPeriod.describe('The last 7 days.'), month: AiPeriod.describe('The last 30 days.'),
     daily: z.array(z.number()).describe('US dollars each UTC day, the last 30, oldest first; the last is today.'),
-    answered: int.describe('Conversations that spent in the last 30 days and got an answer from the AI that reached the customer.'),
+    answered: int.describe('Conversations the answering agent spent on in the last 30 days that got an answer from the AI that reached the customer.'),
+    answeredCostUsd: z.number().describe('What the answering agent spent on those conversations in the last 30 days, US dollars: the average per answer is this over answered. Not the triage agent\u2019s spend, nor conversations the AI never answered.'),
     top: z.array(z.object({ id: z.string(), channel: z.string().nullable(), workspace: z.object({ id: z.string(), name: z.string() }).nullable(), costUsd: z.number(), turns: int }))
       .describe('The conversations that cost the most in the last 30 days, most first (at most 3).'),
   }).describe('What the support AI\u2019s model calls cost (src/support-ai-cost.ts): the answering agent\u2019s and the feedback triage agent\u2019s.'),
@@ -127,7 +128,7 @@ type Raw = {
   mail_previous: Glass['sending']['previous'] | null; steps: Glass['delivery']['steps']; ramp: { ramping: number; waiting: number };
   received_day: { last: number; previous: number }; builtin: { active: number; revoked: number; ready: number }; parent: Glass['builtin']['parent'];
   support: { open: number; ticketed: number; last: number; previous: number; no_reply: number; staff_mail_failed: number; over_limit: number }; support_hourly: number[];
-  support_week: { answerable: number; without_human: number; apart: number; capped: boolean }; support_ai: Glass['supportAi'];
+  support_week: { answerable: number; without_human: number; apart: number; capped: boolean }; support_ai: Omit<Glass['supportAi'], 'answered' | 'answeredCostUsd'> & { answered: { n: number; costUsd: number } };
   screen: { n: number; agree: number; both: number; jev_flagged: number; jevf_flagged: number; jev_failed: number; jevf_failed: number } ; screened: { screened: number; rejected: number }; screened_hourly: number[];
   api: { back: number; key: string; n: number }[]; api_recent: { slowest: number; hist: number[] | null }[]; views_day: { last: number; previous: number };
   minutes: number[]; today: Glass['sending']['today']; hourly: Glass['sending']['hourly']; queued: number; held: number;
@@ -296,7 +297,7 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy' | 'support'>): G
     support: { open: num(r.support.open), ticketed: num(r.support.ticketed), noReply: num(r.support.no_reply), staffMailFailed: num(r.support.staff_mail_failed), overLimit: num(r.support.over_limit),
       week: { answerable: num(r.support_week.answerable), withoutHuman: num(r.support_week.without_human), apart: num(r.support_week.apart), atLeast: r.support_week.capped }, hourly: r.support_hourly.map(num), day: { last: num(r.support.last), previous: num(r.support.previous) },
       configured: { chat: Boolean(config.support?.signingKey && config.support.url), email: Boolean(config.support?.addressIds?.length) } },
-    supportAi: { ...r.support_ai, daily: r.support_ai.daily.map(num), top: r.support_ai.top.map(c => ({ ...c, costUsd: num(c.costUsd), turns: num(c.turns) })) },
+    supportAi: { ...r.support_ai, answered: num(r.support_ai.answered.n), answeredCostUsd: num(r.support_ai.answered.costUsd), daily: r.support_ai.daily.map(num), top: r.support_ai.top.map(c => ({ ...c, costUsd: num(c.costUsd), turns: num(c.turns) })) },
     screening: { compared: { n: Math.min(num(r.screen.n), GLASS_CAP), atLeast: num(r.screen.n) > GLASS_CAP }, agree: num(r.screen.both) ? num(r.screen.agree) / num(r.screen.both) : null,
       jevFlagged: num(r.screen.jev_flagged), jevfFlagged: num(r.screen.jevf_flagged), jevFailed: num(r.screen.jev_failed), jevfFailed: num(r.screen.jevf_failed),
       screened: num(r.screened.screened), rejected: num(r.screened.rejected), hourly: r.screened_hourly.map(num) },

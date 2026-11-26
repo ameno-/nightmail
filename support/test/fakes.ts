@@ -785,6 +785,9 @@ export async function fakeGateway(request: Request): Promise<Response> {
   const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result'), used = calledSince(body);
   const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
   const sawImage = blocks(lastUser).some(b => b.type === 'image');
+  // An outage after the model began: one step that spends (a docs search), then the model's API refuses the next.
+  if (said.includes('Outage probe')) return answered ? Response.json({ type: 'error', error: { type: 'invalid_request_error', message: 'fake outage' } }, { status: 400 })
+    : toolUse(`toolu_outage${body?.messages?.length ?? 0}`, 'search_docs', { query: 'gmail bounces' });
   // A refusal, before any text or partway through the answer (in chat and in an email turn alike).
   if (said.includes('Refusal probe: none')) return refusal([]);
   if (said.includes('Refusal probe: partway')) return refusal(REFUSED_PARTIAL);

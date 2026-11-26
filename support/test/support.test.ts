@@ -2268,8 +2268,8 @@ describe('support Worker', () => {
     const marked = async (messageId: string) => (await fakeCalls(instance)).filter(c => c[0] === 'markDelivery' && c[2] === messageId).map(c => c[3]);
     /** The wake has queued this staff reply (its pull runs after the 202). */
     const queued = (id: string, reply: string) => eventually(async () => (await drive(id)).rows.some(r => r.id === `staff:${reply}`) || undefined);
-    async function chat() {
-      const start = await instance.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: handoff() }) });
+    async function chat(token = handoff()) {
+      const start = await instance.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: token }) });
       const started = await start.json() as any;
       const socket = await instance.dispatchFetch(started.socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
       const ws = (socket as any).webSocket; ws.accept();
@@ -2317,6 +2317,36 @@ describe('support Worker', () => {
       const caught = await eventually(async () => { const box = await inboxOf(c.id); return box?.messages.length === 4 ? box : undefined; });
       assert.deepEqual(caught.messages.map((m: any) => [m.author, m.text.slice(0, 13)]), [['customer', 'Why are Gmail'], ['agent', 'Gmail hard-bo'], ['customer', 'And Gmail bou'], ['agent', 'Gmail hard-bo']]);
       assert.equal((await drive(c.id) as any).meta.mirrorAttempts, 0);
+      c.ws.close();
+    }, 180_000);
+
+    test('failed turns: what they spent counts in the conversation’s cost, never in its turns or token budget', async () => {
+      // A person of its own: their daily conversations and turns are nobody else's.
+      const c = await chat(handoff('usr_outage'));
+      await setInbox({ id: c.id, channel: 'chat' });
+      c.say('ft0', 'Why are Gmail bounces up?');
+      assert.ok(await c.until(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text)));
+      const budget = (m: any) => m.inputTokens + m.outputTokens + (m.cacheReadTokens ?? 0) / 10;
+      const before = (await drive(c.id) as any).meta, N = 3;
+      assert.equal(before.turns, 1);
+      // Each: a docs search that spends, then the model's API fails the next step, so the customer gets no answer.
+      for (let n = 1; n <= N; n++) {
+        c.say(`ft${n}`, `Outage probe ${n}`);
+        assert.ok(await eventually(async () => c.frames.filter(f => f.type === 'message.end' && /went wrong on my side/.test(f.text)).length === n || undefined), `failed turn ${n}`);
+      }
+      const after = (await drive(c.id) as any).meta;
+      assert.deepEqual([after.turns, budget(after), after.costUsd], [before.turns, budget(before), before.costUsd], 'The turns and token budget its limits read are exactly where they were.');
+      assert.ok(after.failed?.turns === N && after.failed.inputTokens > 0 && after.failed.costUsd > 0, JSON.stringify(after.failed));
+      // The cost goes up: in D1 and in what the inbox (and so Glass) gets, the turns stay the answered ones.
+      const spent = before.costUsd + after.failed.costUsd;
+      const row = await (await db()).prepare('SELECT turns, cost_usd FROM conversations WHERE id = ?').bind(c.id).first<{ turns: number; cost_usd: number }>();
+      assert.ok(row!.turns === before.turns && Math.abs(row!.cost_usd - spent) < 1e-9, JSON.stringify(row));
+      const box = await eventually(async () => { const box = await inboxOf(c.id); return box?.state.costUsd === Math.round(spent * 10_000) / 10_000 ? box : undefined; });
+      assert.ok(box && box.state.turns === before.turns && box.state.costUsd > Math.round(before.costUsd * 10_000) / 10_000, JSON.stringify([before.costUsd, spent, (await inboxOf(c.id))?.state]));
+      // And the conversation still answers.
+      c.say('ft9', 'And Gmail bounces today?');
+      assert.ok(await eventually(async () => c.frames.filter(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text)).length === 2 || undefined));
+      assert.equal((await drive(c.id) as any).meta.turns, before.turns + 1);
       c.ws.close();
     }, 180_000);
 

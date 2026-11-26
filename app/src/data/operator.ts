@@ -77,7 +77,7 @@ export interface Glass {
   receiving: { today: number; spam: number; atLeast: boolean; hourly: number[]; day: GlassDay }
   builtin: { active: number; ready: number; revoked: number; parent: { name: string; ok: boolean; problem: string | null; trippedAt: string | null; resetAt: string | null; checkedAt: string } | null }
   support: { open: number; ticketed: number; noReply: number; staffMailFailed: number; overLimit: number; week: { answerable: number; withoutHuman: number; apart: number; atLeast: boolean }; hourly: number[]; day: GlassDay; configured: { chat: boolean; email: boolean } }
-  supportAi: { line: number; today: GlassAiPeriod; week: GlassAiPeriod; month: GlassAiPeriod; daily: number[]; answered: number; top: { id: string; channel: string | null; workspace: { id: string; name: string } | null; costUsd: number; turns: number }[] }
+  supportAi: { line: number; today: GlassAiPeriod; week: GlassAiPeriod; month: GlassAiPeriod; daily: number[]; answered: number; answeredCostUsd: number; top: { id: string; channel: string | null; workspace: { id: string; name: string } | null; costUsd: number; turns: number }[] }
   screening: { compared: GlassCount; agree: number | null; jevFlagged: number; jevfFlagged: number; jevFailed: number; jevfFailed: number; screened: number; rejected: number; hourly: number[] }
   api: { hourly: GlassRequests[]; previous: GlassRequests; p50Ms: number | null; p95Ms: number | null }
   money: { creditToday: string; creditMonth: string; creditDaily: number[]; owed: string; owing: number; usageMonth: string }
