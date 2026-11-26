@@ -992,6 +992,10 @@ test('optional Worker secrets disable only their feature on a partial rollout; c
     assert.equal(errors.filter(e=>e.feature===feature).length,1,feature+' is logged once');
   }
   assert.ok(!lines.join('').includes(token));
+  // The operator Health page lists them by their settings' names (src/config.ts disabledSettings), never a value.
+  const shown=(await import('./src/config.js')).disabledSettings();
+  assert.ok(shown.some(item=>item.feature==='stripe' && item.settings.includes('STRIPE_SECRET_KEY')));
+  assert.ok(!JSON.stringify(shown).includes(token));
   const invalidBuiltin=loadConfig({...base,PUBLIC_URL:'https://app.example.org',NIGHTMAIL_BUILTIN_DOMAIN:'example.org'});
   assert.equal(invalidBuiltin.builtinDomain,undefined,'An overlapping built-in parent uses its existing off switch.');
   const badScope=loadConfig({...base,NIGHTMAIL_BUILTIN_DOMAIN:'mail.example.org',NIGHTMAIL_BUILTIN_SEND_SCOPE:'typo',NIGHTMAIL_HYGIENE_DNS:'invalid',NIGHTMAIL_HYGIENE_LISTS:'invalid'});
@@ -3915,6 +3919,11 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const created=ok(await add(b.cookie,name),201), detail=`/v1/domains/${created.id}`, setup=detail+'/dns-setup';
           dc.after(async()=>{runtime.config.domainConnect=undefined; await local('DELETE',detail,undefined,b.cookie,select(b.org.id));});
           const getSetup=async(query='')=>ok(await local('GET',setup+query,undefined,b.cookie));
+          // An agent's key is refused the consent link (a person approves it at the provider) and told where the records are.
+          const keyed=ok(await local('POST','/v1/api-keys',{name:'DNS agent',permissions:['read','send','manage']},b.cookie,select(b.org.id)),201);
+          const keyRefusal=error(await http('GET',setup,keyed.secret,undefined,{origin},5000,origin,r=>app.fetch(r,runtime)),403,'PERMISSION_DENIED');
+          assert.ok(keyRefusal.message.startsWith(`One-click DNS setup is for an owner or admin signed in to the dashboard: it returns a link a person approves at their DNS provider. Every record to publish is in GET /v1/domains/${created.id} (dns: each record's name, type, value and status). Publish them at the DNS provider, then call POST /v1/domains/${created.id}/verify`),keyRefusal.message);
+          assert.ok(ok(await http('GET',detail,keyed.secret,undefined,{origin},5000,origin,r=>app.fetch(r,runtime))).dns.length>0,'The same key reads the records.');
           // Creation asks DNS one thing, whether anyone serves the name (its NS records); never the provider.
           assert.deepEqual(requests.map(u=>new URL(u).searchParams.get('type')),['NS'],'Domain creation does not discover the provider.'); requests.length=0;
           const expectedProvider={id:providerId,name:providerName};
@@ -10571,10 +10580,10 @@ describe('Hosted MCP OAuth and tools', () => {
           const sender = (await db.query('SELECT pending_address FROM support_conversations WHERE id = $1', [held])).rows[0].pending_address;
           assert.equal(first.subject, `Review a held answer to ${sender}`);
           const text = first.text as string, order = ['email, unverified sender', '> Why did my bounce rate jump?', 'Send the agent’s held answer, or write your own.', 'The output check held it: read it before sending.',
-            `Open the conversation: ${new URL(runtime.config.publicUrl).origin}/support/${held}`, `Ticket ${opened.ticket_id}\n`];
+            `Open the conversation: ${new URL(runtime.config.publicUrl).origin}/support/${held}`, `Ticket ${opened.ticket_id} · Reply to add a note.\n`];
           assert.deepEqual(order.map(part => text.indexOf(part) >= 0), order.map(() => true), text);
           assert.ok(order.every((part, i) => i === 0 || text.indexOf(part) > text.indexOf(order[i - 1]!)), 'Who, their words, the decision and its recommendation, the buttons, the ticket.');
-          assert.ok(!text.includes('Sent to') && !text.includes('Later changes'), 'The footer is the ticket alone.');
+          assert.ok(!text.includes('Sent to') && !text.includes('Later changes'), 'The footer is the ticket, and that a reply adds a note.');
           assert.ok(text.includes('https://nightmail.example@evil.example/x (links to evil.example)'), 'A link in their words shows where it really goes.');
           assert.ok(first.html.includes('&lt;b&gt;See https:\u200b//nightmail.\u200bexample@evil.\u200bexample/x (links to evil.\u200bexample)') && !first.html.includes('<b>See') && !/href="https:\/\/[^"]*evil/.test(first.html),
             'Their words are escaped, never a link, and nothing of theirs loads.');
@@ -10886,7 +10895,7 @@ describe('Hosted MCP OAuth and tools', () => {
           } finally { runtime.config.support!.addressIds = configured; }
         });
 
-        await t.test('14 send the held answer from the email: its link opens a confirm step showing exactly what would go, and only an operator\u2019s Approve sends it, as Send does; one a newer reply overtook is refused; one that needs a fresh reply is never proposed', async () => {
+        await t.test('14 send the held answer from the email: its link opens a confirm step showing why it was held and exactly what would go, and only an operator\u2019s Approve sends it, as Send does; one a newer reply overtook is refused; one that needs a fresh reply is never proposed', async () => {
           ok(reply(await platform.pullOutbox()));
           const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
           const due = async () => ok(reply(await platform.staffMail())).data as Json[];
@@ -10900,17 +10909,24 @@ describe('Hosted MCP OAuth and tools', () => {
             return { id, draft };
           };
           const fresh = await held('gate', 'Gmail hard-bounced **61** sends from one import.'), overtaken = await held('paused', 'Your domain is verified.'), shrunk = await held('access', 'Your Beta workspace has 3 domains.');
+          const older = await held('gate', 'Your DKIM record is fine.');
           const mails = await due(), mailOf = (id: string) => mails.find((m: Json) => m.text.includes(`/support/${id}`))!;
           const linkOf = (mail: Json) => { const found = /Send the held answer: (\S+)/.exec(mail.text); return found ? new URL(found[1]!) : null; };
           assert.equal(linkOf(mailOf(shrunk.id)), null, 'One that needs a fresh reply is never proposed.');
-          assert.ok(mailOf(shrunk.id).text.includes('Write them a fresh reply.'));
+          assert.ok(mailOf(shrunk.id).text.includes('Write them a fresh reply.') && mailOf(shrunk.id).text.includes('The agent’s held answer can’t go as written. Held because their access changed before it went.'), mailOf(shrunk.id).text);
+          const confirmOf = async (id: string) => { const l = linkOf(mailOf(id))!; return ok(await send('GET', `${inbox}/${id}/approvals/${l.searchParams.get('approval')}?token=${l.searchParams.get('token')}`, session(reader))); };
           for (const mail of mails) await sent(mail);
           const staffReplies = async (id: string) => (await db.query("SELECT text FROM support_messages WHERE conversation_id = $1 AND author = 'staff'", [id])).rows.map(r => r.text);
 
           // The link only opens the confirm step, with exactly what would go (a chat keeps the agent's Markdown).
           const link = linkOf(mailOf(fresh.id))!, path = `${inbox}/${fresh.id}/approvals/${link.searchParams.get('approval')}`, token = link.searchParams.get('token')!;
           const shown = ok(await send('GET', `${path}?token=${token}`, session(reader)));
-          assert.deepEqual([shown.kind, shown.label, shown.preview], ['send_held_answer', 'Send the held answer', { text: 'Gmail hard-bounced **61** sends from one import.', blocked: null }]);
+          // Why it was held, in our words for the stored reason, beside exactly what would go.
+          assert.deepEqual([shown.kind, shown.label, shown.reason, shown.preview], ['send_held_answer', 'Send the held answer', 'Held by the output check.', { text: 'Gmail hard-bounced **61** sends from one import.', held: 'Held by the output check', blocked: null }]);
+          assert.deepEqual((await confirmOf(overtaken.id)).preview, { text: 'Your domain is verified.', held: 'Held by a staff pause', blocked: null });
+          // An older draft with no stored reason says so, never nothing.
+          await db.query('UPDATE support_messages SET held_reason = NULL WHERE id = $1', [older.draft]);
+          assert.deepEqual((await confirmOf(older.id)).preview, { text: 'Your DKIM record is fine.', held: 'Reason not recorded', blocked: null });
           assert.deepEqual(await staffReplies(fresh.id), [], 'Opening it sent nothing.');
           error(await send('POST', path, keyed(reader), { token, decision: 'approve' }), 403, 'OPERATOR_REQUIRED');
           const wakesBefore = wakes.length, approved = ok(await send('POST', path, keyed(operator), { token, decision: 'approve' }));
@@ -10923,7 +10939,7 @@ describe('Hosted MCP OAuth and tools', () => {
           // A newer reply reached them first: the confirm step says so, and approving sends nothing.
           ok(await send('POST', `${inbox}/${overtaken.id}/replies`, keyed(operator), { text: 'Checking now.' }), 201);
           const late = linkOf(mailOf(overtaken.id))!, latePath = `${inbox}/${overtaken.id}/approvals/${late.searchParams.get('approval')}`, lateToken = late.searchParams.get('token')!;
-          assert.equal(ok(await send('GET', `${latePath}?token=${lateToken}`, session(reader))).preview.blocked, 'A newer reply already reached the customer, so this held answer can\u2019t be sent as written.');
+          assert.deepEqual(ok(await send('GET', `${latePath}?token=${lateToken}`, session(reader))).preview, { text: 'Your domain is verified.', held: 'Held by a staff pause', blocked: 'A newer reply already reached the customer, so this held answer can\u2019t be sent as written.' });
           const refused = ok(await send('POST', latePath, keyed(operator), { token: lateToken, decision: 'approve' }));
           assert.deepEqual([refused.state, refused.result.error], ['failed', 'SUPPORT_DRAFT_STALE']);
           assert.deepEqual(await staffReplies(overtaken.id), ['Checking now.']);
@@ -11238,6 +11254,144 @@ describe('Hosted MCP OAuth and tools', () => {
           const after = await week();
           assert.deepEqual({ answerable: after.answerable - before.answerable, withoutHuman: after.withoutHuman - before.withoutHuman, apart: after.apart - before.apart, noReply: after.noReply - before.noReply, atLeast: after.atLeast },
             { answerable: 9, withoutHuman: 3, apart: 2, noReply: 2, atLeast: false }, 'Answered without a human: 3 of 9; 2 counted apart; no reply sent to the customer still waiting, nor to the one whose answer was held.');
+        });
+
+        await t.test('16 a reply to a staff email: from a verified staff address (the team address or an operator\u2019s), in the staff thread ingest filed it in, it is an internal note on that conversation, by email, with only its new words; anything else replying there is ignored, and nothing in a subject or body moves it', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const due = async () => ok(reply(await platform.staffMail())).data as Json[];
+          let n = 0;
+          const sent = async (mail: Json, threadId: string, messageId: string) => { n++; return ok(reply(await platform.staffMailSent(mail.key, { threadId, messageId }))); };
+          await db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'; UPDATE support_staff_threads SET last_sent_at = last_sent_at - interval '2 hours', opened_at = opened_at - interval '2 hours'");
+          for (let i = 0; i < 30; i++) { const batch = await due(); if (!batch.length) break; for (const mail of batch) await sent(mail, mail.threadId ?? `thr_flush_${n}`, `msg_flush_${n}`); await db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'"); }
+
+          // The support address, the team address (TICKET_TO), and the operators' own addresses.
+          const box = `mbx_${hex().slice(0, 32)}`, domainName = `sup-${hex().slice(0, 10)}.example`, mdom = unique('mdom'), support = `support@${domainName}`;
+          await db.query("INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status) VALUES ($1, $2, $1, $3, $4, 'active')", [mdom, home, domainName, REGION]);
+          await db.query('INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $2, $3, $4)', [box, home, mdom, support]);
+          const team = `team-${hex().slice(0, 8)}@ops.example`, opsAddress = `olive-${hex().slice(0, 8)}@ops.example`, readerAddress = `rita-${hex().slice(0, 8)}@ops.example`;
+          await db.query("UPDATE nightmail_users SET email = $2, email_verified = true, name = 'Olive Operator' WHERE id = $1", [operator.userId, opsAddress]);
+          await db.query("UPDATE nightmail_users SET email = $2, email_verified = true WHERE id = $1", [reader.userId, readerAddress]);
+          const configured = runtime.config.support!.addressIds;
+          runtime.config.support!.addressIds = [box];
+          try {
+            // Two customers whose conversations need staff: each gets its staff email, sent in a mail thread of its own.
+            const alpha = await stranger(), beta = await stranger();
+            for (const id of [alpha, beta]) ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Why did my test email bounce?', at: at(20) }])));
+            const mails = await due(), threads: Record<string, { thread: string; out: string; ticket: string }> = {};
+            for (const id of [alpha, beta]) {
+              const mail = mails.find((m: Json) => m.text.includes(`/support/${id}`))!, thread = unique('thread'), out = `msg_${hex().slice(0, 32)}`;
+              const ticket = (await db.query('SELECT ticket_id FROM support_conversations WHERE id = $1', [id])).rows[0].ticket_id as string;
+              // The footer names the ticket and that replying adds a note.
+              assert.ok(mail.text.includes(`Ticket ${ticket} · Reply to add a note.\n`) && mail.html.includes(`Ticket ${ticket} · Reply to add a note.`), mail.text);
+              await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [thread, home]);
+              await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, envelope_to, verdicts, headers, "to", sent_at, message_id)
+                VALUES ($1, $2, 'outbound', $3, $4, $5, $6, '[]', '{}', '[]', $7, now(), $8)`, [out, home, thread, REGION, mail.subject, support, JSON.stringify([{ name: null, address: team }]), `${out}@${domainName}`]);
+              await sent(mail, thread, out);
+              threads[id] = { thread, out, ticket };
+            }
+            for (const mail of await due()) await sent(mail, mail.threadId ?? `thr_flush_${n}`, `msg_flush_${n}`);
+            /** An email to the support address, as ingest stores one: in a thread (a staff thread when its In-Reply-To led there), with its From, DMARC verdict and ingest's author check. */
+            const inbound = async (from: string, text: string, o: { thread?: string; dmarc?: string; authorVerified?: boolean; replyTo?: string; subject?: string } = {}) => {
+              const id = `msg_${hex().slice(0, 32)}`, domain = from.split('@')[1]!, thread = o.thread ?? threads[alpha]!.thread;
+              const headers = [{ name: 'From', value: `"Synthetic" <${from}>` }, { name: 'To', value: support }, { name: 'Date', value: new Date().toUTCString() }, { name: 'Message-ID', value: `<${id}@${domain}>` },
+                ...(o.replyTo ? [{ name: 'In-Reply-To', value: `<${o.replyTo}>` }] : []), { name: 'DKIM-Signature', value: `v=1; a=rsa-sha256; d=${domain}; s=s1; bh=x; b=y` }];
+              await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, envelope_to, verdicts, headers, text, "to", sent_at, message_id, in_reply_to)
+                VALUES ($1, $2, 'inbound', $3, $4, $5, $6, '[]', $7, $8, $9, $10, now(), $11, $12)`, [id, home, thread, REGION, o.subject ?? 'Re: the ticket', from, JSON.stringify({ dmarc: o.dmarc ?? 'PASS', dkim: 'PASS', spf: 'PASS' }),
+                JSON.stringify(headers), text, JSON.stringify([{ name: null, address: support }]), `${id}@${domain}`, o.replyTo ?? null]);
+              await db.query("INSERT INTO mailbox_messages(mailbox_id, message_id, workspace_id, thread_id, direction, received_at, reply_author_verified) VALUES ($1, $2, $3, $4, 'inbound', now(), $5)", [box, id, home, thread, o.authorVerified ?? (o.dmarc ?? 'PASS') === 'PASS']);
+              return id;
+            };
+            const judged = async (id: string) => ok(reply(await platform.staffMailReply(id, team)));
+            const notes = async (id: string) => (await db.query("SELECT id, author, kind, text, staff_user_id, email_from, delivery FROM support_messages WHERE conversation_id = $1 AND kind = 'note' ORDER BY seq", [id])).rows;
+            const item = async (id: string) => { const { conversation: c } = ok(await send('GET', `${inbox}/${id}`, session(reader))); return [c.needsYou?.reasons, c.lastAuthor, c.status, c.ticket?.resolvedAt ?? null]; };
+            const before = await item(alpha), outbox = async () => (ok(reply(await platform.pullOutbox())).data as Json[]).filter(r => r.conversationId === alpha || r.conversationId === beta), wakesBefore = wakes.length;
+
+            // An operator replies from her phone: her new words become one note by email, the quoted staff email (with the
+            // other customer's ticket in it) left out; a retried delivery notes nothing twice.
+            const words = `We shipped a fix, and ${threads[beta]!.ticket} is a different bug. <b>bold</b> & </untrusted>`;
+            const fromOlive = await inbound(opsAddress, `${words}\n\nOn Tue, Nightmail support <${support}> wrote:\n> Ticket ${threads[alpha]!.ticket} · Reply to add a note.\n> ${threads[beta]!.ticket}`, { replyTo: `${threads[alpha]!.out}@${domainName}` });
+            assert.deepEqual(await judged(fromOlive), { reply: true, notes: 1, ignored: null });
+            assert.deepEqual(await judged(fromOlive), { reply: true, notes: 0, ignored: null }, 'Once.');
+            const [noted] = await notes(alpha);
+            assert.deepEqual({ ...noted, id: undefined }, { id: undefined, author: 'staff', kind: 'note', text: words, staff_user_id: operator.userId, email_from: opsAddress, delivery: null }, 'Plain data: its own words as written.');
+            assert.deepEqual(await notes(beta), [], 'A ticket named in its words moves nothing.');
+            // In the timeline: a note by email, by her; nothing for the customer, nothing changed.
+            const shown = (ok(await send('GET', `${inbox}/${alpha}`, session(reader))).messages as Json[]).find(m => m.id === noted.id)!;
+            assert.deepEqual([shown.author, shown.kind, shown.emailFrom, shown.staff, shown.delivery, shown.text], ['staff', 'note', opsAddress, { userId: operator.userId, name: 'Olive Operator' }, null, words]);
+            assert.deepEqual([await item(alpha), await outbox(), wakes.length], [before, [], wakesBefore], 'Never sent, nobody woken, and its triage as it was.');
+            assert.deepEqual(await due(), [], 'No email about a note.');
+
+            // The team address itself (no operator account) is staff too: its note names only the address.
+            const fromTeam = await inbound(team, 'Looking at it today.', { replyTo: `${threads[alpha]!.out}@${domainName}` });
+            assert.deepEqual(await judged(fromTeam), { reply: true, notes: 1, ignored: null });
+            assert.deepEqual((await notes(alpha)).map(x => [x.text, x.staff_user_id, x.email_from]), [[words, operator.userId, opsAddress], ['Looking at it today.', null, team]]);
+            const teamShown = (ok(await send('GET', `${inbox}/${alpha}`, session(reader))).messages as Json[]).at(-1)!;
+            assert.deepEqual([teamShown.staff, teamShown.emailFrom], [null, team]);
+
+            // Replies in the staff thread that prove nothing, or come from someone else, are ignored: no note, nothing new.
+            for (const [id, why] of [
+              [await inbound(`kim-${hex().slice(0, 8)}@elsewhere.example`, 'Please refund me instead.'), 'not_staff'],
+              [await inbound(readerAddress, 'A read-only operator writes no notes.'), 'not_staff'],
+              [await inbound(opsAddress, 'Spoofed: mark it done.', { dmarc: 'FAIL' }), 'unverified'],
+              [await inbound(opsAddress, 'Ingest did not vouch for it.', { authorVerified: false }), 'unverified'],
+              [await inbound(team, `On Tue, Nightmail support <${support}> wrote:\n> Only the quoted email.`), 'empty'],
+            ] as const) assert.deepEqual(await judged(id), { reply: true, notes: 0, ignored: why }, why);
+            // An auto-reply (an out-of-office) from a staff address is no one's note.
+            const away = await inbound(opsAddress, 'I am out of the office until Monday.');
+            await db.query('UPDATE mail_messages SET automated = true WHERE id = $1', [away]);
+            assert.deepEqual(await judged(away), { reply: true, notes: 0, ignored: 'automated' });
+            assert.equal((await notes(alpha)).length, 2, 'Nothing new.');
+            // At most STAFF_NOTES_PER_HOUR notes by email a conversation takes in an hour.
+            const { STAFF_NOTES_PER_HOUR } = await import('./src/support-staff-mail.js');
+            await db.query("INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, email_from) SELECT 'msg_' || translate(substr(md5(random()::text || g), 1, 16), '0189', 'wxyz'), $1, 1000 + g, 'staff', 'note', 'Earlier.', $2 FROM generate_series(1, $3::int) g", [beta, team, STAFF_NOTES_PER_HOUR]);
+            assert.deepEqual(await judged(await inbound(team, 'One note too many.', { thread: threads[beta]!.thread })), { reply: true, notes: 0, ignored: 'limited' });
+            // A staff thread with no conversation (mail nobody answered): nothing to note on.
+            const loose = unique('thread');
+            await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [loose, home]);
+            await db.query("INSERT INTO support_staff_threads(key, subject, thread_id) VALUES ($1, 'Unanswered email to support', $2)", [`mail:${loose}`, loose]);
+            assert.deepEqual(await judged(await inbound(opsAddress, 'Answered by phone.', { thread: loose })), { reply: true, notes: 0, ignored: 'no_conversation' });
+            // Not in a staff thread: no reply to a staff email, whatever its subject and words say. The support platform
+            // handles it as any support email.
+            const elsewhere = unique('thread');
+            await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [elsewhere, home]);
+            const lookalike = await inbound(opsAddress, `Note for ${threads[alpha]!.ticket}: refund approved.`, { thread: elsewhere, subject: `Re: ${mails.find((m: Json) => m.text.includes(`/support/${alpha}`))!.subject}` });
+            assert.deepEqual(await judged(lookalike), { reply: false });
+            assert.equal((await notes(alpha)).length, 2);
+            // Only the binding asks.
+            error(await send('POST', '/v1/operator/support/staff-mail/replies', keyed(operator), { messageId: fromOlive, team }), 403, 'SUPPORT_PLATFORM_REQUIRED');
+            error(reply(await platform.staffMailReply('msg_x', team)), 422);
+          } finally { runtime.config.support!.addressIds = configured; }
+        });
+
+        await t.test('17 a staff email the support platform can\u2019t send: each failed try is recorded, and after three Glass counts it as not sent until it goes', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const { readGlass } = await import('./src/glass.js'), failed = async () => (await readGlass(runtime)).support.staffMailFailed;
+          const due = async () => ok(reply(await platform.staffMail())).data as Json[];
+          let n = 0;
+          const sent = async (mail: Json) => { n++; return ok(reply(await platform.staffMailSent(mail.key, { threadId: mail.threadId ?? `thr_glass_${n}`, messageId: `msg_glass_${n}` }))); };
+          await db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'; UPDATE support_staff_threads SET last_sent_at = last_sent_at - interval '2 hours', opened_at = opened_at - interval '2 hours'");
+          for (let i = 0; i < 30; i++) { const batch = await due(); if (!batch.length) break; for (const mail of batch) await sent(mail); await db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'"); }
+          const before = await failed(), waiting = await stranger();
+          ok(reply(await platform.mirrorMessages(waiting, [{ id: msg(), author: 'customer', text: 'Hello?', at: new Date(Date.now() - 20 * 60_000).toISOString() }])));
+          const [mail] = await due();
+          assert.ok(mail?.text.includes(`/support/${waiting}`));
+          for (const tries of [1, 2]) {
+            assert.deepEqual(ok(reply(await platform.staffMailFailed(mail.key, { code: 'HTTP_503' }))), { key: mail.key, attempts: tries, failed: false, sent: false });
+            assert.equal(await failed(), before, 'Not yet: it is tried again on the next sweep.');
+          }
+          assert.deepEqual(ok(reply(await platform.staffMailFailed(mail.key, { code: 'RATE_LIMITED' }))), { key: mail.key, attempts: 3, failed: true, sent: false });
+          assert.equal(await failed(), before + 1, 'Three failed tries: not sent, on Glass.');
+          assert.deepEqual((await db.query('SELECT attempts, last_error, failed_at IS NOT NULL AS failed FROM support_staff_emails WHERE key = $1', [mail.key])).rows[0], { attempts: 3, last_error: 'RATE_LIMITED', failed: true });
+          assert.ok((await due()).some((m: Json) => m.key === mail.key), 'Still offered to the support platform, every sweep.');
+          error(reply(await platform.staffMailFailed(mail.key, { code: 'not a code' } as never)), 422);
+          error(reply(await platform.staffMailFailed(`staff-${'0'.repeat(24)}-1`, { code: 'HTTP_503' })), 404);
+          error(await send('POST', `/v1/operator/support/staff-mail/${mail.key}/failed`, keyed(operator), { code: 'HTTP_503' }), 403, 'SUPPORT_PLATFORM_REQUIRED');
+          // It goes: off Glass, and a late failure report changes nothing.
+          await sent(mail);
+          assert.equal(await failed(), before, 'Sent: off Glass.');
+          assert.deepEqual(ok(reply(await platform.staffMailFailed(mail.key, { code: 'HTTP_503' }))), { key: mail.key, attempts: 3, failed: false, sent: true });
+          assert.equal(await failed(), before);
         });
       } finally { globalThis.fetch = previous; }
     });
@@ -22925,9 +23079,9 @@ describe('List hygiene', () => {
       assert.deepEqual(pick((await stats())[dead]), { sent: 4, delivered: 1, hard: 3, soft: 0, opened: 0, since: 1, classes: { user_unknown: 3 } });
     });
   });
-  test('list risk: a marketing campaign\'s launch records the measure of its list on its review (flagged contacts, contacts at domains this workspace\'s mail failed at, never mailed), banded only with the private lines, and the send review\'s verdict is unchanged', async t => {
+  test('list risk: a marketing campaign\'s launch records the measure of its list on its review (flagged contacts, contacts at domains this workspace\'s mail failed at, never mailed) and what the review said, banded only with the private lines, and the send review\'s verdict is unchanged; staff operators read it in Operator → Lists', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
-      const { bandListRisk, listRiskJob } = await import('./src/list-risk.js');
+      const { bandListRisk, bandListRiskBefore, listRiskJob } = await import('./src/list-risk.js');
       // The job the launch queued (the dispatcher's map names it: scripts/check-premerge.ts checks that).
       const runListRisk = async () => { for (const job of (await jobs('audience.listRisk')).filter(j => j.status === 'pending')) { await listRiskJob(runtime, job.payload, { id: job.id, attempts: 1, workspaceId: job.workspace_id } as never); await db.query("UPDATE jobs SET status = 'done' WHERE id = $1", [job.id]); } };
       const wid = runtime.config.workspaceId, tag = unique('lr').toLowerCase().replace(/[^a-z0-9]/g, ''), dead = tag + '-dead.example';
@@ -22953,16 +23107,67 @@ describe('List hygiene', () => {
         // FLAGGED_SOURCE over its high line; NEVER_MAILED over its high line counts only as elevated.
         assert.equal(risk.band, 'high');
         assert.deepEqual(risk.factors, [{ code: 'FLAGGED_SOURCE', level: 'high' }, { code: 'DEAD_DOMAINS', level: 'elevated' }, { code: 'NEVER_MAILED', level: 'elevated' }]);
+        // Before its first send every contact is unproven and new to it, so the first rule (kept beside it) agrees.
+        assert.deepEqual([risk.version, risk.counts.flaggedUnproven, risk.previous], [2, 3, { flaggedSource: 0.15, band: 'high', factors: risk.factors }]);
         // Recorded once: the review keeps the measure as the list stood at launch.
         const reviewId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id = $1', [campaign.id])).rows[0].review_id;
         await db.query("INSERT INTO jobs (id, workspace_id, type, payload) VALUES ($1, $2, 'audience.listRisk', $3)", [unique('job'), wid, JSON.stringify({ workspaceId: wid, campaignId: campaign.id, reviewId, listId: list.id })]);
         await runListRisk();
         assert.deepEqual((await db.query('SELECT r.list_risk FROM sending_campaign_reviews r JOIN sending_campaigns c ON c.review_id = r.id WHERE c.id = $1', [campaign.id])).rows[0].list_risk.at, risk.at);
+        // After a send: the flagged contacts it skipped are never proven, but they no longer count; a flagged contact
+        // that joined since does. The rest were mailed and delivered to.
+        await db.query("UPDATE sending_campaigns SET simulated = false, state = 'sending', prepared = total, expanded = total WHERE id = $1", [campaign.id]);
+        // The fixture is one transaction, so now() doesn't move: the first members go back two minutes and the launch one, for
+        // the import below to come after both.
+        await db.query("UPDATE audience_list_members SET created_at = created_at - interval '2 minutes' WHERE workspace_id = $1 AND list_id = $2", [wid, list.id]);
+        await db.query("UPDATE sending_campaign_reviews SET created_at = created_at - interval '1 minute' WHERE id = $1", [reviewId]);
+        await db.query("UPDATE audience_contacts SET mailed_count = 1, delivered_count = 1 WHERE workspace_id = $1 AND email LIKE 'fine%-' || $2 || '@example.net'", [wid, tag]);
+        const more = ok(await local('POST', '/v1/contact-imports', { csv: ['Email', 'temp8-' + tag + '@fexpost.com'].join('\n'), listId: list.id, mapping: { email: 'Email' } }), 201);
+        ok(await local('POST', '/v1/contact-imports/' + more.id + '/commit', { consent: { status: 'subscribed', evidence: 'Synthetic opt-in.' } }));
+        const again = ok(await local('POST', '/v1/campaigns', { name: 'Risk again', from: 'sender@example.com', subject: 'News', html: '<p>Hello again.</p>', audience: { listId: list.id } }), 201);
+        ok(await local('POST', '/v1/campaigns/' + again.id + '/send', { revision: again.revision }), 202);
+        await runListRisk();
+        const second = (await db.query('SELECT r.list_risk FROM sending_campaign_reviews r JOIN sending_campaigns c ON c.review_id = r.id WHERE c.id = $1', [again.id])).rows[0].list_risk;
+        assert.deepEqual([second.sampled, second.counts.flagged, second.counts.flaggedUnproven, second.values.FLAGGED_SOURCE, second.previous.flaggedSource], [21, 4, 1, 1 / 21, 4 / 21]);
+        // The two rules disagree here: by the first, four flagged contacts were high; now the list is elevated by its dead domain alone.
+        assert.deepEqual([second.band, second.factors, second.previous.band], ['elevated', [{ code: 'DEAD_DOMAINS', level: 'elevated' }], 'high']);
+        // Operator → Lists: staff operators read the measure beside what the review said and what happened; nobody else.
+        const hosted = runtime.config.multiTenant;
+        runtime.config.multiTenant = true;
+        try {
+          error(await local('GET', '/v1/operator/lists'), 403, 'OPERATOR_REQUIRED');
+          const { setOperator } = await import('./scripts/set-operator.js');
+          await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic list reviewer']);
+          await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id IN (SELECT user_id FROM workspace_members WHERE workspace_id=$1)', [wid]);
+          // Simulated sends are left out of the list: this one stands in for a real one.
+          await db.query('UPDATE sending_campaigns SET simulated=false WHERE id=$1', [campaign.id]);
+          const row = ok(await local('GET', '/v1/operator/lists?limit=50')).data.find((r: Json) => r.campaignId === campaign.id);
+          assert.deepEqual([row.measure.band, row.measure.values.FLAGGED_SOURCE, row.measure.counts.deadDomains, row.review.verdict, row.outcome.probe, row.outcome.failures.read],
+            ['high', 0.15, 5, launched.readiness.verdict, 'none', 0]);
+          assert.deepEqual(row.review.reasons, (launched.readiness.findings ?? launched.readiness.reasons).map((r: Json) => r.code));
+          assert.ok(!JSON.stringify(row).includes('@'), 'No address in a row.');
+          // The second launch's row carries both rules' bands, where they disagree.
+          await db.query('UPDATE sending_campaigns SET simulated=false WHERE id=$1', [again.id]);
+          const next = ok(await local('GET', '/v1/operator/lists?limit=50')).data.find((r: Json) => r.campaignId === again.id);
+          assert.deepEqual([next.measure.band, next.measure.previous], ['elevated', { flaggedSource: 4 / 21, band: 'high', factors: [{ code: 'FLAGGED_SOURCE', level: 'high' }, { code: 'DEAD_DOMAINS', level: 'elevated' }] }]);
+          await setOperator(db, [AUTH_SUBJECT, 'off', '--reason', 'Synthetic list reviewer done']);
+          await db.query('UPDATE nightmail_sessions SET staff=false WHERE user_id IN (SELECT user_id FROM workspace_members WHERE workspace_id=$1)', [wid]);
+        } finally { runtime.config.multiTenant = hosted; }
       } finally { runtime.config.listRisk = before; }
       // Without the private lines: values, no band.
       assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.5 }, null), { band: null, factors: [] });
       assert.deepEqual(bandListRisk({ NEVER_MAILED: 1 }, { NEVER_MAILED: { elevated: 0.7, high: 0.9 } }), { band: 'elevated', factors: [{ code: 'NEVER_MAILED', level: 'elevated' }] });
       assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.001 }, { FLAGGED_SOURCE: { elevated: 0.05 } }), { band: 'low', factors: [] });
+      const lines = { FLAGGED_SOURCE: { elevated: 0.05, high: 0.12 }, DEAD_DOMAINS: { elevated: 0.2, high: 0.4 }, NEVER_MAILED: { elevated: 0.7 } };
+      // A never-mailed list is listed, but never the second of two elevated factors (the first rule made that high).
+      assert.deepEqual(bandListRisk({ DEAD_DOMAINS: 0.3, NEVER_MAILED: 1 }, lines), { band: 'elevated', factors: [{ code: 'DEAD_DOMAINS', level: 'elevated' }, { code: 'NEVER_MAILED', level: 'elevated' }] });
+      assert.equal(bandListRiskBefore({ DEAD_DOMAINS: 0.3, NEVER_MAILED: 1 }, lines).band, 'high');
+      // On a sample, a factor counts toward high only past its line by more than the sample's error.
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.13 }, lines, { FLAGGED_SOURCE: 0.018 }), { band: 'elevated', factors: [{ code: 'FLAGGED_SOURCE', level: 'elevated' }] });
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.15 }, lines, { FLAGGED_SOURCE: 0.018 }), { band: 'high', factors: [{ code: 'FLAGGED_SOURCE', level: 'high' }] });
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.06, DEAD_DOMAINS: 0.25 }, lines, { FLAGGED_SOURCE: 0.018 }).band, 'elevated');
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.08, DEAD_DOMAINS: 0.25 }, lines, { FLAGGED_SOURCE: 0.018 }).band, 'high');
+      assert.equal(bandListRiskBefore({ FLAGGED_SOURCE: 0.13 }, lines).band, 'high');
     });
   });
 });
@@ -27380,6 +27585,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const race = (await hosts()).find(h => h.name === `race.${name}`)!;
         assert.deepEqual([race.status, race.issue?.code], ['pending', 'host_taken']);
         assert.equal((await deliver(`x@race.${name}`)).routed, 0);
+      });
+
+      await t.test('a subdomain on a domain that doesn\u2019t receive yet is refused with the call that turns receiving on', async () => {
+        const d = await claim(`${unique('rx-nosub')}.example`);
+        const refused = error(await local('POST', `/v1/inbound/domains/${d.id}/subdomains`, { name: 'acme' }), 409, 'MAILBOX_DOMAIN_NOT_ENABLED');
+        assert.equal(refused.message, `${d.name} doesn\u2019t receive mail yet. Add a receiving host with POST /v1/inbound/domains/${d.id}/hosts and {"name":"<subdomain>"} (or turn receiving on with POST /v1/inbound/domains/${d.id}/enable), then add subdomains.`);
       });
 
       // What a rollback runs on what this release writes. The MX check, receipt router and BYO reconciler are the previous
@@ -33628,6 +33839,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       };
       await run('campaign.run'); await run('campaign.run');
       assert.equal((await view()).delivery.expanded, 100);
+      // As a plan of daily batches, so the healthy-day check applies to it too.
+      await db.query('UPDATE sending_campaigns SET pace_plan = ARRAY[100, 300] WHERE id = $1', [campaign.id]);
       // The first day's mail to the dead domain bounced for good, the rest was delivered: the rest there is skipped.
       const sentTo = async (domain: string) => (await db.query("SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id = $1 AND to_addresses->>0 LIKE '%@' || $2", [campaign.id, domain])).rows[0].n;
       await db.query("UPDATE sending_emails SET status = CASE WHEN to_addresses->>0 LIKE '%@' || $2 THEN 'bounced' ELSE 'delivered' END, provider_id = 'sim_' || id WHERE campaign_id = $1", [campaign.id, dead]);
@@ -33638,9 +33851,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await db.query('SELECT domain, resolved, bounced FROM campaign_stopped_domains WHERE campaign_id = $1', [campaign.id])).rows, [{ domain: dead, resolved: deadFirst, bounced: deadFirst }]);
       const later = await view();
       assert.deepEqual([await sentTo(dead), later.delivery.canceled > 0, later.delivery.expanded > 100], [deadFirst, true, true]);
+      // Its sender sees the domain it stopped, and that the plan repeats its first batch because of the bounces.
+      // The domain and when, never the counts behind it (they'd show the private line).
+      assert.deepEqual(later.delivery.stoppedDomains.map((item: Json) => [Object.keys(item).sort().join(), item.domain, typeof item.stoppedAt]), [['domain,stoppedAt', dead, 'string']]);
+      assert.deepEqual([later.delivery.pacing.held.batch, later.delivery.pacing.held.why, typeof later.delivery.pacing.held.toGrow], [1, ['bounces'], 'string']);
       // A plan's day: unhealthy (all bounced), so the same batch again; a clean one opens the next.
       const since = new Date(Date.now() - 3 * 86_400_000).toISOString();
-      assert.equal(await planWindowHealthy(runtime.db, ws, campaign.id, since), false);
+      assert.equal((await planWindowHealthy(runtime.db, ws, campaign.id, since)).healthy, false);
       // Replies naming a blocklist: paused, one operator alert, and no resume while they keep arriving.
       await db.query("UPDATE sending_emails SET status = 'delivered' WHERE campaign_id = $1 AND to_addresses->>0 LIKE '%@example.net'", [campaign.id]);
       const { rows: listed } = await db.query("SELECT id FROM sending_emails WHERE campaign_id = $1 AND to_addresses->>0 LIKE '%@example.net' ORDER BY id LIMIT 3", [campaign.id]);
@@ -33668,7 +33885,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // With the replies gone and the bounces cleared, a day counts as healthy again.
       await db.query("DELETE FROM sending_email_events WHERE workspace_id = $1 AND type = 'non_permanent_bounce'", [ws]);
       await db.query("UPDATE sending_emails SET status = 'delivered' WHERE campaign_id = $1", [campaign.id]);
-      assert.equal(await planWindowHealthy(runtime.db, ws, campaign.id, since), true);
+      assert.equal((await planWindowHealthy(runtime.db, ws, campaign.id, since)).healthy, true);
+      // The next day opens the next batch, and the plan is no longer shown as held.
+      await nextWindow();
+      assert.deepEqual([(await view()).delivery.pacing.held, (await view()).delivery.pacing.batch], [null, 2]);
     });
   });
   test('campaign list probe follows standing: in good standing, recipients an earlier campaign delivered to with clean, mature feedback go out without the probe; swapped or unresolved recipients, a growing or capped sender, and a sender that falls below mid-campaign are probed', async t => {
@@ -37661,7 +37881,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   // Deferred capture late failures (L87 item 3): EMPTY_AUDIENCE and invalid recipient fail loudly, leaving draft editable.
   test('fast campaign launch: deferred >5k launch fails loudly on late EMPTY_AUDIENCE and leaves draft editable', async t => {
-    const { g, draft, launch, audience, call } = await launchFixture(t);
+    const { g, w, draft, launch, audience, call } = await launchFixture(t);
     const listId = await audience(5_100, 10, 'latefail');
     const c = await draft('latefail', listId);
     // Preview caches audience_estimate on sending_campaigns.
@@ -37672,16 +37892,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(res.status, 202, JSON.stringify(res.body));
     assert.equal(res.body.queued, 510);
     // Everyone unsubscribes after the 202 before the background capture runs.
-    const { rows: [cRow] } = await g.query('SELECT workspace_id, review_id FROM sending_campaigns WHERE id=$1', [c.id]);
-    await g.query("UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE workspace_id=$1", [cRow.workspace_id]);
+    await g.query("UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE workspace_id=$1", [w]);
     const { nodeRuntime } = await import('./src/adapters/node.js');
     const { jobHandlers } = await import('./src/sending.js');
     const { processJobs } = await import('./src/jobs.js');
-    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+    // A shared queue drain can finish without claiming this campaign. Give the worker only the job the launch queued.
+    const schema = 'late_empty_' + randomUUID().replaceAll('-', ''), url = new URL(FIXTURE_DATABASE_URL!);
+    await g.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.jobs (LIKE public.jobs INCLUDING ALL)`);
+    cleanup(t, async () => { await g.query(`DROP SCHEMA ${schema} CASCADE`); });
+    const queued = await g.query(`INSERT INTO ${schema}.jobs SELECT * FROM public.jobs
+      WHERE workspace_id=$1 AND id=$2 AND type='campaign.run' AND status='pending' AND available_at<=now()`, [w, 'campaign.run:' + c.id]);
+    assert.equal(queued.rowCount, 1, 'The launch must have queued its campaign.run for immediate processing.');
+    url.searchParams.set('options', `-c search_path=${schema},public`);
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: url.href });
     cleanup(t, close);
     Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
-    await g.query("UPDATE jobs SET available_at = clock_timestamp() WHERE workspace_id=$1 AND id=$2", [cRow.workspace_id, 'campaign.run:' + c.id]);
-    await processJobs(runtime, jobHandlers, 2, 1, 15_000);
+    assert.equal(await processJobs(runtime, jobHandlers, 1, 1, 15_000), 1);
     const view = await call('GET', `/v1/campaigns/${c.id}`);
     assert.equal(view.status, 200);
     assert.equal(view.body.state, 'failed');

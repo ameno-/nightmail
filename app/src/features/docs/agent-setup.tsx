@@ -66,7 +66,7 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
   const to = email ?? (membersOnly ? `the email address I sign in to ${productName} with (ask me which)` : 'an address I control (ask me which)')
   lines.push(
     // A new workspace's built-in domain sends from its first moment: a send while it finishes setting up waits for it.
-    `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}${domain.builtIn ? 'built-in: it needs no DNS and sends now; a send in its first seconds waits while it finishes setting up' : `status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}`}).`,
+    `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}${domain.builtIn ? 'built-in: it needs no DNS and sends now; a send in its first seconds waits while it finishes setting up' : `status: ${verified ? 'verified' : `pending; its DNS records are in GET /v1/domains/${domain.id} (dns: each record's name, type, value and status): publish them at the DNS provider (or ask me to), then POST /v1/domains/${domain.id}/verify checks them now. They also verify automatically, and sending works once verified. One-click DNS setup is mine to do in the dashboard`}`}}).`,
     `- Send a first email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. Give it a short, real subject and plain text: "test" or placeholder words in either send it to spam. 202 means queued, not delivered.`,
   )
   // The built-in domain's limits up front, so the agent doesn't find them one refused send at a time.

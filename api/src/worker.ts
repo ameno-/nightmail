@@ -314,6 +314,8 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed') { return (await this.platform()).markDelivery(conversationId, messageId, status); }
   async staffMail() { return (await this.platform()).staffMail(); }
   async staffMailSent(key: string, sent: { threadId: string; messageId: string }) { return (await this.platform()).staffMailSent(key, sent); }
+  async staffMailFailed(key: string, failed: { code: string }) { return (await this.platform()).staffMailFailed(key, failed); }
+  async staffMailReply(messageId: string, team: string | null) { return (await this.platform()).staffMailReply(messageId, team); }
   async feedbackDue(limit: number) { return (await this.platform()).feedbackDue(limit); }
   async feedbackRequest(conversationId: string, requestId: string) { return (await this.platform()).feedbackRequest(conversationId, requestId); }
   async feedbackRelated(conversationId: string) { return (await this.platform()).feedbackRelated(conversationId); }
