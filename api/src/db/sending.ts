@@ -123,7 +123,7 @@ export const campaigns = pgTable('sending_campaigns', {
   pacePerDay: integer('pace_per_day'), autoPause: boolean('auto_pause').notNull().default(true), rateShare: doublePrecision('rate_share'),
   windowStartedAt: time('window_started_at'), windowExpanded: integer('window_expanded').notNull().default(0),
   pausedAt: time('paused_at'), pauseReason: jsonb('pause_reason').$type<CampaignFailure>(), healthCheckedAt: time('health_checked_at'),
-  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp'>(), waitingUntil: time('waiting_until'),
+  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp' | 'link_record' | 'link_budget' | 'link_listing'>(), waitingUntil: time('waiting_until'),
   // Hosted list probe (migration 231): when release may continue after the probe, when it was cleared, and how many quarantines this launch had.
   probeWaitUntil: time('probe_wait_until'), probeClearedAt: time('probe_cleared_at'), quarantines: smallint('quarantines').notNull().default(0),
   // When a sender in good standing skipped the probe (migration 357): kept apart from a probe that went out and passed.
@@ -144,6 +144,10 @@ export const campaigns = pgTable('sending_campaigns', {
   // in (from 0), the largest daily cap that counts as a ramp when one was required (null: none was), and the consent
   // source its sender confirmed.
   pacePlan: integer('pace_plan').array(), windowIndex: integer('window_index').notNull().default(0), rampRequiredCap: integer('ramp_required_cap'),
+  // A plan's first small batch and the wait after it, inside the first day's batch (migration 546).
+  paceFirstBatch: integer('pace_first_batch'), paceFirstWaitMinutes: integer('pace_first_wait_minutes'),
+  // A plan held on the same batch after a day that wasn't healthy (migration 566; src/send-guards.ts): null while it grows.
+  planHeld: jsonb('plan_held').$type<{ since: string; batch: number; why: ('bounces' | 'complaints' | 'blocklist')[] }>(),
   consent: jsonb('consent').$type<{ source: string; confirmedBy: string | null; confirmedAt: string }>(),
 }, t => [index('sending_campaigns_page').on(t.workspaceId, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.archivedAt, t.createdAt.desc(), t.id.desc()),
   index('sending_campaigns_list_page').on(t.workspaceId, t.listId, t.createdAt.desc(), t.id.desc()).where(sql`${t.listId} IS NOT NULL`)]);

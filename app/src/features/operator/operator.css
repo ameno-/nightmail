@@ -126,11 +126,14 @@ a.op-cluster-rail__row:focus-visible { background: var(--color-hover); text-deco
 .glass-main { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; container-type: inline-size; }
 .glass-section { display: flex; flex-direction: column; min-width: 0; }
 
-/* Tiles: four to a row, five from 1100 px of column, two on a phone. 120px: the head, a 28px figure, its hint and a 24px foot. */
+/* Tiles: four to a row on desktop (2×4 for the eight live tiles), two on a phone. 120px: the head, a 28px figure, its hint and a 24px foot. */
 .glass-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-8); }
-@container (min-width: 1100px) { .glass-tiles { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 @container (max-width: 559px) { .glass-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .glass-tile__head { letter-spacing: 0; } .glass-tile__figure { font-size: var(--text-figure); } }
 .glass-tile { display: flex; flex-direction: column; min-width: 0; height: 120px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-well); }
+.glass-tile--link { color: inherit; text-decoration: none; }
+@media (hover: hover) and (pointer: fine) { .glass-tile--link:hover { background: var(--color-hover); } }
+.glass-tile--link:focus-visible { background: var(--color-hover); }
+.glass-tile__arrow { flex: none; margin-left: auto; color: var(--color-faint); }
 .glass-tile__head { display: flex; align-items: center; gap: var(--space-8); height: 14px; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 14px; letter-spacing: var(--tracking-label); text-transform: uppercase; white-space: nowrap; }
 .glass-tile__label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* The change is laid out from the head's right edge and pulled back by its own width (a transform), so it never moves a box. */
@@ -143,6 +146,10 @@ a.op-cluster-rail__row:focus-visible { background: var(--color-hover); text-deco
 .glass-tile__foot { display: flex; align-items: flex-end; height: 22px; margin-top: auto; }
 .glass-tile__foot > .ui-spark { width: 100%; height: 20px; }
 .glass-tile__foot > .ui-meter { width: 100%; margin-bottom: var(--space-4); }
+/* A note reads whole: its words are short enough for a phone's tile at two-digit counts (no ellipsis). */
+.glass-tile__note { min-width: 0; overflow: hidden; color: var(--color-faint); font-size: var(--text-xs); line-height: 16px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.glass-tile__note [class*='ui-tone--'] { color: var(--tone-ink); }
+
 /* Parts of a whole (senders by standing step): one 4px bar, a segment per part in its tone, 2px apart. */
 .glass-parts { display: flex; gap: var(--space-2); width: 100%; height: 4px; margin-bottom: var(--space-4); }
 .glass-parts > i { flex: 0 1 0; min-width: 0; border-radius: var(--radius-2xs); background: var(--tone-marker, var(--color-faint)); }

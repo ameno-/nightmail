@@ -27,7 +27,7 @@ import { registerLogs } from './logs.js';
 import { registerInboundOverview } from './inbound-overview.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
 import { legacyAddressOperations, productName } from './brand.js';
-import { receivingIssueSchema } from './operations.js';
+import { followMxJob, receivingIssueSchema } from './operations.js';
 import { addHost, enableHosted, listHosts, receiveForAddress, removeHost, updateHost } from './receiving-hosts.js';
 
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -198,7 +198,9 @@ async function subdomainViews(runtime: Runtime, domain: typeof domains.$inferSel
 async function receivingParent(c: Ctx, domainId: string) {
   const domain = await operationDomain(c, domainId);
   const [parent] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, domain.workspaceId), eq(mailboxDomains.domainId, domain.id), isNull(mailboxDomains.parentId)));
-  if (!parent || (!c.env.config.multiTenant && !['provisioning', 'waiting_for_mx', 'active'].includes(parent.status))) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Enable receiving for ${domain.name} before adding subdomains.`);
+  if (!parent || (!c.env.config.multiTenant && !['provisioning', 'waiting_for_mx', 'active'].includes(parent.status))) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant
+    ? `${domain.name} doesn\u2019t receive mail yet. Add a receiving host with POST /v1/inbound/domains/${domain.id}/hosts and {"name":"<subdomain>"} (or turn receiving on with POST /v1/inbound/domains/${domain.id}/enable), then add subdomains.`
+    : `Enable receiving for ${domain.name} first: POST /v1/inbound/domains/${domain.id}/enable, then add subdomains.`);
   return { domain, parent };
 }
 async function subdomainRow(c: Ctx, parent: typeof mailboxDomains.$inferSelect, subdomainId: string) {
@@ -277,9 +279,13 @@ function registerReceivingDomains(app: App) {
     admin(c); const row = await operationDomain(c, c.req.valid('param').id);
     return c.json((await domainViews(c, [row]))[0]!, 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/check`, operationId: 'checkInboundDomain', summary: 'Check MX records now', description: 'Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Never changes DNS or AWS.', request: { params: IdParam }, responses: { 200: response(InboundDomainSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/check`, operationId: 'checkInboundDomain', summary: 'Check MX records now', description: 'Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Hosted: also checks every receiving host of the domain again in the background within seconds, and keeps checking a host that waits for its MX for a while; read listReceivingHosts for each host’s status. Never changes DNS or AWS.', request: { params: IdParam }, responses: { 200: response(InboundDomainSchema), ...errors } }), async c => {
     admin(c); const row = await operationDomain(c, c.req.valid('param').id);
-    if (c.env.config.multiTenant) { const [view]=await domainViews(c,[row]);return c.json({...view!,mx:await checkMx(view!.name,view!.region)},200); }
+    if (c.env.config.multiTenant) {
+      // Every host of the domain, not only the one this answer's mx reads: the same DNS check the hourly sweep runs, now.
+      if ((await c.env.db.execute(followMxJob(row.workspaceId, sql`SELECT d.id,dc.token FROM operation_domains d JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name WHERE d.workspace_id=${row.workspaceId} AND d.id=${row.id}`))).rowCount) { const actor = c.get('actor'); if (actor) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, 1); }
+      const [view]=await domainViews(c,[row]);return c.json({...view!,mx:await checkMx(view!.name,view!.region)},200);
+    }
     const mx = await checkMx(row.name, row.region);
     await saveMailboxMx(c.env.db,row.workspaceId,row.id,mx);
     const [view] = await domainViews(c, [row]);
@@ -442,7 +448,7 @@ function registerAddresses(app: App) {
     requireDmarc: z.boolean().default(false).describe('Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received.'),
     flow: CreateFlow.optional().describe('Where the new address’s mail goes, saved with the address in one transaction and one routing version: deliver creates the route for its own address, split adds a two-way rule on it (setInboundAddressFlow changes both later). If any part is refused, nothing is created. Needs what changing routes and rules needs.'),
   }).strict().openapi('CreateInboundAddress');
-  app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access. Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. ' + readLimitNote(5),
+  app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access. An inbox being deleted isn\u2019t listed, as GET /v1/inboxes doesn\u2019t list it: a real inbox\u2019s address is free to use again at once (a sandbox inbox\u2019s stays reserved). Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. ' + readLimitNote(5),
     request: { query: z.object({ domain: z.string().max(253).optional(), origin: z.enum(['api', 'auto']).optional(), kind: z.enum(['address', 'inbox']).optional().describe('address: receiving addresses only; inbox: agent inboxes only. Default: both.'), q: z.string().max(200).optional(), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(InboundAddressSchema, 'InboundAddressPage')), ...errors } }), async c => {
     const value = access(c, 'read'); const q = c.req.valid('query');
     type RawBoxRow = {
@@ -451,7 +457,9 @@ function registerAddresses(app: App) {
       require_dmarc: boolean; expires_at: string | null; kind: 'inbox' | 'address'; delete_after: string | null; created_at: string; updated_at: string; candidate_count: number;
     };
     return await withBoundedRead(c, async () => {
-      const where = and(eq(mailboxes.workspaceId, value.workspaceId), value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
+      // A deleting inbox is gone everywhere else (its page and DELETE answer 404, Mail routing leaves it out) and its address
+      // is free at once: listed here, it looked like a live address that couldn't be deleted or made again.
+      const where = and(eq(mailboxes.workspaceId, value.workspaceId), sql`(${mailboxes.deleteAfter} IS NULL OR ${mailboxes.deleteAfter} > statement_timestamp())`, value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
         q.domain ? sql`split_part(${mailboxes.address}, '@', 2) = ${q.domain.toLowerCase()}` : undefined, q.origin ? eq(mailboxes.origin, q.origin) : undefined, q.kind ? eq(mailboxes.kind, q.kind) : undefined,
         q.q ? or(sql`${mailboxes.address} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`, sql`${mailboxes.displayName} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`) : undefined,
         q.cursor ? lt(mailboxes.id, q.cursor) : undefined);
@@ -719,6 +727,7 @@ export function registerMailbox(app: App) {
       text: body.text ? body.text + (quote?.text ?? '') : undefined, html: body.html ? body.html + (quote?.html ?? '') : undefined,
       attachments: await resolveAttachments(c.env, mailbox, body.attachments,from), threadId: original.threadId,
       inReplyTo: parentId, references: replyReferences(original, parentId), autoSubmitted: body.autoSubmitted, headers: body.headers,
+      answering: original.id,
     };
   }
   registerInboundThreadReads(app, access);

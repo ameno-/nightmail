@@ -107,7 +107,7 @@ export interface Config {
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
   dashboardAnalytics?: boolean;
   /** Hosted: email a domain's owners once when it is still pending an hour after it was added (src/domain-setup.ts, DOMAIN_SETUP_REMINDER=on). Off unless set. */
-  /** Hosted: one NS lookup when a domain is added (createDomain, record-check.ts dnsZone). DOMAIN_NS_CHECK=off turns it off. */
+  /** Hosted: one NS lookup when a domain is added (createDomain, record-check.ts dnsZone). Always on for Hosted. */
   domainNsCheck?: boolean;
   domainSetupReminder?: boolean;
   /** Hosted: email a new workspace's owners once when it has no domain an hour after sign-up (src/domain-setup.ts, NO_DOMAIN_REMINDER=on). Off unless set. */
@@ -124,6 +124,8 @@ export interface Config {
   /** Hosted only: the parent domain of every workspace's built-in domain (src/builtin-domain.ts), and who those send to. */
   builtinDomain?: string;
   builtinScope: 'anyone' | 'members';
+  /** NIGHTMAIL_BUILTIN_REPLIES: a reply from a built-in domain may go once to a verified sender (builtin-domain.ts builtinReplyException); null: off. */
+  builtinReplies?: { perDay: number; perRecipientPerDay: number } | null;
   /** Hosted only: the platform workspace's list of waitlist joins and sign-ups (src/signups.ts signupsList). */
   signupsListId?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
@@ -140,6 +142,10 @@ export interface Config {
   hygieneLists?: boolean;
   /** NIGHTMAIL_HYGIENE_DNS: the DNS-over-HTTPS resolver list hygiene checks recipient domains with (src/mail-dns.ts). Null: no domain checks. */
   hygieneDnsUrl?: string | null;
+  /** NIGHTMAIL_LIST_RISK: the list-risk measure's private lines (src/list-risk-lines.ts). Null: the measure records no band. */
+  listRisk?: import('./list-risk-lines.js').ListRiskLines | null;
+  /** NIGHTMAIL_RAMP: the send review's private ramp sizing (src/ramp-lines.ts). Null: the defaults. */
+  rampLines?: import('./ramp-lines.js').RampLinesOverride | null;
   /** NIGHTMAIL_ABUSE_MONITORING: abuse monitoring (src/abuse.ts) records from this instant on. Undefined: off. */
   abuseMonitoring?: { since: string };
   /** ABUSE_SLACK_WEBHOOK_URL, else OPERATOR_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
@@ -152,8 +158,6 @@ export interface Config {
   deploy?: { sha: string | null; at: string | null };
   /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: token alone; null: invalid configured signer, webhook disabled. */
   planetscaleWebhookSecret?: string | null;
-  /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
-  abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
   billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; creditProduct: string; taxCode: string; apiBase: string } };
   placementShadow?: boolean;
@@ -174,6 +178,7 @@ export interface Config {
   linkedImages: boolean;
   /** Hosted: the link domain the links in campaign and marketing mail go on (NIGHTMAIL_LINK_HOST, src/link-domains.ts). */
   linkHost?: string;
+  linkWarmup?: { initial: number; full: number; days: number; workspacePercent: number };
   /** Own link hosts (src/link-domains.ts), off unless set: the Cloudflare for SaaS zone customers' links.<domain> CNAMEs
    *  reach (`target`, a name in that zone) and the token that edits its custom hostnames. `workspaces` (Hosted,
    *  NIGHTMAIL_LINK_HOST_WORKSPACES): the only workspaces they are for, none when empty; absent (self-hosted), every one. */

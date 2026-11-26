@@ -32,10 +32,10 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   switchAccount: (id: string, path?: string, workspace?: string) => Promise<void>; addAccount: (path?: string) => void; signOutAccount: (id?: string) => Promise<void>; signOutAll: () => Promise<void>
   /** Staff tools need this account's Google sign-in (Identity.staffSignIn): signs in again with Google, back to this page. */
   signInForStaff: () => void
-  /** Sign in (with Google: a sign-in that proves the account's mailbox), back to this page: for the public pages that need one.
-   *  From the price pages, as from the homepage, it opens Overview; focus (a comparison's) rides along as ?focus=, which
-   *  onboarding reads. */
-  signIn: (method?: 'google', focus?: WorkspaceFocus) => void
+  /** Sign in, back to this page: for the public pages that need one. From the price pages, as from the homepage, it opens
+   *  Overview; focus (a comparison's) rides along as ?focus=, which onboarding reads. select: the account service shows its
+   *  chooser first (a support email's sign-in link, which may be for another account than this browser's). */
+  signIn: (focus?: WorkspaceFocus, select?: boolean) => void
   /** A press starting on a sign-in button (pointer down): the sign-in request starts then, as the homepage's button does. */
   signInIntent: (event: { button: number }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
@@ -162,6 +162,12 @@ function InvitationReview({ invitation, email, firstWorkspace, joining, error, o
     {error ? <Alert tone="danger">{invitationError(error)}</Alert> : null}
     <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>{firstWorkspace ? 'Cancel and sign out' : 'Cancel'}</Button></div>
   </div></main>
+}
+/** Signed out at /connect: the agent's code, when the link had one that can be one, and what happens next. */
+function connectLead(code: string | null) {
+  const typed = (code ?? '').toUpperCase().replace(/[\s-]/g, '')
+  const shown = /^[BCDFGHJKLMNPQRSTVWXZ]{8}$/.test(typed) ? ` with the code ${typed.slice(0, 4)}-${typed.slice(4)}` : ''
+  return `A coding agent is waiting${shown} for you to approve it. Sign in, or sign up, and you’ll see what it asks for before it gets anything.`
 }
 // Signed out, or the session couldn't be checked, on a page that needs one: the wordmark (to the homepage) over one
 // centred column, as the account page it leads to is laid out.
@@ -515,15 +521,17 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   const allowToast = useMemo(() => () => isCurrentScope(scope), [scope])
-  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (method, focus) => void startLogin(false, method, focus), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (focus, select) => void startLogin(select === true, undefined, focus), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
     : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
     // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
     // address says there is no page there.
-    : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={`Sign in to ${productName}`}>
+    // /connect, from the link an agent showed: say what is waiting, so a person who has never signed in knows why.
+    : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={pathname === '/connect' ? 'Sign in to approve your agent' : `Sign in to ${productName}`}>
         {authNotice}
+        {pathname === '/connect' && <p className="muted">{connectLead(new URLSearchParams(window.location.search).get('code'))}</p>}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</Button>
         <SignInConsent className="muted" />
       </SignedOutPage>

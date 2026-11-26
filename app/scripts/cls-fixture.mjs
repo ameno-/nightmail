@@ -912,6 +912,9 @@ export async function seed(fx) {
   const propertySegment = await dana.api('POST', '/v1/segments', { name: 'Waiting companies', rule: { operator: 'and', rules: [
     { field: 'property', key: 'status', type: 'string', operator: 'eq', value: 'waiting' }, { field: 'property', key: 'joined_at', type: 'date', operator: 'before', value: '2026-11-20' },
     { field: 'property', key: 'mailbox', type: 'string', operator: 'eq', value: 'company' }, { field: 'property', key: 'attempts', type: 'number', operator: 'gt', value: 0 }, { field: 'property', key: 'let_in_at', type: 'date', operator: 'notSet' }] } });
+  // Topics (Audience · Topics, and the contact's Topics section): one everyone subscribed gets, one only those who opt in.
+  await dana.api('POST', '/v1/topics', { name: 'Product updates', description: 'New features and changes, about once a month.' });
+  await dana.api('POST', '/v1/topics', { name: 'Events', description: 'Invitations to talks and meetups.', subscribedByDefault: false });
   const template = await dana.api('POST', '/v1/templates', { name: 'Receipt' });
   const campaign = await dana.api('POST', '/v1/campaigns', { name: 'November product update', subject: 'What shipped in November', from: 'news@mail.northwind.example', html: '<p>Hello</p>' });
   // Review's Send stage (Campaign review · send, · ramp): a campaign to 40 subscribers, which the send review finds ready,
@@ -968,6 +971,12 @@ export async function seed(fx) {
 
   await billing(db);
   const newsletterIds = await newsletters(fx);
+  // Operator → Lists: the latest sent issue carries the list-risk measure its launch recorded (src/list-risk.ts) and what the review said.
+  await db.query("UPDATE sending_campaigns SET simulated=false WHERE id=$1", [newsletterIds.issueSent]);
+  await db.query("UPDATE sending_campaign_reviews SET list_risk=$2::jsonb WHERE campaign_id=$1", [newsletterIds.issueSent, JSON.stringify({ version: 2, at: ago(3 * 1440), listId: newsletterIds.newsletter,
+    sampled: 3200, exact: true, counts: { flagged: 21, deadDomains: 4, unengaged: 0, unengagedBase: 0, neverMailed: 140, softFailing: 2, proven: 3010, byReason: { invalid: 0, disposable: 12, typo_domain: 5, role: 4, dead: 0, no_mail_domain: 0 } },
+    lastSend: null, recentBlocklist: 0, values: { FLAGGED_SOURCE: 21 / 3200, DEAD_DOMAINS: 4 / 3200, NEVER_MAILED: 140 / 3200, RECENT_BLOCKLIST: 0 }, band: 'low', factors: [], previous: { flaggedSource: 64 / 3200, band: 'elevated', factors: [{ code: 'FLAGGED_SOURCE', level: 'elevated' }] },
+    review: { verdict: 'ready', required: null, reasons: [] } })]);
   const { conversation: supportConversation, email: supportEmail, action: supportAction } = await supportInbox(db, hook.webhook?.id ?? hook.id);
 
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
@@ -991,6 +1000,18 @@ export async function seed(fx) {
   const wildcardDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenwild.example', { wildcard: true });
   const parkedDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenpark.example', { parking: true });
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
+  // Ona emailed support too, but her session's sign-in (GitHub, say) proves no mailbox: the reply's link offers to email a
+  // sign-in link to the address the email came from (Support · continue email · sign-in link).
+  const linkConversation = supportId('conv', 'onacontinue', 26), linkMessage = `msg_${'d'.repeat(32)}`;
+  await db.query("INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', 'ona@fieldnotes.example', 'none', 'pending_signin')", [linkConversation]);
+  await db.query("INSERT INTO support_email_signins(conversation_id, message_id, address) VALUES ($1, $2, 'ona@fieldnotes.example')", [linkConversation, linkMessage]);
+  // Two more of Ona's emails waiting the same way, for the second choice, Answer me by email instead: one pressed signed in
+  // as her (Support · continue email · answer by email), one from a browser signed in to nobody (… · signed out).
+  const answerConversation = supportId('conv', 'onaanswer', 26), answerMessage = `msg_${'e'.repeat(32)}`, outConversation = supportId('conv', 'onasignedout', 26), outMessage = `msg_${'f'.repeat(32)}`;
+  for (const [conversation, message] of [[answerConversation, answerMessage], [outConversation, outMessage]]) {
+    await db.query("INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', 'ona@fieldnotes.example', 'none', 'unverified')", [conversation]);
+    await db.query("INSERT INTO support_email_signins(conversation_id, message_id, address) VALUES ($1, $2, 'ona@fieldnotes.example')", [conversation, message]);
+  }
   // Sending is ready but no domain was added: onboarding's domain step was skipped (cls.mjs `skipped`), so Overview asks for one.
   await fx.signIn('pia', 'pia@pinestudio.example', 'Pia Lund', { id: 'ws_skipped', name: 'Pine Studio' });
   // Its built-in domain sends meanwhile: Overview's card asks for a domain of its own, and Domains lists the built-in one.
@@ -1048,6 +1069,8 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
   // An agent waiting at /connect with its device code (api/src/agent-setup.ts): Connect · agent code approves or denies it.
   await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at) VALUES ($1,'device',repeat('0',64),'BCDFGHJK','OpenCode',now()+interval '1 day')", ['ags_' + 'c'.repeat(32)]);
+  // Uma's agent came back to a spent setup token and asked her with a device code: her pages show it waiting for her.
+  await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at,for_workspace_id,for_user_id,for_prompt_copied_at) VALUES ($1,'device',repeat('0',64),'DFGHJKLM','Devin',now()+interval '14 minutes','ws_builtin','user_uma',now()-interval '6 hours')", ['ags_' + 'd'.repeat(32)]);
   // API keys' agent tokens: that agent with two short-lived tokens it made in Northwind, and Sam's agent with one (an
   // owner sees another member's agent once it has made tokens here).
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at) VALUES('mcp_at_cls_sam','https://account.anoma.ly','user_sam','user_sam','claude-code',NULL,'{read}',now()+interval '1 day',0)");
@@ -1107,6 +1130,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, imageEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, continueConversation, continueMessage,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, continueConversation, continueMessage, linkConversation, linkMessage, answerConversation, answerMessage, outConversation, outMessage,
   };
 }

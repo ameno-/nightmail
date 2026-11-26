@@ -4,7 +4,7 @@ import { Buffer } from 'node:buffer';
 import { timingSafeEqual } from 'node:crypto';
 import { ApiError, chargeBudget, denied, digest, errors, id, IdParams, isoTime, json, randomSecret, requestOrigin, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
 import { auditContext, auditInsert, ipNetwork, type AuditContext } from './audit.js';
-import { apiKeyEnv, secretPrefixes, shownPrefix } from './brand.js';
+import { apiKeyEnv, productName, secretPrefixes, shownPrefix } from './brand.js';
 import { agentKeyName } from './agent-key-name.js';
 import { mcpClientConfig, mcpServerUrl } from './mcp-clients.js';
 
@@ -16,7 +16,12 @@ import { mcpClientConfig, mcpServerUrl } from './mcp-clients.js';
  *   an unused one. The agent exchanges it at POST /v1/agent/setup.
  * - device (RFC 8628): an agent started without the prompt asks POST /v1/agent/device for a device code and a user code,
  *   the person opens /connect?code=…, signs in, chooses a workspace and approves, and the agent's polls of
- *   POST /v1/agent/device/token receive the key.
+ *   POST /v1/agent/device/token receive the key. Every answer the agent gets while it waits (nextStep, each pending
+ *   poll) gives it the link to show on its own line: a person who never sees the link never approves.
+ * - an agent holding a spent setup token (expired, replaced or used: production agents came back to a prompt hours
+ *   later) gets a device code addressed to that token's person and workspace, so their dashboard shows the agent waiting
+ *   (GET /v1/agent/device/waiting) with a button to /connect. That says only whom the agent asks; approving is unchanged.
+ *   A code nobody approved in time is renewed once, on the poll that finds it expired, with the new link.
  *
  * Either way the agent gets one API key named after the client it says it is ("OpenCode, set up <date>", or "Agent, set
  * up <date>" when it doesn't say; api_keys.agent_client keeps the claim), listed and revocable under API keys like any other,
@@ -47,6 +52,9 @@ const gone = { 410: { description: 'Expired, or replaced by a newer one; use err
 
 type Row = { id: string; kind: 'prompt' | 'device'; secret_hash: string; status: 'pending' | 'approved' | 'denied' | 'replaced' | 'used'; workspace_id: string | null; user_id: string | null;
   client_name: string | null; poll_interval: number; expired: boolean; too_soon: boolean };
+type DeviceRow = Row & { user_code: string; for_workspace_id: string | null; for_user_id: string | null; for_prompt_copied_at: string | null; renewed_from: string | null; minutes_left: number };
+/** Whom a device code asks: the person and workspace of the setup token the agent held. */
+type Asker = { workspaceId: string; userId: string; copiedAt: string };
 type Issued = { key: string; keyId: string; name: string; workspaceId: string; workspaceName: string };
 /** What the agent says it is, as one short line (mcp-auth.ts clientLabel), or null. */
 async function clientClaim(value: string | undefined) {
@@ -81,6 +89,43 @@ function typedCode(value: string) {
   const code = value.toUpperCase().replace(/[\s-]/g, '');
   return new RegExp(`^[${USER_CODE_LETTERS}]{8}$`).test(code) ? code : null;
 }
+
+/** The /connect link with the user code filled in: the one link the person needs. */
+const approvalLink = (c: Ctx, code: string) => `${new URL('/connect', c.env.config.publicUrl).href}?code=${shownCode(code.replace('-', ''))}`;
+/**
+ * Where a signed-in owner or admin copies a fresh agent prompt: the quicker way to the same key. In production the
+ * person who never opened a device code's link (two codes, 30 minutes, 300 polls) connected in 25 seconds with a fresh
+ * copy: they act where they already are, and nothing has to cross from the agent's window to theirs.
+ */
+const promptLink = (c: Ctx) => `${new URL('/docs', c.env.config.publicUrl).href}#agent-prompt`;
+const freshPrompt = (c: Ctx) => `a fresh copy of the agent prompt (Copy agent prompt, in ${productName} at ${promptLink(c)}), whose setup token connects you in seconds`;
+/** The words that ask the person to approve: the link alone on its line, so any agent relays it as a link. */
+const askToOpen = (c: Ctx, code: string) => `show the person this link, on its own line, and ask them to open it and approve you:\n${approvalLink(c, code)}\n`;
+
+/**
+ * A new device code (RFC 8628 §3.2), with nextStep saying in words what the agent shows the person. asker: the person
+ * and workspace whose setup token the agent held, so their dashboard lists it; renewedFrom: the expired code it replaces.
+ */
+async function startDevice(c: Ctx, db: DbExecutor, clientName: string | null, asker: Asker | null, renewedFrom: string | null = null) {
+  const { rowId, secret, hash } = await newSecret(secretPrefixes.deviceCode);
+  const expiresAt = new Date(Date.now() + DEVICE_MINUTES * 60_000).toISOString();
+  // A user code is unique among the rows kept (a day past expiry); a collision draws another.
+  for (let attempt = 0; ; attempt++) {
+    const code = newUserCode();
+    const { rowCount } = await db.execute(sql`INSERT INTO agent_setups(id, kind, secret_hash, user_code, client_name, poll_interval, expires_at, for_workspace_id, for_user_id, for_prompt_copied_at, renewed_from)
+      VALUES (${rowId}, 'device', ${hash}, ${code}, ${clientName}, ${POLL_SECONDS}, ${expiresAt}::timestamptz, ${asker?.workspaceId ?? null}, ${asker?.userId ?? null}, ${asker?.copiedAt ?? null}::timestamptz, ${renewedFrom})
+      ON CONFLICT (user_code) DO NOTHING`);
+    if (!rowCount && attempt < 4) continue;
+    if (!rowCount) throw new ApiError(503, 'AGENT_SETUP_BUSY', 'Couldn’t issue a code. Retry.', undefined, true);
+    const link = approvalLink(c, code);
+    return { device_code: secret, user_code: shownCode(code), verification_uri: link.slice(0, link.indexOf('?')), verification_uri_complete: link,
+      expires_in: DEVICE_MINUTES * 60, interval: POLL_SECONDS,
+      nextStep: `Now ${askToOpen(c, code)}They sign in, check that the code ${shownCode(code)} matches and approve. It works for ${DEVICE_MINUTES} minutes${asker ? ', and their dashboard shows you waiting' : ''}. Meanwhile poll POST /v1/agent/device/token with this device_code every ${POLL_SECONDS} seconds until it returns your key. If they'd rather, they can give you ${freshPrompt(c)}.` };
+  }
+}
+/** A device code for an agent, unless every network together has started too many this minute. */
+const deviceIfAllowed = async (c: Ctx, db: DbExecutor, clientName: string | null, asker: Asker | null, renewedFrom: string | null = null) =>
+  await chargeBudget(c.env, BUDGET, 'device:all', DEVICES_PER_MINUTE) ? await startDevice(c, db, clientName, asker, renewedFrom) : null;
 
 async function limited(c: Ctx, key: string, perMinute: number, message: string) {
   if (await chargeBudget(c.env, BUDGET, key, perMinute)) return;
@@ -187,7 +232,7 @@ export function registerAgentSetup(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/setup', operationId: 'exchangeAgentSetupToken', tags, security: [],
     summary: 'Exchange a setup token for the agent\'s API key',
-    description: `For a coding agent: the setup token in the prompt a person copied from the dashboard (${secretPrefixes.agentSetup}…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within ${SETUP_MINUTES} minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.`,
+    description: `For a coding agent: the setup token in the prompt a person copied from the dashboard (${secretPrefixes.agentSetup}…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within ${SETUP_MINUTES} minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED with a device code in error.details[0] (startAgentDeviceAuthorization's answer) for the person who copied it to approve: show them its link and poll it. The key is shown once.`,
     request: { body: json(z.object({ token: Token.openapi({ example: `${secretPrefixes.agentSetup}${'0'.repeat(32)}.${'0'.repeat(64)}` }).describe('The setup token from the prompt.'),
       client_name: ClientName }).strict()) },
     responses: { 201: response(AgentKey), ...errors, ...gone } }), async c => {
@@ -195,51 +240,61 @@ export function registerAgentSetup(app: App) {
     const body = c.req.valid('json'), presented = await readSecret(secretPrefixes.agentSetup, body.token);
     const invalid = () => new ApiError(400, 'SETUP_TOKEN_INVALID', 'This setup token is not valid. Copy the prompt from the dashboard again, or connect with a device code (POST /v1/agent/device).', 'token');
     if (!presented) throw invalid();
+    const client = await clientClaim(body.client_name);
     const outcome = await c.env.db.transaction(async tx => {
-      const { rows: [row] } = await tx.execute<Row>(sql`SELECT id, kind, secret_hash, status, workspace_id, user_id, client_name, poll_interval, expires_at <= now() AS expired, false AS too_soon
+      const { rows: [row] } = await tx.execute<Row & { created_at: string }>(sql`SELECT id, kind, secret_hash, status, workspace_id, user_id, client_name, poll_interval, expires_at <= now() AS expired, false AS too_soon, created_at::text
         FROM agent_setups WHERE id = ${presented.rowId} AND kind = 'prompt' FOR UPDATE`);
       if (!matches(row, presented.hash)) return 'invalid' as const;
       if (row.status === 'used') return 'used' as const;
-      if (row.status === 'replaced') return 'replaced' as const;
-      if (row.expired) return 'expired' as const;
-      return await issueKey(tx, c, { ...row, client_name: await clientClaim(body.client_name) }) ?? 'forbidden' as const;
+      if (row.status === 'replaced' || row.expired) return { spent: row.status === 'replaced' ? 'replaced' as const : 'expired' as const, asker: { workspaceId: row.workspace_id!, userId: row.user_id!, copiedAt: row.created_at } };
+      return await issueKey(tx, c, { ...row, client_name: client }) ?? 'forbidden' as const;
     });
     if (outcome === 'invalid') throw invalid();
-    if (outcome === 'used') throw await alreadyIssued(c, presented.rowId, 'SETUP_TOKEN_USED', 'ask them to copy the prompt again.');
-    if (outcome === 'replaced') throw new ApiError(410, 'SETUP_TOKEN_REPLACED', 'A newer copy of the prompt replaced this setup token. Use the token in the newest copy.', 'token');
-    if (outcome === 'expired') throw new ApiError(410, 'SETUP_TOKEN_EXPIRED', `This setup token expired: it works for ${SETUP_MINUTES} minutes after the prompt is copied. Ask the person to copy it again, or connect with a device code (POST /v1/agent/device).`, 'token');
+    if (outcome === 'used') throw await alreadyIssued(c, presented.rowId, 'SETUP_TOKEN_USED', 'ask them to copy the prompt again, or connect with a device code (POST /v1/agent/device).');
     if (outcome === 'forbidden') throw notAllowed();
+    if ('spent' in outcome) {
+      // The agent has no key and the person who gave it this token is known: ask them, where they'll see it.
+      const device = await deviceIfAllowed(c, c.env.db, client, outcome.asker);
+      const why = outcome.spent === 'replaced' ? 'A newer copy of the prompt replaced this setup token. If you have the newest copy, use its token.'
+        : `This setup token expired: it works for ${SETUP_MINUTES} minutes after the prompt is copied.`;
+      const refusal = new ApiError(410, outcome.spent === 'replaced' ? 'SETUP_TOKEN_REPLACED' : 'SETUP_TOKEN_EXPIRED', device
+        ? `${why} ${outcome.spent === 'replaced' ? 'Otherwise ask' : 'Ask'} the person for ${freshPrompt(c)}. Or ${askToOpen(c, device.user_code)}Their dashboard shows you waiting. Then poll POST /v1/agent/device/token with error.details[0].device_code every ${device.interval} seconds until it returns your key.`
+        : `${why} Ask the person to copy it again, or connect with a device code (POST /v1/agent/device).`, 'token');
+      if (device) refusal.details = [device];
+      throw refusal;
+    }
     return c.json(issuedView(c, outcome), 201);
   });
 
   // ---------- device: RFC 8628 for an agent started without the prompt ----------
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device', operationId: 'startAgentDeviceAuthorization', tags, security: [],
     summary: 'Start the device flow for a coding agent',
-    description: `For a coding agent without a setup token (RFC 8628): returns a device code to keep and a user code to show. Ask the person to open verification_uri_complete (or verification_uri and type the user code), sign in, choose a workspace and approve. Then poll pollAgentDeviceToken every interval seconds until it returns the key. Codes work once, for ${DEVICE_MINUTES} minutes.`,
-    request: { body: { ...json(z.object({ client_name: ClientName }).strict()), required: false } },
+    description: `For a coding agent without a setup token (RFC 8628): returns a device code to keep and a user code to show. Show the person verification_uri_complete as a link on its own line and ask them to open it, sign in, check the code and approve; nextStep says so in words. Then poll pollAgentDeviceToken every interval seconds until it returns the key. Codes work once, for ${DEVICE_MINUTES} minutes. With setup_token (one from the person's prompt that expired or was replaced before it was used), their dashboard shows you waiting.`,
+    request: { body: { ...json(z.object({ client_name: ClientName,
+      setup_token: Token.optional().describe('The setup token from the person\'s prompt, even if it expired or was replaced: their dashboard then shows you waiting for their approval. One that was used already addresses nobody.') }).strict()), required: false } },
     responses: { 200: response(z.object({ device_code: z.string().describe(`${secretPrefixes.deviceCode}…: keep it private; only pollAgentDeviceToken takes it.`),
       user_code: z.string().describe('Show this to the person: they confirm it matches.'), verification_uri: z.string(), verification_uri_complete: z.string().describe('The page with the user code filled in: the link to give the person.'),
-      expires_in: z.number().int(), interval: z.number().int().describe('Seconds to wait between polls.') }).openapi('AgentDeviceAuthorization')), ...errors } }), async c => {
+      expires_in: z.number().int(), interval: z.number().int().describe('Seconds to wait between polls.'),
+      nextStep: z.string().describe('What to do now, in words: the link to show the person on its own line, then the polling.') }).openapi('AgentDeviceAuthorization')), ...errors } }), async c => {
     await fromNetwork(c, 'device');
     await limited(c, 'device:all', DEVICES_PER_MINUTE, 'Too many agents are starting the device flow right now. Retry in a minute.');
-    const body = c.req.valid('json') as { client_name?: string } | undefined;
-    const clientName = await clientClaim(body?.client_name), { rowId, secret, hash } = await newSecret(secretPrefixes.deviceCode);
-    const expiresAt = new Date(Date.now() + DEVICE_MINUTES * 60_000).toISOString();
-    // A user code is unique among the rows kept (a day past expiry); a collision draws another.
-    for (let attempt = 0; ; attempt++) {
-      const code = newUserCode();
-      const { rowCount } = await c.env.db.execute(sql`INSERT INTO agent_setups(id, kind, secret_hash, user_code, client_name, poll_interval, expires_at)
-        VALUES (${rowId}, 'device', ${hash}, ${code}, ${clientName}, ${POLL_SECONDS}, ${expiresAt}::timestamptz) ON CONFLICT (user_code) DO NOTHING`);
-      if (!rowCount && attempt < 4) continue;
-      if (!rowCount) throw new ApiError(503, 'AGENT_SETUP_BUSY', 'Couldn’t issue a code. Retry.', undefined, true);
-      const page = new URL('/connect', c.env.config.publicUrl);
-      return c.json({ device_code: secret, user_code: shownCode(code), verification_uri: page.href, verification_uri_complete: `${page.href}?code=${shownCode(code)}`,
-        expires_in: DEVICE_MINUTES * 60, interval: POLL_SECONDS }, 200);
+    const body = c.req.valid('json') as { client_name?: string; setup_token?: string } | undefined;
+    let asker: Asker | null = null;
+    if (body?.setup_token !== undefined) {
+      // A genuine setup token that never gave a key names its person: they gave it to an agent that still has none. One
+      // that was used did give its agent a key, and lives on in that agent's transcript: anyone who later reads it could
+      // otherwise put "<any name> is waiting for your approval" in that person's dashboard for a key of their own (device
+      // code phishing). It starts a code that asks nobody in particular.
+      const presented = await readSecret(secretPrefixes.agentSetup, body.setup_token);
+      const { rows: [row] } = presented ? await c.env.db.execute<Row & { created_at: string }>(sql`SELECT id, secret_hash, status, workspace_id, user_id, created_at::text FROM agent_setups WHERE id = ${presented.rowId} AND kind = 'prompt'`) : { rows: [] };
+      if (!presented || !matches(row, presented.hash)) throw new ApiError(400, 'SETUP_TOKEN_INVALID', 'This setup token is not valid. Leave setup_token out to start a device code without it.', 'setup_token');
+      if (row.status !== 'used') asker = { workspaceId: row.workspace_id!, userId: row.user_id!, copiedAt: row.created_at };
     }
+    return c.json(await startDevice(c, c.env.db, await clientClaim(body?.client_name), asker), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device/token', operationId: 'pollAgentDeviceToken', tags, security: [],
     summary: 'Poll for the agent\'s API key',
-    description: 'With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. A poll after that gets 409 DEVICE_CODE_USED naming the key it gave (error.details: keyId, name, prefix, issuedAt, revokedAt), never the key again and never a second one: use the key you saved. Retry-After gives the seconds to wait.',
+    description: 'With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (nobody approved in time: the first such answer carries a new device code in error.details[0], once; after that start again), or 201 with the API key, once. Each pending answer repeats the link to show the person. A poll after that gets 409 DEVICE_CODE_USED naming the key it gave (error.details: keyId, name, prefix, issuedAt, revokedAt), never the key again and never a second one: use the key you saved. Retry-After gives the seconds to wait.',
     request: { body: json(z.object({ device_code: Token.openapi({ example: `${secretPrefixes.deviceCode}${'0'.repeat(32)}.${'0'.repeat(64)}` }),
       grant_type: z.literal('urn:ietf:params:oauth:grant-type:device_code').optional().describe('Optional, as RFC 8628 clients send it.') }).strict()) },
     responses: { 201: response(AgentKey), ...errors } }), async c => {
@@ -249,11 +304,21 @@ export function registerAgentSetup(app: App) {
     if (!presented) throw invalid();
     // The poll is recorded even when it is refused (slow_down), so the transaction returns what to answer.
     const outcome = await c.env.db.transaction(async tx => {
-      const { rows: [row] } = await tx.execute<Row>(sql`SELECT id, kind, secret_hash, status, workspace_id, user_id, client_name, poll_interval, expires_at <= now() AS expired,
-          coalesce(last_polled_at > now() - make_interval(secs => poll_interval), false) AS too_soon
+      const { rows: [row] } = await tx.execute<DeviceRow>(sql`SELECT id, kind, secret_hash, status, workspace_id, user_id, client_name, poll_interval, expires_at <= now() AS expired,
+          coalesce(last_polled_at > now() - make_interval(secs => poll_interval), false) AS too_soon, user_code, for_workspace_id, for_user_id, for_prompt_copied_at::text, renewed_from,
+          greatest(1, round(extract(epoch FROM expires_at - now()) / 60))::int AS minutes_left
         FROM agent_setups WHERE id = ${presented.rowId} AND kind = 'device' FOR UPDATE`);
       if (!matches(row, presented.hash)) return { error: 'invalid' as const };
       if (row.status === 'used') return { error: 'used' as const };
+      if (row.status === 'replaced') return { error: 'renewed' as const };
+      // Nobody approved it in time (the person never saw the link, or saw it late): one new code, with the link, so the
+      // agent can ask again at once. A renewed code that expires too is not renewed again.
+      if (row.expired && row.status === 'pending' && !row.renewed_from) {
+        const asker = row.for_workspace_id && row.for_user_id && row.for_prompt_copied_at ? { workspaceId: row.for_workspace_id, userId: row.for_user_id, copiedAt: row.for_prompt_copied_at } : null;
+        const renewed = await deviceIfAllowed(c, tx, row.client_name, asker, row.id);
+        if (renewed) await tx.execute(sql`UPDATE agent_setups SET status = 'replaced', decided_at = now() WHERE id = ${row.id}`);
+        return { error: 'expired' as const, renewed };
+      }
       if (row.expired) return { error: 'expired' as const };
       if (row.status === 'denied') return { error: 'denied' as const };
       if (row.too_soon) {
@@ -261,7 +326,7 @@ export function registerAgentSetup(app: App) {
         return { error: 'slow' as const, interval: slower!.poll_interval };
       }
       await tx.execute(sql`UPDATE agent_setups SET last_polled_at = now() WHERE id = ${row.id}`);
-      if (row.status !== 'approved') return { error: 'pending' as const, interval: row.poll_interval };
+      if (row.status !== 'approved') return { error: 'pending' as const, interval: row.poll_interval, code: row.user_code, minutesLeft: row.minutes_left };
       const issued = await issueKey(tx, c, row);
       return issued ? { issued } : { error: 'forbidden' as const };
     });
@@ -269,10 +334,18 @@ export function registerAgentSetup(app: App) {
     switch (outcome.error) {
       case 'invalid': throw invalid();
       case 'used': throw await alreadyIssued(c, presented.rowId, 'DEVICE_CODE_USED', 'start again with POST /v1/agent/device.');
-      case 'expired': throw new ApiError(400, 'EXPIRED_TOKEN', `This device code expired (${DEVICE_MINUTES} minutes). Start again with POST /v1/agent/device.`, 'device_code');
+      case 'renewed': throw new ApiError(400, 'EXPIRED_TOKEN', 'This device code expired and was renewed: poll the device code that answer gave you, or start again with POST /v1/agent/device and show the person its new link.', 'device_code');
+      case 'expired': {
+        const renewed = 'renewed' in outcome ? outcome.renewed : null;
+        const expired = new ApiError(400, 'EXPIRED_TOKEN', renewed
+          ? `Nobody approved this code within ${DEVICE_MINUTES} minutes, so it expired: the person may not have seen the link. Ask them for ${freshPrompt(c)}. Or here is a new code: ${askToOpen(c, renewed.user_code)}Then poll with error.details[0].device_code every ${renewed.interval} seconds.`
+          : `This device code expired (${DEVICE_MINUTES} minutes). Start again with POST /v1/agent/device and show the person its new link.`, 'device_code');
+        if (renewed) expired.details = [renewed];
+        throw expired;
+      }
       case 'denied': throw new ApiError(400, 'ACCESS_DENIED', 'The person denied this agent. Stop polling.', 'device_code');
       case 'slow': throw wait(new ApiError(400, 'SLOW_DOWN', `Polled too soon. Wait ${outcome.interval} seconds between polls from now on.`, undefined, true), outcome.interval);
-      case 'pending': throw wait(new ApiError(400, 'AUTHORIZATION_PENDING', `Waiting for the person to approve. Poll again in ${outcome.interval} seconds.`, undefined, true), outcome.interval);
+      case 'pending': throw wait(new ApiError(400, 'AUTHORIZATION_PENDING', `Waiting for the person to approve (${outcome.minutesLeft} min left). If they haven't opened it yet, ${askToOpen(c, outcome.code!)}Poll again in ${outcome.interval} seconds.`, undefined, true), outcome.interval);
       case 'forbidden': throw notAllowed();
     }
     return c.json(issuedView(c, outcome.issued!), 201);
@@ -280,7 +353,9 @@ export function registerAgentSetup(app: App) {
 
   // The page at /connect, signed in. Every call with a user code is charged to the person, so codes can't be guessed.
   const DeviceRequest = z.object({ userCode: z.string(), clientName: z.string().nullable().describe('What the agent says it is: its claim, not verified.'), status: DeviceStatus,
-    createdAt: z.string(), expiresAt: z.string(), permissions: Permissions.describe('What its key gets once approved.') }).openapi('AgentDeviceRequest');
+    createdAt: z.string(), expiresAt: z.string(), permissions: Permissions.describe('What its key gets once approved.'),
+    suggestedWorkspaceId: z.string().nullable().describe('The workspace of your own setup token that the agent held, which the page chooses first; null otherwise. Approving may still choose any workspace you own or administer.'),
+    promptCopiedAt: z.string().nullable().describe('When you copied the prompt whose setup token the agent held; null for an agent that asked without one of yours. A request long after your last copy, or when you started no agent, isn\'t yours.') }).openapi('AgentDeviceRequest');
   const codeOf = async (c: Ctx, userId: string, value: string) => {
     await limited(c, `user-code:${userId}`, LIMITS.userCode, 'Too many codes tried. Wait a minute, then type the code your agent shows.');
     const code = typedCode(value);
@@ -292,6 +367,7 @@ export function registerAgentSetup(app: App) {
     const { rows: [row] } = await c.env.db.execute<{ status: Row['status']; expired: boolean }>(sql`SELECT status, expires_at <= now() AS expired FROM agent_setups WHERE kind = 'device' AND user_code = ${code}`);
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'No agent is waiting with that code. Check it, or start again in your agent.');
     if (row.status === 'pending' && row.expired) throw new ApiError(410, 'DEVICE_CODE_EXPIRED', `This code expired (${DEVICE_MINUTES} minutes). Start again in your agent for a new one.`);
+    if (row.status === 'replaced') throw new ApiError(410, 'DEVICE_CODE_EXPIRED', `This code expired (${DEVICE_MINUTES} minutes), and your agent was given a new one: open the link it shows now.`);
     throw new ApiError(409, 'DEVICE_CODE_DECIDED', `This code was already ${row.status === 'denied' ? 'denied' : 'approved'}.`);
   }
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device/lookup', operationId: 'lookUpAgentDevice', tags, security: dashboardSecurity,
@@ -299,11 +375,26 @@ export function registerAgentSetup(app: App) {
     description: `The /connect page: the agent behind a user code, before you approve or deny it. Each attempt counts against ${LIMITS.userCode} a minute per person. Dashboard session only.`,
     request: { body: json(z.object({ userCode: UserCode }).strict()) }, responses: { 200: response(DeviceRequest), ...errors } }), async c => {
     const { userId } = person(c, false), code = await codeOf(c, userId, c.req.valid('json').userCode);
-    const { rows: [row] } = await c.env.db.execute<{ status: Row['status']; expired: boolean; client_name: string | null; created_at: string; expires_at: string }>(sql`
-      SELECT status, expires_at <= now() AS expired, client_name, created_at::text, expires_at::text FROM agent_setups WHERE kind = 'device' AND user_code = ${code}`);
+    const { rows: [row] } = await c.env.db.execute<{ status: Row['status']; expired: boolean; client_name: string | null; created_at: string; expires_at: string; suggested: string | null; copied: string | null }>(sql`
+      SELECT status, expires_at <= now() AS expired, client_name, created_at::text, expires_at::text, CASE WHEN for_user_id = ${userId} THEN for_workspace_id END AS suggested,
+        CASE WHEN for_user_id = ${userId} THEN for_prompt_copied_at::text END AS copied
+      FROM agent_setups WHERE kind = 'device' AND user_code = ${code}`);
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'No agent is waiting with that code. Check it, or start again in your agent.');
     const status = (row.status === 'pending' || row.status === 'approved') && row.expired ? 'expired' as const : row.status === 'replaced' ? 'expired' as const : row.status;
-    return c.json({ userCode: shownCode(code), clientName: row.client_name, status, createdAt: isoTime(row.created_at)!, expiresAt: isoTime(row.expires_at)!, permissions: [...AGENT_PERMISSIONS] }, 200);
+    return c.json({ userCode: shownCode(code), clientName: row.client_name, status, createdAt: isoTime(row.created_at)!, expiresAt: isoTime(row.expires_at)!, permissions: [...AGENT_PERMISSIONS],
+      suggestedWorkspaceId: row.suggested, promptCopiedAt: isoTime(row.copied) }, 200);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/agent/device/waiting', operationId: 'listWaitingAgentDevices', tags, security: dashboardSecurity,
+    summary: 'Agents waiting for your approval',
+    description: 'Agents that asked for a device code with a setup token you copied in this workspace, still waiting for an approval, newest first: the dashboard shows each with a button to /connect. An agent that started without one isn\'t listed: only its link reaches you. Dashboard session only.',
+    responses: { 200: response(z.object({ data: z.array(z.object({ userCode: z.string(), clientName: z.string().nullable().describe('What the agent says it is: its claim, not verified.'),
+      createdAt: z.string(), expiresAt: z.string(), promptCopiedAt: z.string().describe('When you copied the prompt whose setup token it held.') })) }).openapi('WaitingAgentDevices')), ...errors } }), async c => {
+    const { workspaceId, userId } = person(c, true);
+    const { rows } = await c.env.db.execute<{ user_code: string; client_name: string | null; created_at: string; expires_at: string; copied: string }>(sql`
+      SELECT user_code, client_name, created_at::text, expires_at::text, for_prompt_copied_at::text AS copied FROM agent_setups
+      WHERE kind = 'device' AND status = 'pending' AND for_workspace_id = ${workspaceId} AND for_user_id = ${userId} AND expires_at > now()
+      ORDER BY created_at DESC LIMIT 5`);
+    return c.json({ data: rows.map(row => ({ userCode: shownCode(row.user_code), clientName: row.client_name, createdAt: isoTime(row.created_at)!, expiresAt: isoTime(row.expires_at)!, promptCopiedAt: isoTime(row.copied)! })) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device/approve', operationId: 'approveAgentDevice', tags, security: dashboardSecurity,
     summary: 'Approve an agent waiting with a user code',

@@ -47,7 +47,7 @@ async function policy(runtime: Runtime) {
     readiness: !cfg.multiTenant && !sim ? { fingerprint: await credentialFingerprint(cfg), target: discoveryTarget(cfg) } : null };
 }
 /** A campaign's pause codes that quarantine it: the automatic pause, the list probe and the ramp's check of a step. */
-export const QUARANTINE_CODES = ['LIST_QUALITY', 'BOUNCE_RATE_HIGH', 'COMPLAINT_RATE_HIGH'];
+export const QUARANTINE_CODES = ['LIST_QUALITY', 'BOUNCE_RATE_HIGH', 'COMPLAINT_RATE_HIGH', 'BLOCKLISTED'];
 /** What the database's ramp check (ramp_refusal and ramp_clean_hour, migration 501) is told of RAMP: each step's hourly
  * ceiling, how much of one an hour must release to prove it, the clean, mature history that places a sender, and the
  * quarantines that pause a workspace's marketing (RAMP_PAUSED). */
@@ -83,6 +83,8 @@ export type AdmissionRequest = {
   /** A scheduled single send (UTC instant): admitted now without charges, and as a send again at its time. */
   scheduledAt?: string;
   incoming?: number; autoPause?: boolean;
+  /** Replaces the installation's built-in policy for this one decision: only a reply builtinReplyException allowed. */
+  builtin?: ReturnType<typeof builtinPolicy>;
 };
 /** The send_admission(...) call. `actor` is a jsonb {id, domains}; `assets` the attachment IDs the sender may use. */
 export async function admission(runtime: Runtime, workspaceId: SQL | string, actor: SQL, request: AdmissionRequest, extra?: SQL, assets: SQL = sql`'[]'::jsonb`) {

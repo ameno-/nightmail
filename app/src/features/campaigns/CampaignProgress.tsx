@@ -86,6 +86,8 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     ? wait.reason === 'feedback_lag'
       ? 'Waiting for delivery reports to catch up.'
       // No host for its unsubscribe link right now (the workspace's sending is paused): it continues by itself.
+      : wait.linkHold === 'daily_budget' ? 'The shared link domain reached its daily limit, so the remaining recipients will get this campaign on later days.'
+      : wait.linkHold === 'blocklist' ? 'Sending will continue once an operator clears this link domain for marketing.'
       : wait.reason === 'link_record'
         ? 'It continues by itself once this workspace’s sending resumes.'
       : wait.reason === 'list_probe'
@@ -209,6 +211,10 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
       {/* Hosted always pauses on high bounces or complaints. */}
       {!multiTenant && <Checkbox label="Auto-pause on high bounces or complaints" checked={autoPause} onCheckedChange={value => { setAutoPause(value); setError('') }} disabled={busy} />}
     </form>}
+    {/* A plan held on the same batch after a day that wasn't healthy (api/src/send-guards.ts), and what lets it grow. */}
+    {pacing?.held && <p className="campaign-note" data-tone="warning"><span>Sending batch {number(pacing.held.batch)} again since {relativeTime(pacing.held.since)}: the last day had {pacing.held.why.map(why => ({ bounces: 'too many hard bounces', complaints: 'too many spam complaints', blocklist: 'replies naming a blocklist' })[why]).join(' and ') || 'too many failures'}. {pacing.held.toGrow}</span></p>}
+    {/* Recipient domains this campaign stopped sending to because nearly all of its mail there bounced for good. */}
+    {expansion.stoppedDomains && expansion.stoppedDomains.length > 0 && <p className="campaign-note"><span>Stopped sending to {expansion.stoppedDomains.length === 1 ? 'one recipient domain' : `${number(expansion.stoppedDomains.length)} recipient domains`} where its mail kept bouncing for good: {expansion.stoppedDomains.slice(0, 5).map(item => item.domain).join(', ')}{expansion.stoppedDomains.length > 5 ? ` and ${number(expansion.stoppedDomains.length - 5)} more` : ''}. The rest of the recipients there are counted as canceled and aren't charged; they stay on your lists.</span></p>}
     {error && <p className="campaign-note" data-tone="danger" role="alert">{error}</p>}
   </div>
 }

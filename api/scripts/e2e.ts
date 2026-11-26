@@ -345,6 +345,7 @@ async function devBoundaries() {
   });
   await denied('createAgentSetupToken',{});
   await denied('getAgentSetupToken',{path:fake});
+  await denied('listWaitingAgentDevices',{});
   for (const op of ['lookUpAgentDevice','approveAgentDevice','denyAgentDevice'] as const) await denied(op,{body:{userCode:'BCDF-GHJK'}});
   for (const op of ['getConnection','listConnectionRegions','refreshConnectionScan','getConnectionRegionStatus'] as const) await denied(op,{},403,'PERMISSION_DENIED');
   await denied('verifyConnection',{body:{awsAccountId:'000000000000'}},403,'PERMISSION_DENIED');
@@ -738,7 +739,10 @@ async function unsubscribe(emailId: string, campaignPath?: { id: string }) {
   check(footer[2] === E2E_POSTAL_ADDRESS, 'the footer lacks the postal address under the unsubscribe link');
   const token = footer[1]!;
   const page = await api('unsubscribeByLink', { path: { token }, parseAs: 'text' });
-  check(page.includes('<form method="post">'), 'GET must display a confirmation form');
+  // The confirmation is a POST form carrying the confirm field, on whichever page shows it: the plain confirmation, or the
+  // preference page where the workspace has topics (its Unsubscribe from all). The other forms and their attributes may
+  // change; api.acceptance.test.ts checks the same predicate on both pages.
+  check(/<form method="post"[^>]*>(?:(?!<\/form>)[\s\S])*name="confirm" value="footer"/.test(page), 'GET must display a confirmation form');
   if (campaignPath) check((await api('previewCampaignAudience', { path: campaignPath })).eligible === 1, 'GET changed audience consent');
   else {
     const [row] = (await api('listContacts', { query: { email: success } })).data;

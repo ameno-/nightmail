@@ -8,18 +8,16 @@
 /* A tab's count holds its width while it loads (Tabs draws the slot empty), so the tabs after it never move. */
 .sinbox-tabs .ui-tab__count { min-width: 16px; text-align: left; }
 .sinbox-toolbar { justify-content: space-between; }
-/* The channel filter, where the rail (which has it) is hidden. */
-.sinbox-toolbar .sinbox-channel-select { width: 148px; }
-@media (min-width: 1200px) { .sinbox-toolbar .sinbox-channel-select { display: none; } }
+.sinbox-toolbar .sinbox-channel-select { width: 156px; }
 .sinbox-more { align-self: flex-start; margin-top: var(--space-12); }
 .sinbox-cell { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The list: dense rows like the log stream; who and what in the body face, everything else in small mono. */
 .sinbox-table { --table-row-height: var(--row-height-dense); }
-.sinbox-table .ui-table td:is([data-col='status'], [data-col='priority'], [data-col='activity']) { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: -.01em; }
+.sinbox-table .ui-table td:is([data-col='status'], [data-col='activity']) { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: -.01em; }
 .sinbox-table .ui-table td[data-col='activity'] { color: var(--color-muted); }
 /* A tablet's list: narrower status and customer, so the conversation and its last message keep their room. */
-@media (max-width: 1199px) { .sinbox-table { --sinbox-customer: 20%; --sinbox-status: 148px; --sinbox-priority: 64px; } }
+@media (max-width: 1199px) { .sinbox-table { --sinbox-customer: 20%; --sinbox-status: 148px; } }
 .sinbox-who { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .sinbox-unread { flex: none; width: 6px; height: 6px; border-radius: 50%; }
 .sinbox-who[data-unread] .sinbox-unread { background: var(--color-text); }
@@ -42,10 +40,7 @@
 /* A card's own line for the last message, under the subject. */
 .ui-card__segment > .sinbox-preview { display: block; }
 .ui-card__segment .sinbox-subject__text { max-width: none; }
-/* The rail's first title is as tall as the table's head row, so the two read on one line. */
-.sinbox-split .ui-facets__group:first-child > .ui-facets__title { height: var(--row-height-dense); }
-/* No rule beside the rail or under a row (the shared table and split draw none in the borderless console either). */
-.sinbox-split > .ui-split__rail { border-right: 0; }
+/* No rule under a row (the shared table draws none in the borderless console either). */
 .sinbox-page .ui-table :is(th, td) { border-bottom: 0; }
 
 /* One conversation. Its title and facts hold one line each, so the header is as tall loaded as loading. On a wide window
@@ -162,7 +157,7 @@
 .ui-kv.sinbox-kv :is(dt, dd) { border-bottom: 0; }
 .ui-kv.sinbox-kv dt { padding-right: var(--space-16); }
 .sinbox-address { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
-.sinbox-ticket { display: inline-flex; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
+
 .sinbox-faint { color: var(--color-faint); }
 .sinbox-list, .sinbox-notes { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .sinbox-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: var(--row-height-dense); font-size: var(--text-sm); line-height: 20px; }
@@ -174,7 +169,7 @@ a.sinbox-list__main:focus-visible { text-decoration: underline; text-underline-o
 .sinbox-notes li { display: grid; gap: var(--space-4); padding-block: var(--space-6); font-size: var(--text-sm); line-height: 20px; }
 .sinbox-notes p { margin: 0; overflow-wrap: anywhere; }
 .sinbox-notes .sinbox-list__meta { max-width: none; }
-.sinbox-none { display: flex; align-items: center; min-height: var(--row-height-dense); margin: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); }
+
 
 /* The shortcuts sheet. */
 .sinbox-keys { display: grid; margin: 0; font-size: var(--text-sm); }
@@ -194,7 +189,7 @@ a.sinbox-list__main:focus-visible { text-decoration: underline; text-underline-o
   .sinbox-composer:focus-within .ui-textarea, .sinbox-composer[data-filled] .ui-textarea { height: 112px; padding-block: var(--space-8); }
   .sinbox-composer:not(:focus-within):not([data-filled]):not([data-unavailable]) .sinbox-composer__actions { display: none; }
 }
-@media (pointer: coarse) { .data-toolbar > .sinbox-shortcuts-button { display: none; } }
+
 /* A phone's conversation header: the title, then its facts on two full-width lines (where it is, then the agent), then
    the actions on a line of their own, so nothing is cut off. The skeleton has the same lines. */
 @media (max-width: 639px) {
@@ -207,3 +202,7 @@ a.sinbox-list__main:focus-visible { text-decoration: underline; text-underline-o
 /* A card leaves out what a row has nothing for (no ticket). */
 .sinbox-table .ui-card__segment:empty { display: none; }
 .sinbox-sheet .sinbox-panel__body { padding-bottom: var(--space-8); }
+
+/* An approval's preview: exactly what would be sent, as text (never rendered), and why it can't go when it can't. */
+.sinbox-approval__preview { margin: var(--space-12) 0 0; padding: var(--space-12) var(--space-16); max-height: 240px; overflow: auto; border-radius: var(--radius-md); background: var(--color-layer-1); color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+.sinbox-approval__blocked { margin: var(--space-12) 0 0; color: var(--color-warning); font-size: var(--text-sm); line-height: var(--leading-sm); }

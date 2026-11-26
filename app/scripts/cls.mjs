@@ -53,6 +53,7 @@
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
 // no request is in flight, fonts are loaded and the page has rendered and gone idle twice in a row; there are no
 // fixed sleeps, and polling pages settle between polls.
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -66,9 +67,12 @@ const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resol
 const only = process.env.CLS_ONLY ? new RegExp(process.env.CLS_ONLY, 'i') : null;
 // Each in-flight page owns a renderer. Leave room for the fixture API, other shards and their databases.
 const workers = Number(process.env.CLS_WORKERS) || Math.min(8, availableParallelism() * 2);
-const shard = Number(process.env.CLS_SHARD_INDEX ?? 0), shards = Number(process.env.CLS_SHARD_COUNT ?? 1);
-if (!Number.isSafeInteger(shards) || shards < 1 || !Number.isSafeInteger(shard) || shard < 0 || shard >= shards)
-  throw new Error('CLS_SHARD_INDEX must be a zero-based integer below CLS_SHARD_COUNT.');
+// In CI one fixture owns the exclusive measurements and the TV build. The other fixtures hash shared
+// measurements by page, viewport/theme and navigation mode. With no shard arguments, run both lanes.
+const exclusive = process.env.CLS_SHARD_INDEX === 'alone';
+const shards = Number(process.env.CLS_SHARD_COUNT ?? 1), shard = Number(process.env.CLS_SHARD_INDEX ?? 0);
+if (!Number.isSafeInteger(shards) || shards < 1 || (exclusive ? shards < 2 : !Number.isSafeInteger(shard) || shard < 0 || shard >= Math.max(1, shards - 1)))
+  throw new Error('CLS_SHARD_INDEX must be a shared shard index or "alone" (the last of CLS_SHARD_COUNT fixtures).');
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
@@ -200,6 +204,7 @@ const pages = ids => [
   ['Segment', `/audience/segments/${ids.segment}`, { from: '/audience/segments', row: 'Pro plan' }],
   // Property rules: the name beside the field, a day with its zone, and a presence check without a value.
   ['Segment · property rules', `/audience/segments/${ids.propertySegment}`, { from: '/audience/segments', row: 'Waiting companies' }],
+  ['Topics', '/audience/topics', { from: '/audience' }],
   ['Domains', '/domains', { from: '/overview' }],
   ['Domain', `/domains/${ids.domain}`, { from: '/domains' }],
   // A domain with a custom MAIL FROM: its MX and SPF records join the table, each with a menu to change it.
@@ -239,7 +244,7 @@ const pages = ids => [
   ['Operator', '/operator', { from: '/overview' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
-  ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator', click: 'Waitlist' }],
+  ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator?view=signups', click: 'Waitlist' }],
   // Sign-ups: the limit and what fills it over every workspace; Set limit opens its fields once the numbers are in.
   ['Operator · sign-ups', '/operator?view=signups', { from: '/operator', click: 'Sign-ups' }],
   ['Operator · sign-up limit dialog', '/operator?view=signups', { dialog: 'Set limit' }],
@@ -249,6 +254,7 @@ const pages = ids => [
   ['Operator · abuse · cluster', `/operator/abuse/${ids.abuseCluster}`, { from: '/operator?view=abuse', row: 'Several accounts · Shared card' }],
   ['Operator · abuse · alerts', '/operator?view=abuse&show=alerts', { from: '/operator?view=abuse', click: 'Alerts' }],
   ['Operator · abuse · Slack card', '/operator?view=abuse&show=alerts', { dialog: 'High risk' }],
+  ['Operator · lists', '/operator?view=lists', { from: '/operator?view=abuse', click: 'Lists' }],
   // Health: six facts and one table of what the minute tick last wrote, the open alerts first.
   ['Operator · health', '/operator?view=health', { from: '/operator', click: 'Health' }],
   // Glass: the board's tiles, funnel, region rows (two at least), metric rows and feed column have fixed sizes, and feed
@@ -258,13 +264,12 @@ const pages = ids => [
   ['Glass · not an operator', '/glass', { user: 'nia', notFound: true }],
   // The Deliverability board: tiles, the providers' table, groups and VDM's table of fixed rows, filtered in place.
   ['Glass · deliverability', '/glass?view=deliverability', { from: '/glass', click: 'Deliverability' }],
-  // The support inbox (staff): Needs you and its counts, AI handling, Waiting on customer, a conversation's timeline beside
+  // The support inbox (staff): Needs you and All, a conversation's timeline beside
   // its customer panel, an email conversation (the email as it arrived), and on a phone the panel's sheet.
   ['Support', '/support', { from: '/overview' }],
-  ['Support · AI handling', '/support?view=agent', { from: '/support', click: 'AI handling' }],
-  ['Support · waiting on customer', '/support?view=waiting', { from: '/support', click: 'Waiting on customer' }],
+  ['Support · all', '/support?view=all', { from: '/support', click: 'All' }],
   ['Support · conversation', `/support/${ids.supportConversation}`, { from: '/support', row: 'DKIM will not verify' }],
-  ['Support · email conversation', `/support/${ids.supportEmail}`, { from: '/support?view=waiting', row: 'Why did my test email bounce?' }],
+  ['Support · email conversation', `/support/${ids.supportEmail}`, { from: '/support?view=all', row: 'Why did my test email bounce?' }],
   ['Support · customer sheet', `/support/${ids.supportConversation}`, { dialog: 'Customer', phoneOnly: true }],
   // A change support proposed, from its emailed link: the dialog over Overview opens once Nightmail's record has loaded.
   ['Support · confirm a change', `/support/actions/${ids.supportAction}`, {}],
@@ -315,6 +320,8 @@ const pages = ids => [
   // Signed out on a dashboard page (a link from an email) and on an address the dashboard doesn't have.
   ['Signed out · deep link', '/overview', { user: null }],
   ['Signed out · page not found', '/no-such-page', { user: null, notFound: true }],
+  // The link an agent shows, opened signed out: it says an agent is waiting, with its code, before the sign-in.
+  ['Signed out · connect', `/connect?code=${ids.deviceCode}`, { user: null }],
   // A hosted sign-in nothing admitted lands here, with its address in a short-lived cookie (api/src/account-login.ts).
   ['Signed out · waitlist', '/?auth=waitlist&position=4', { user: null, waitlist: 'mara.quinn@example.net' }],
   // The same refusal for a GitHub or password sign-in that showed nothing of its address, with a place open for it: a
@@ -389,9 +396,9 @@ const pages = ids => [
   // ⌘K, from the command bar's field: the command menu over Logs, its whole list (pages, then actions) at a fixed height.
   ['Logs · command menu', '/logs', { dialog: 'Search or jump' }],
   ['Domains · add domain dialog', '/domains', { dialog: 'Add domain' }],
-  ['Domain · add custom MAIL FROM dialog', `/domains/${ids.domain}`, { dialog: 'Add custom MAIL FROM' }],
-  ['Domain · change custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { menu: ['Actions for MAIL FROM MX record', 'Change custom MAIL FROM', 'Change custom MAIL FROM'] }],
-  ['Domain · remove custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { menu: ['Actions for MAIL FROM MX record', 'Remove custom MAIL FROM', 'Remove custom MAIL FROM?'] }],
+  ['Domain · add custom MAIL FROM dialog', `/domains/${ids.domain}`, { disclose: 'DNS records', dialog: 'Add custom MAIL FROM' }],
+  ['Domain · change custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { disclose: 'DNS records', menu: ['Actions for MAIL FROM MX record', 'Change custom MAIL FROM', 'Change custom MAIL FROM'] }],
+  ['Domain · remove custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { disclose: 'DNS records', menu: ['Actions for MAIL FROM MX record', 'Remove custom MAIL FROM', 'Remove custom MAIL FROM?'] }],
   ['API keys · create key dialog', '/api-keys', { dialog: 'Create key' }],
   // /api-keys?create=smtp opens Create key on an SMTP login: its domains load after it opens.
   ['API keys · SMTP login dialog', '/api-keys?create=smtp', {}],
@@ -423,6 +430,12 @@ const pages = ids => [
   ['Settings · balance dialog', '/settings#billing', { dialog: '$' }],
   // A support email's sign-in link: the dialog answers Continue (the claim) in place, without moving.
   ['Support · continue email', `/support/continue/${ids.continueConversation}/${ids.continueMessage}`, { user: 'nia', dialog: 'Continue' }],
+  // The same link for a sign-in that proves no mailbox: the way through, one press that emails a sign-in link to the
+  // address the email came from, answered in place. One press a pass: the three passes are the conversation's daily three.
+  ['Support · continue email · sign-in link', `/support/continue/${ids.linkConversation}/${ids.linkMessage}`, { user: 'ona', dialog: 'Email me a sign-in link' }],
+  // The second choice, answered in place: signed in as her, and from a browser signed in to nobody.
+  ['Support · continue email · answer by email', `/support/continue/${ids.answerConversation}/${ids.answerMessage}`, { user: 'ona', dialog: 'Answer me by email instead' }],
+  ['Support · continue email · signed out', `/support/continue/${ids.outConversation}/${ids.outMessage}`, { user: null, dialog: 'Answer me by email instead' }],
 ];
 
 // The television homepage's pages (CLS_HOME=tv, above), each also in the phone pass.
@@ -432,7 +445,202 @@ const televisionPages = [
   ['Overview · from the television', '/overview', { from: '/', click: 'Open dashboard', still: true }],
 ];
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · first run', 'Overview · first run · one step', 'Overview · first run · all done', 'Overview · first run · remembered', 'Overview · first run · dismissed', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · images held back', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Received email · details sheet', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Mail routing', 'Mail routing · rules', 'Mail routing · new rule', 'Mail routing · recipe form', 'Mail routing · recipe rule', 'Mail routing · rule editor', 'Mail routing · rule editor · new script', 'Mail routing · flow panel', 'Mail routing · typed address', 'Mail routing · why it went here dialog', 'Mail routing · address', 'Mail routing · address · deleted', 'Mail routing · address · where mail goes', 'Mail routing · address · settings', 'Mail routing · agent inboxes', 'Mail routing · destinations', 'Campaigns', 'Campaign review', 'Campaign review · send', 'Campaign review · ramp', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'Domains · built-in', 'Domain · built-in', 'Onboarding · get started', 'Onboarding · get started by hand', 'Onboarding · get started provisioning', 'Onboarding · get started own domain', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Mail routing · inbox', 'Mail routing · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Glass · deliverability', 'Support', 'Support · AI handling', 'Support · waiting on customer', 'Support · conversation', 'Support · email conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Compare · Nylas', 'Compare · Robotomail', 'Compare · Postfleet', 'Compare · Lumbox', 'Compare · Mails.ai', 'Compare · Dead Simple Email', 'Compare · Agent Identity', 'Compare · Inkbox', 'Compare · beehiiv', 'Compare · MailerLite', 'Compare · Buttondown', 'Compare · EmailOctopus', 'Compare · Ghost(Pro)', 'Compare · AWeber', 'Compare · Loops', 'Compare · Brevo', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · sender score dialog · not graded', 'Overview · daily limit dialog · evaluation', 'Overview · connect agent sheet', 'Overview · More sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Mail routing · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email', 'Compare · MailerSend', 'Compare · Mailtrap', 'Compare · SMTP2GO', 'Compare · AhaSend', 'Compare · CloudMailin', 'Compare · SocketLabs', 'Compare · MailPace', 'Compare · UniOne', 'Compare · MailChannels']);
+const phonePages = new Set([
+  'Segment · property rules',
+  'Newsletter',
+  'Newsletter · one draft',
+  'Newsletter · new',
+  'New newsletter',
+  'New issue',
+  'Campaigns · with newsletters',
+  'Overview',
+  'Overview · setup',
+  'Overview · first run',
+  'Overview · first run · one step',
+  'Overview · first run · all done',
+  'Overview · first run · remembered',
+  'Overview · first run · dismissed',
+  'Overview · range',
+  'Overview · stream',
+  'Overview · panel hidden',
+  'Logs · from an Overview tile',
+  'Homepage · signed in',
+  'Overview · from the homepage',
+  'Logs',
+  'Logs · range',
+  'Sent email',
+  'Sent email · junk-like',
+  'Sent email · images held back',
+  'Sent email · bounced',
+  'Sent email · delayed',
+  'Sent email · bounced details',
+  'Sent email · checks sheet',
+  'Received email',
+  'Received email · details sheet',
+  'Sent email · thread',
+  'Received email · thread',
+  'Received email · from its thread',
+  'Sent email · thread sheet',
+  'Mail routing',
+  'Mail routing · rules',
+  'Mail routing · new rule',
+  'Mail routing · recipe form',
+  'Mail routing · recipe rule',
+  'Mail routing · rule editor',
+  'Mail routing · rule editor · new script',
+  'Mail routing · flow panel',
+  'Mail routing · typed address',
+  'Mail routing · why it went here dialog',
+  'Mail routing · address',
+  'Mail routing · address · deleted',
+  'Mail routing · address · where mail goes',
+  'Mail routing · address · settings',
+  'Mail routing · agent inboxes',
+  'Mail routing · destinations',
+  'Campaigns',
+  'Campaign review',
+  'Campaign review · send',
+  'Campaign review · ramp',
+  'Templates',
+  'Audience',
+  'Lists',
+  'Topics',
+  'Domains',
+  'Domain',
+  'Domain · custom MAIL FROM',
+  'Domain · records missing',
+  'Domain · records correct',
+  'Domains · built-in',
+  'Domain · built-in',
+  'Onboarding · get started',
+  'Onboarding · get started by hand',
+  'Onboarding · get started provisioning',
+  'Onboarding · get started own domain',
+  'API keys',
+  'Settings',
+  'Settings · members',
+  'Settings · activity',
+  'Settings · billing',
+  'Settings · billing · owed',
+  'Settings · billing · free',
+  'Settings · billing · member',
+  'Settings · billing · old usage link',
+  'Settings · balance dialog',
+  'Settings · webhook',
+  'Settings · MCP connection',
+  'Onboarding',
+  'Onboarding · AWS stack',
+  'Onboarding · AWS refused',
+  'Onboarding · AWS choose',
+  'Onboarding · AWS sandbox',
+  'Onboarding · AWS production access',
+  'Onboarding · AWS setting up',
+  'Mail routing · inbox',
+  'Mail routing · endpoints',
+  'Onboarding · AWS disconnecting',
+  'Connect · agent code',
+  'Connect · type a code',
+  'Settings · sending · AWS',
+  'Two accounts · switch',
+  'Operator',
+  'Operator · workspace',
+  'Operator · UI notes',
+  'Operator · waitlist',
+  'Operator · health',
+  'Operator · sign-ups',
+  'Operator · sign-up limit dialog',
+  'Operator · abuse',
+  'Operator · abuse · cluster',
+  'Operator · abuse · alerts',
+  'Operator · abuse · Slack card',
+  'Glass',
+  'Glass · not an operator',
+  'Glass · deliverability',
+  'Support',
+  'Support · all',
+  'Support · conversation',
+  'Support · email conversation',
+  'Support · customer sheet',
+  'Support · confirm a change',
+  'Overview · UI notes mode',
+  'Operator · without UI notes',
+  'Overview · restricted',
+  'Campaigns · restricted',
+  'Signed out',
+  'Signed out · deep link',
+  'Signed out · page not found',
+  'Signed out · connect',
+  'Signed out · waitlist',
+  'Signed out · waitlist, place ready',
+  'Signed out · waitlist, place held',
+  'Signed out · waitlist, link expired',
+  'Signed out · sign-in link',
+  'Legal',
+  'Legal · terms',
+  'Legal · privacy',
+  'Pricing',
+  'Pricing · large',
+  'Compare · Mailchimp',
+  'Compare · Mailchimp · steel frame',
+  'Compare · Resend',
+  'Compare · AgentMail',
+  'Compare · Bird',
+  'Compare · Mailgun',
+  'Compare · Mailjet',
+  'Compare · Mandrill',
+  'Compare · Postmark',
+  'Compare · SendGrid',
+  'Compare · Nylas',
+  'Compare · Robotomail',
+  'Compare · Postfleet',
+  'Compare · Lumbox',
+  'Compare · Mails.ai',
+  'Compare · Dead Simple Email',
+  'Compare · Agent Identity',
+  'Compare · Inkbox',
+  'Compare · beehiiv',
+  'Compare · MailerLite',
+  'Compare · Buttondown',
+  'Compare · EmailOctopus',
+  'Compare · Ghost(Pro)',
+  'Compare · AWeber',
+  'Compare · Loops',
+  'Compare · Brevo',
+  'Docs',
+  'Docs · MCP guide',
+  'Docs · section',
+  'Docs · signed out',
+  'Signed out',
+  'Support chat',
+  'Overview · sending limits dialog',
+  'Overview · sender score dialog',
+  'Overview · sender score dialog · not graded',
+  'Overview · daily limit dialog · evaluation',
+  'Overview · connect agent sheet',
+  'Overview · More sheet',
+  'API keys · create key dialog',
+  'API keys · SMTP login dialog',
+  'API keys · edit key dialog',
+  'Mail routing · new address dialog',
+  'Settings · invite dialog',
+  'Settings · postal address dialog',
+  'Settings · add credit dialog',
+  'Domain · add custom MAIL FROM dialog',
+  'Domain · change custom MAIL FROM dialog',
+  'Support · continue email',
+  'Support · continue email · sign-in link',
+  'Support · continue email · answer by email',
+  'Support · continue email · signed out',
+  'Compare · MailerSend',
+  'Compare · Mailtrap',
+  'Compare · SMTP2GO',
+  'Compare · AhaSend',
+  'Compare · CloudMailin',
+  'Compare · SocketLabs',
+  'Compare · MailPace',
+  'Compare · UniOne',
+  'Compare · MailChannels',
+]);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -570,6 +778,8 @@ async function masking(page, hover, shell) {
   const frame = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
   // ⇧ is ignored while typing in a field, so leave whatever field has focus first.
   await page.evaluate(() => document.activeElement?.blur());
+  // An entrance still running (a page's rise) moves an address on its own: measure once it has finished.
+  await page.evaluate(() => Promise.race([Promise.all(document.getAnimations().filter(a => a.effect?.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {}))), new Promise(done => setTimeout(done, 5000))]));
   for (const { index, x, y } of await page.evaluate(maskedTargets)) {
     const before = await page.evaluate(maskedState, index);
     await page.mouse.move(x, y); await frame();
@@ -706,6 +916,13 @@ async function measure(browser, job, fx) {
       if (!opened) problems.push('no Help button');
       else await page.waitForFunction(() => document.querySelector('#support-panel[data-open]:not([data-busy])') && !document.querySelector('#support-panel .support-caret'), null, { timeout: 30_000, polling: 100 });
       await settle(page, net);
+    }
+    if (job.disclose) {
+      const toggle = page.locator('button[aria-expanded], details > summary', { hasText: job.disclose }).first();
+      if (await toggle.isVisible()) {
+        await toggle.click();
+        await settle(page, net);
+      } else if (job.device === 'phone') problems.push(`no disclosure “${job.disclose}”`);
     }
     if (job.dialog) {
       const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.textContent.trim().startsWith(label)); el?.click(); return Boolean(el); }, job.dialog);
@@ -1066,18 +1283,18 @@ const fx = await start(repo, { dist: television ? 'app/dist-tv' : 'app/dist', se
   throw error;
 });
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => Promise.allSettled([fx.stop(), browserPromise.then(b => b.close())]).finally(() => process.exit(130)));
-let results = [];
+let results = [], inventorySize;
 try {
   const [ids, browser] = await Promise.all([seed(fx), browserPromise]);
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [pass, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start, wide }] of television ? televisionPages : pages(ids)) {
+  for (const [pass, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, disclose, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start, wide }] of television ? televisionPages : pages(ids)) {
     if (only && !only.test(name) || pass === 'phone' && !television && !phonePages.has(name) || phoneOnly && pass !== 'phone') continue;
     // `wide` pages take the desktop passes at 3440 × 1440.
     const device = wide && pass === 'desktop' ? 'wide' : pass;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, disclose, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
     jobs.push(load);
     if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, step, start, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
@@ -1085,15 +1302,10 @@ try {
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
   jobs.forEach((job, index) => { job.index = index; });
   const queue = [...jobs].sort((a, b) => weight(b) - weight(a));
-  // Deal each lane round-robin within each origin. A stride of four over alternating origins aimed up to
-  // 20 simultaneous pages at one fixture API and hit READ_CONCURRENCY_LIMIT. Keep global IDs for the
-  // origin and throttle bucket; the two buckets are fixed even on local runs with a single API.
-  const lane = alone => {
-    const next = [0, Math.floor(shards / 2)];
-    return queue.filter(job => Boolean(job.alone) === alone && next[job.index % 2]++ % shards === shard);
-  };
-  const shared = lane(false), alone = lane(true);
-  console.log(`${elapsed()} shard ${shard + 1}/${shards}: measuring ${shared.length + alone.length} of ${queue.length} page loads, ${workers} at a time`);
+  inventorySize = jobs.length; // Full production or TV inventory, before assigning a shard.
+  const shared = queue.filter(job => !job.alone && !exclusive && (shards === 1 || createHash('sha256').update(job.slug).digest().readUInt32BE(0) % (shards - 1) === shard));
+  const alone = queue.filter(job => job.alone && (exclusive || shards === 1));
+  console.log(`${elapsed()} shard ${exclusive ? 'alone' : shard}/${shards}: measuring ${shared.length + alone.length} of ${queue.length} page loads, ${workers} at a time`);
   const run = async job => {
     const r = await measure(browser, job, fx);
     results[job.index] = r;
@@ -1113,6 +1325,10 @@ try {
   await fx.stop();
 }
 results = results.filter(Boolean);
+if (process.env.SHARD_REPORT) {
+  const id = television ? 'tv' : exclusive ? 'alone' : String(shard);
+  appendFileSync(process.env.SHARD_REPORT, JSON.stringify({ id, ran: results.length, total: inventorySize }) + '\n');
+}
 const { markdown, failed } = summarize(results, ((Date.now() - began) / 1000).toFixed(0));
 writeFileSync(join(out, 'report.json'), JSON.stringify(results, null, 2));
 writeFileSync(join(out, 'summary.md'), markdown);

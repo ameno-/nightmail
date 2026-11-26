@@ -1,3 +1,5 @@
+import { parseListRiskLines } from './list-risk-lines.js';
+import { parseRampLines } from './ramp-lines.js';
 import { createPrivateKey, hkdfSync } from 'node:crypto';
 import { z } from 'zod';
 import { ApiError, log } from './core.js';
@@ -54,9 +56,6 @@ const values = z.object({
   // Hosted: the one email to a domain's owners when its records are still missing an hour after it was added
   // (src/domain-setup.ts). Off by default; the dashboard's banner and the DNS check run either way.
   DOMAIN_SETUP_REMINDER: z.enum(['on', 'off']).default('off'),
-  // Hosted: one bounded NS lookup when a domain is added, so a name nobody serves DNS for says so at once (record-check.ts
-  // dnsZone). On by default; off, such a domain is only found by Check now and the background check.
-  DOMAIN_NS_CHECK: z.enum(['on', 'off']).default('on'),
   // Hosted: the one email to a new workspace's owners when it still has no domain an hour after sign-up (src/domain-setup.ts).
   // Off by default; the Overview card runs either way.
   NO_DOMAIN_REMINDER: z.enum(['on', 'off']).default('off'),
@@ -78,6 +77,10 @@ const values = z.object({
   // Hosted only: who a built-in domain sends to. anyone (the default, 100 recipients a day) or members (the workspace
   // members' own verified addresses, 10 a day): SEND_LIMITS.builtin.
   NIGHTMAIL_BUILTIN_SEND_SCOPE: z.enum(['anyone', 'members']).default('anyone'),
+  // Hosted only, off unless set: while built-in domains send to members only, a reply (replyToInboundThread) may go once
+  // to the sender of the message it answers, when that sender passed authentication (src/builtin-domain.ts
+  // builtinReplyException). "<per workspace a day>,<per recipient a day>". Unset or not two numbers: off, as before.
+  NIGHTMAIL_BUILTIN_REPLIES: z.string().regex(/^\d{1,5},\d{1,4}$/).optional(),
   // Hosted only: a list (lst_…) of the platform workspace above that everyone who joins the waitlist or signs up is
   // kept in as a contact, with properties to segment by (src/signups.ts). Unset, or not a list ID: nothing is written.
   NIGHTMAIL_SIGNUPS_LIST_ID: z.unknown().optional(),
@@ -122,18 +125,18 @@ const values = z.object({
   // Set, a delivery must also carry a matching X-PlanetScale-Signature. Treat as a secret. Its length is checked in
   // loadConfig, not here: an optional secret that is wrong must not stop the installation.
   PLANETSCALE_WEBHOOK_SECRET: z.unknown().optional(),
-  // Hosted only. Reserved for a later release: monitoring only observes, and nothing reads this.
-  NIGHTMAIL_ABUSE_ENFORCE: z.enum(['true','false']).default('false'),
+
   // List hygiene (src/list-hygiene.ts): the nightly sync of the open disposable/role/provider lists (off: the vendored snapshot
   // only), and the DNS-over-HTTPS resolver for its domain checks (off: none; Hosted defaults to Cloudflare's).
   NIGHTMAIL_HYGIENE_LISTS: z.enum(['on','off']).default('on'),
+  // The list-risk measure's private lines (src/list-risk-lines.ts): JSON. Unset, the measure records no band.
+  NIGHTMAIL_LIST_RISK: z.string().optional().refine(raw => raw === undefined || parseListRiskLines(raw) !== null, 'JSON of list-risk lines'),
+  // The send review's private ramp sizing (src/ramp-lines.ts): JSON. Unset, the defaults in src/standing-model.ts.
+  NIGHTMAIL_RAMP: z.string().optional().refine(raw => raw === undefined || parseRampLines(raw) !== null, 'JSON of ramp lines'),
   NIGHTMAIL_HYGIENE_DNS: z.union([z.literal('off'), z.string().url().refine(u => u.startsWith('https://'), 'Use an https:// DNS-over-HTTPS URL, or off.')]).optional(),
   STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
   STRIPE_WEBHOOK_SECRET: optional(z.string().regex(/^whsec_[A-Za-z0-9_]+$/)),
   STRIPE_AUTOMATIC_TAX: z.enum(['true','false']).default('false'),
-  // The one Stripe Product every top-up and recharge is for, created on first use with STRIPE_TAX_CODE (api/README.md, Stripe setup).
-  STRIPE_CREDIT_PRODUCT_ID: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).default('nightmail_credit'),
-  STRIPE_TAX_CODE: z.string().regex(/^txcd_\d{8}$/).default('txcd_10103001'),
   STRIPE_API_BASE: z.url().default('https://api.stripe.com'),
   NIGHTMAIL_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Hosted only, a secret: Glass's Gmail Postmaster Tools reads, an OAuth grant as JSON {clientId, clientSecret, refreshToken}
@@ -141,6 +144,11 @@ const values = z.object({
   NIGHTMAIL_POSTMASTER_CREDENTIALS: optional(z.string().max(4000)),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Private: initial volume, full daily volume, day reaching full volume, workspace percentage.
+  NIGHTMAIL_LINK_WARMUP: optional(z.string().regex(/^\d+:\d+:\d+:\d+$/).transform(value => {
+    const [initial, full, days, workspacePercent] = value.split(':').map(Number) as [number, number, number, number];
+    return { initial, full, days, workspacePercent };
+  }).refine(p => p.initial > 0 && p.full >= p.initial && p.full <= 2147483647 && p.days >= 2 && p.days <= 366 && p.workspacePercent > 0 && p.workspacePercent <= 100)),
   // Hosted: the link domain (src/link-domains.ts): the host the links in campaign and marketing mail (unsubscribe,
   // forwarding) go on, links.nightmailedge.com, served by the Worker's route on that zone. Never a name of PUBLIC_URL's domain.
   NIGHTMAIL_LINK_HOST: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
@@ -180,7 +188,6 @@ const values = z.object({
   // Aim the dispatcher at a share of the provider quota (1 = exactly the quota). Overshoot is self-correcting:
   // a throttled response drops the target back to the quota for ten seconds.
   DISPATCH_RATE_FACTOR: z.coerce.number().min(0.1).max(10).default(1),
-  DISPATCH_TX_RESERVE_PERCENT: z.coerce.number().min(0).max(90).default(15),
   DISPATCH_DAILY_HEADROOM_PERCENT: z.coerce.number().min(0).max(100).default(10),
   // Hosted: the percent of a shared account's daily SES limit all outside (non-exempt) workspaces together may use.
   HOSTED_CUSTOMER_SHARE_PERCENT: z.coerce.number().min(0).max(100).default(50),
@@ -259,10 +266,10 @@ export function deriveEncryptionKey(secret: string): string {
 // Only these independent integrations may be disabled by bad configuration. Auth/encryption, database
 // and live sending policy keep their fail-closed checks. Report names only, once per feature per isolate.
 const featureSettings = {
-  builtinDomains: ['NIGHTMAIL_BUILTIN_DOMAIN', 'NIGHTMAIL_BUILTIN_SEND_SCOPE'],
-  listHygiene: ['NIGHTMAIL_HYGIENE_LISTS'], dnsHygiene: ['NIGHTMAIL_HYGIENE_DNS'],
+  builtinDomains: ['NIGHTMAIL_BUILTIN_DOMAIN', 'NIGHTMAIL_BUILTIN_SEND_SCOPE'], builtinReplies: ['NIGHTMAIL_BUILTIN_REPLIES'],
+  listHygiene: ['NIGHTMAIL_HYGIENE_LISTS'], dnsHygiene: ['NIGHTMAIL_HYGIENE_DNS'], listRisk: ['NIGHTMAIL_LIST_RISK'], rampLines: ['NIGHTMAIL_RAMP'],
   linkHosts: ['NIGHTMAIL_LINK_SAAS_ZONE_ID', 'NIGHTMAIL_LINK_SAAS_TOKEN', 'NIGHTMAIL_LINK_SAAS_TARGET', 'NIGHTMAIL_LINK_HOST_WORKSPACES'],
-  sharedLinks: ['NIGHTMAIL_LINK_HOST'],
+  sharedLinks: ['NIGHTMAIL_LINK_HOST'], linkWarmup: ['NIGHTMAIL_LINK_WARMUP'],
   postmaster: ['NIGHTMAIL_POSTMASTER_CREDENTIALS'],
   supportChat: ['NIGHTMAIL_SUPPORT_URL', 'NIGHTMAIL_SUPPORT_SIGNING_KEY'],
   supportEmail: ['NIGHTMAIL_SUPPORT_ADDRESS_IDS'],
@@ -270,16 +277,18 @@ const featureSettings = {
   domainConnect: ['DOMAIN_CONNECT_PRIVATE_KEY', 'DOMAIN_CONNECT_KEY_ID'],
   analyticsPush: ['ANALYTICS_PUSH_URL', 'ANALYTICS_PUSH_SECRET'],
   mailGateway: ['MAILGW_API_TOKEN', 'MAILGW_PUBLIC_DOMAIN'],
-  stripe: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_AUTOMATIC_TAX', 'STRIPE_CREDIT_PRODUCT_ID', 'STRIPE_TAX_CODE', 'STRIPE_API_BASE'],
+  stripe: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_AUTOMATIC_TAX', 'STRIPE_API_BASE'],
   diskWebhook: ['PLANETSCALE_WEBHOOK_SECRET'],
   operatorAlerts: ['OPERATOR_SLACK_WEBHOOK_URL'], abuseAlerts: ['ABUSE_SLACK_WEBHOOK_URL'], reputationAlerts: ['REPUTATION_ALERT_SLACK_URL'],
   secondaryClassifier: ['JEVF_API_KEY', 'JEVF_ENDPOINT', 'JEVF_MODEL', 'JEVF_DEADLINE_MS', 'JEVF_MAX_CONCURRENCY', 'JEVF_SCREEN_THRESHOLD'],
   dashboardAnalytics: ['DASHBOARD_ANALYTICS'], domainSetupReminder: ['DOMAIN_SETUP_REMINDER'], noDomainReminder: ['NO_DOMAIN_REMINDER'],
-  domainNsCheck: ['DOMAIN_NS_CHECK'], placementShadow: ['NIGHTMAIL_PLACEMENT_SHADOW'], abuseMonitoring: ['NIGHTMAIL_ABUSE_MONITORING'],
+  placementShadow: ['NIGHTMAIL_PLACEMENT_SHADOW'], abuseMonitoring: ['NIGHTMAIL_ABUSE_MONITORING'],
   uiNotes: ['UI_NOTES_SUBJECTS'], notices: ['NIGHTMAIL_NOTIFY_FROM'], diskCapacity: ['DATABASE_DISK_GB'], placementDns: ['NIGHTMAIL_PLACEMENT_DBL_ZONE'],
 } satisfies Record<string, (keyof typeof values.shape)[]>;
 type Feature = keyof typeof featureSettings;
 const reported = new Set<Feature>();
+/** The optional features this installation turned off because a setting was set but not valid (or not set in full): for the operator Health page, by name only, never a value. */
+export const disabledSettings = () => [...reported].map(feature => ({ feature, settings: [...featureSettings[feature]] as string[] }));
 function disabled(feature: Feature) {
   if (!reported.has(feature)) {
     reported.add(feature);
@@ -288,9 +297,7 @@ function disabled(feature: Feature) {
   return undefined;
 }
 export function loadConfig(input: Record<string, unknown>): Config {
-  const catalogUnused = input.MULTI_TENANT !== 'true' || !input.STRIPE_SECRET_KEY || !input.STRIPE_WEBHOOK_SECRET;
-  const raw: Record<string, unknown> = {...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)])),
-    ...(catalogUnused ? { STRIPE_CREDIT_PRODUCT_ID: undefined, STRIPE_TAX_CODE: undefined } : {})};
+  const raw: Record<string, unknown> = {...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)]))};
   let parsed = values.safeParse(raw);
   if (!parsed.success) {
     const invalid = new Set(parsed.error.issues.map(issue => issue.path[0]));
@@ -299,7 +306,6 @@ export function loadConfig(input: Record<string, unknown>): Config {
         disabled(feature);
         for (const key of featureSettings[feature]) delete raw[key];
         // Keep default-on integrations off, and never widen the scope of a built-in sender.
-        if (feature === 'domainNsCheck') raw.DOMAIN_NS_CHECK = 'off';
         if (feature === 'builtinDomains') raw.NIGHTMAIL_BUILTIN_SEND_SCOPE = 'members';
         if (feature === 'listHygiene') raw.NIGHTMAIL_HYGIENE_LISTS = 'off';
         if (feature === 'dnsHygiene') raw.NIGHTMAIL_HYGIENE_DNS = 'off';
@@ -406,6 +412,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     mailServers: v.MAILGW_API_TOKEN ? mailServerHosts(v.MAILGW_PUBLIC_DOMAIN ?? url.hostname) : undefined,
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
     builtinDomain: v.MULTI_TENANT==='true' ? builtinParent(v.NIGHTMAIL_BUILTIN_DOMAIN, [url.origin, ...previousOrigins]) : undefined, builtinScope: v.NIGHTMAIL_BUILTIN_SEND_SCOPE,
+    builtinReplies: v.MULTI_TENANT==='true' && v.NIGHTMAIL_BUILTIN_REPLIES ? (([perDay, perRecipientPerDay]) => ({ perDay: perDay!, perRecipientPerDay: perRecipientPerDay! }))(v.NIGHTMAIL_BUILTIN_REPLIES.split(',').map(Number)) : null,
     signupsListId: v.MULTI_TENANT==='true' ? signupsListId(v.NIGHTMAIL_SIGNUPS_LIST_ID) : undefined,
     support: v.MULTI_TENANT==='true' ? { url: supportSigningKey ? v.NIGHTMAIL_SUPPORT_URL : undefined, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT
@@ -416,30 +423,32 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedScreen: v.MULTI_TENANT==='true' && v.NIGHTMAIL_HOSTED_SCREEN==='true',
     abuseMonitoring: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_MONITORING ? { since: new Date(v.NIGHTMAIL_ABUSE_MONITORING).toISOString() } : undefined,
     hygieneLists: v.NIGHTMAIL_HYGIENE_LISTS === 'on',
+    listRisk: parseListRiskLines(v.NIGHTMAIL_LIST_RISK),
+    rampLines: parseRampLines(v.NIGHTMAIL_RAMP),
     hygieneDnsUrl: v.NIGHTMAIL_HYGIENE_DNS === 'off' ? null : v.NIGHTMAIL_HYGIENE_DNS ?? (v.MULTI_TENANT === 'true' ? 'https://cloudflare-dns.com/dns-query' : null),
-    abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL ?? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
+    abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL ?? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
     deploy: { sha: typeof v.DEPLOY_SHA === 'string' && /^[0-9a-f]{7,40}$/.test(v.DEPLOY_SHA) ? v.DEPLOY_SHA : null,
       at: typeof v.DEPLOY_AT === 'string' && Number.isFinite(Date.parse(v.DEPLOY_AT)) ? new Date(v.DEPLOY_AT).toISOString() : null },
     planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true',
-      creditProduct: v.STRIPE_CREDIT_PRODUCT_ID, taxCode: v.STRIPE_TAX_CODE, apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
+      creditProduct: 'nightmail_credit', taxCode: 'txcd_10103001', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE, postmaster: v.MULTI_TENANT === 'true' ? postmaster : undefined,
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
     // The daily limit of a workspace the standing job has not seen yet: the evaluation's (docs/sending-limits.md).
     hostedSendCaps: { firstWeek: EVALUATION.limit },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
-    domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', domainNsCheck: v.MULTI_TENANT === 'true' && v.DOMAIN_NS_CHECK === 'on', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
+    domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', domainNsCheck: v.MULTI_TENANT === 'true', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
     analyticsPush: v.ANALYTICS_PUSH_URL && v.ANALYTICS_PUSH_SECRET ? { url: v.ANALYTICS_PUSH_URL, secret: v.ANALYTICS_PUSH_SECRET } : undefined,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
-    publicUrl: url.origin, linkHost, linkHosts, linkedImages: (v.CAMPAIGN_IMAGES ?? (url.protocol === 'https:' ? 'linked' : 'embedded')) === 'linked', sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
+    publicUrl: url.origin, linkHost, linkHosts, linkWarmup: v.NIGHTMAIL_LINK_WARMUP, linkedImages: (v.CAMPAIGN_IMAGES ?? (url.protocol === 'https:' ? 'linked' : 'embedded')) === 'linked', sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
-    dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, txReservePercent: v.DISPATCH_TX_RESERVE_PERCENT, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT, customerSharePercent: v.HOSTED_CUSTOMER_SHARE_PERCENT },
+    dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, txReservePercent: 15, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT, customerSharePercent: v.HOSTED_CUSTOMER_SHARE_PERCENT },
     aws,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], inboundTopicArns: [],

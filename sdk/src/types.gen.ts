@@ -223,6 +223,10 @@ export type ConnectionSummary = {
          * Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends.
          */
         used: number;
+        /**
+         * Present when, though it sends to members only, a reply (replyToInboundThread) may go once to the sender of the message it answers, if that sender passed authentication.
+         */
+        repliesToSenders?: true;
     } | null;
     /**
      * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.
@@ -615,6 +619,10 @@ export type AgentDeviceAuthorization = {
      * Seconds to wait between polls.
      */
     interval: number;
+    /**
+     * What to do now, in words: the link to show the person on its own line, then the polling.
+     */
+    nextStep: string;
 };
 
 export type AgentDeviceRequest = {
@@ -630,6 +638,30 @@ export type AgentDeviceRequest = {
      * What its key gets once approved.
      */
     permissions: Array<'read' | 'send' | 'manage'>;
+    /**
+     * The workspace of your own setup token that the agent held, which the page chooses first; null otherwise. Approving may still choose any workspace you own or administer.
+     */
+    suggestedWorkspaceId: string | null;
+    /**
+     * When you copied the prompt whose setup token the agent held; null for an agent that asked without one of yours. A request long after your last copy, or when you started no agent, isn't yours.
+     */
+    promptCopiedAt: string | null;
+};
+
+export type WaitingAgentDevices = {
+    data: Array<{
+        userCode: string;
+        /**
+         * What the agent says it is: its claim, not verified.
+         */
+        clientName: string | null;
+        createdAt: string;
+        expiresAt: string;
+        /**
+         * When you copied the prompt whose setup token it held.
+         */
+        promptCopiedAt: string;
+    }>;
 };
 
 export type AgentDeviceApproval = {
@@ -1086,6 +1118,13 @@ export type Topic = {
     archivedAt: string | null;
     createdAt: string;
     updatedAt: string;
+    /**
+     * With counts=true on listTopics: how many contacts have opted in to the topic and out of it (each recorded choice, a deleted contact’s included), as of the read. null when counting took longer than its time limit.
+     */
+    counts?: {
+        optedIn: number;
+        optedOut: number;
+    } | null;
 };
 
 export type AudienceQueryResult = {
@@ -1973,6 +2012,37 @@ export type CampaignDelivery = {
          * With a plan: the batch the current window releases, from 1.
          */
         batch: number | null;
+        /**
+         * With a plan whose growth is checked: held on the same batch since the day before it was not healthy; null while it grows.
+         */
+        held?: {
+            since: string;
+            /**
+             * The batch the plan repeats, from 1.
+             */
+            batch: number;
+            /**
+             * What made the last day unhealthy: hard bounces over 3% of at least 100 accepted, complaints over 0.08% (at least 2), or a reply naming a blocklist.
+             */
+            why: Array<'bounces' | 'complaints' | 'blocklist'>;
+            /**
+             * What lets the plan open its next batch, in a sentence.
+             */
+            toGrow: string;
+        } | null;
+        /**
+         * With a plan: its first day's small batch and the wait after it.
+         */
+        firstBatch?: {
+            /**
+             * Recipients the first day starts with.
+             */
+            size: number;
+            /**
+             * Minutes it then waits for their bounces and rejections before the rest of the day's batch.
+             */
+            waitMinutes: number;
+        } | null;
     };
     /**
      * The consent source confirmed at launch, if any.
@@ -1995,8 +2065,19 @@ export type CampaignDelivery = {
      */
     waiting: {
         reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp' | 'link_record';
+        /**
+         * When present, the daily pacing window is the shared link allowance, or the link record is held for operator review.
+         */
+        linkHold?: 'daily_budget' | 'blocklist';
         until: string;
     } | null;
+    /**
+     * Recipient domains this campaign stopped sending to because its mail there kept bouncing for good (the rest of its recipients there are counted in canceled, are not charged and are not suppressed), oldest first, at most 50. Empty unless the guard is on.
+     */
+    stoppedDomains?: Array<{
+        domain: string;
+        stoppedAt: string;
+    }>;
     /**
      * Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.
      */
@@ -2342,6 +2423,14 @@ export type CampaignAudienceCounts = {
         no_mail_domain: number;
     };
     /**
+     * With a topic: the subscribed contacts it leaves out (who opted out of it, or for a topic only people who opt in get, who didn’t). Counted in unsubscribed, not in eligible.
+     */
+    topicExcluded?: number;
+    /**
+     * The topic’s effect on this list couldn’t be counted in time: eligible and topicExcluded are estimated from the workspace’s choices about the topic. Sending counts it exactly.
+     */
+    approximate?: true;
+    /**
      * With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.
      */
     readiness?: {
@@ -2354,19 +2443,49 @@ export type CampaignAudienceCounts = {
          */
         summary: string | null;
         /**
-         * Every finding behind the verdict.
+         * The findings behind the verdict in the original codes, one per code: a newly registered domain, one new here and a new link domain read NEW_DOMAIN, a jump over the usual day SIZE_JUMP; blocklist findings appear only in findings. Prefer findings.
          */
         reasons: Array<{
             code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
             message: string;
         }>;
+        /**
+         * Every finding behind the verdict, with its own code: NEW_REGISTRATION (registered recently, from public registry data), NEW_HERE (registered long ago, new to this workspace), NEW_DOMAIN (added recently, registration not known), USUAL_JUMP, NEW_LINK_DOMAIN, BLOCKLISTED_BEFORE (an earlier send drew replies naming a blocklist and none has finished without since), BLOCKLIST_UNCOUNTED (a recent send's blocklist replies aren't counted yet, so it isn't taken for clean), and the original codes.
+         */
+        findings?: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS' | 'NEW_REGISTRATION' | 'NEW_HERE' | 'USUAL_JUMP' | 'NEW_LINK_DOMAIN' | 'BLOCKLISTED_BEFORE' | 'BLOCKLIST_UNCOUNTED';
+            message: string;
+        }>;
+        /**
+         * Present when part of the review couldn't be worked out just now (sizing the plan): what was left out, in a sentence. The review is then the one without that part, and its verdict is at least ramp_recommended. A launch that fails the same way is refused, 503 SEND_PLAN_UNAVAILABLE (retryable), with nothing sent.
+         */
+        unavailable?: string;
         domain: {
             name: string;
             /**
              * When the From domain (or the domain it is under) was added to this workspace.
              */
             firstSeenAt: string | null;
+            /**
+             * Days since it was added to this workspace: its history here, not its age.
+             */
             ageDays: number | null;
+            /**
+             * When its registrable domain was registered (YYYY-MM-DD), from public registry data; null when not known (never taken for old).
+             */
+            registeredAt?: string | null;
+            /**
+             * Days since registeredAt; null when not known.
+             */
+            registeredDays?: number | null;
+            linkDomain?: {
+                /**
+                 * The registrable domain the links go on, when it is not the From domain's.
+                 */
+                name: string;
+                registeredAt: string | null;
+                registeredDays: number | null;
+            } | null;
             /**
              * The DMARC policy last observed; null when not checked yet.
              */
@@ -2375,6 +2494,10 @@ export type CampaignAudienceCounts = {
              * The custom MAIL FROM domain (aligned SPF).
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * This campaign shares the link domain’s daily sending allowance.
+             */
+            sharedLinkPacing?: boolean;
             /**
              * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
@@ -2407,6 +2530,14 @@ export type CampaignAudienceCounts = {
                  */
                 largestSend: number;
                 /**
+                 * When this workspace first had mail accepted (workspace history only); null with none.
+                 */
+                firstSentAt?: string | null;
+                /**
+                 * The usual day: the median of the mail accepted on the days it sent in the last 14 days (workspace history only); 0 with none.
+                 */
+                usualDay?: number;
+                /**
                  * Recipients SES accepted in the last 30 days.
                  */
                 sent: number;
@@ -2427,6 +2558,14 @@ export type CampaignAudienceCounts = {
                  * Most recipients SES accepted from one campaign in the last 90 days.
                  */
                 largestSend: number;
+                /**
+                 * When this workspace first had mail accepted (workspace history only); null with none.
+                 */
+                firstSentAt?: string | null;
+                /**
+                 * The usual day: the median of the mail accepted on the days it sent in the last 14 days (workspace history only); 0 with none.
+                 */
+                usualDay?: number;
                 /**
                  * Recipients SES accepted in the last 30 days.
                  */
@@ -2470,6 +2609,10 @@ export type CampaignAudienceCounts = {
          */
         sizeJump: number | null;
         /**
+         * This send ÷ the workspace's usual day (history.workspace.usualDay); null without one.
+         */
+        usualJump?: number | null;
+        /**
          * The recommended daily batches; null when one day covers everyone.
          */
         plan: {
@@ -2478,12 +2621,32 @@ export type CampaignAudienceCounts = {
              */
             batches: Array<number>;
             /**
+             * The first day's small batch and wait, inside its batch; null when the first day is small already.
+             */
+            firstBatch?: {
+                /**
+                 * Recipients the first day starts with.
+                 */
+                size: number;
+                /**
+                 * Minutes it then waits for their bounces and rejections before the rest of the day's batch.
+                 */
+                waitMinutes: number;
+            } | null;
+            /**
              * How long the plan takes from its start, the hourly ramp included.
              */
             seconds: number | null;
         } | null;
         required: {
+            /**
+             * Kept as it was: a newly registered domain reads NEW_DOMAIN and a blocklist SIZE_JUMP. reason says which.
+             */
             by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * What requires the ramp. BLOCKLISTED: mail from this From domain or with these links drew replies naming a blocklist and no send has finished without any since; a consent confirmation does not waive it.
+             */
+            reason?: 'NEW_REGISTRATION' | 'BLOCKLISTED' | 'NEW_DOMAIN' | 'SIZE_JUMP';
             /**
              * The largest daily limit that counts as a ramp: the plan's first day.
              */
@@ -2628,19 +2791,49 @@ export type CampaignQueued = {
          */
         summary: string | null;
         /**
-         * Every finding behind the verdict.
+         * The findings behind the verdict in the original codes, one per code: a newly registered domain, one new here and a new link domain read NEW_DOMAIN, a jump over the usual day SIZE_JUMP; blocklist findings appear only in findings. Prefer findings.
          */
         reasons: Array<{
             code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
             message: string;
         }>;
+        /**
+         * Every finding behind the verdict, with its own code: NEW_REGISTRATION (registered recently, from public registry data), NEW_HERE (registered long ago, new to this workspace), NEW_DOMAIN (added recently, registration not known), USUAL_JUMP, NEW_LINK_DOMAIN, BLOCKLISTED_BEFORE (an earlier send drew replies naming a blocklist and none has finished without since), BLOCKLIST_UNCOUNTED (a recent send's blocklist replies aren't counted yet, so it isn't taken for clean), and the original codes.
+         */
+        findings?: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS' | 'NEW_REGISTRATION' | 'NEW_HERE' | 'USUAL_JUMP' | 'NEW_LINK_DOMAIN' | 'BLOCKLISTED_BEFORE' | 'BLOCKLIST_UNCOUNTED';
+            message: string;
+        }>;
+        /**
+         * Present when part of the review couldn't be worked out just now (sizing the plan): what was left out, in a sentence. The review is then the one without that part, and its verdict is at least ramp_recommended. A launch that fails the same way is refused, 503 SEND_PLAN_UNAVAILABLE (retryable), with nothing sent.
+         */
+        unavailable?: string;
         domain: {
             name: string;
             /**
              * When the From domain (or the domain it is under) was added to this workspace.
              */
             firstSeenAt: string | null;
+            /**
+             * Days since it was added to this workspace: its history here, not its age.
+             */
             ageDays: number | null;
+            /**
+             * When its registrable domain was registered (YYYY-MM-DD), from public registry data; null when not known (never taken for old).
+             */
+            registeredAt?: string | null;
+            /**
+             * Days since registeredAt; null when not known.
+             */
+            registeredDays?: number | null;
+            linkDomain?: {
+                /**
+                 * The registrable domain the links go on, when it is not the From domain's.
+                 */
+                name: string;
+                registeredAt: string | null;
+                registeredDays: number | null;
+            } | null;
             /**
              * The DMARC policy last observed; null when not checked yet.
              */
@@ -2649,6 +2842,10 @@ export type CampaignQueued = {
              * The custom MAIL FROM domain (aligned SPF).
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * This campaign shares the link domain’s daily sending allowance.
+             */
+            sharedLinkPacing?: boolean;
             /**
              * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
@@ -2681,6 +2878,14 @@ export type CampaignQueued = {
                  */
                 largestSend: number;
                 /**
+                 * When this workspace first had mail accepted (workspace history only); null with none.
+                 */
+                firstSentAt?: string | null;
+                /**
+                 * The usual day: the median of the mail accepted on the days it sent in the last 14 days (workspace history only); 0 with none.
+                 */
+                usualDay?: number;
+                /**
                  * Recipients SES accepted in the last 30 days.
                  */
                 sent: number;
@@ -2701,6 +2906,14 @@ export type CampaignQueued = {
                  * Most recipients SES accepted from one campaign in the last 90 days.
                  */
                 largestSend: number;
+                /**
+                 * When this workspace first had mail accepted (workspace history only); null with none.
+                 */
+                firstSentAt?: string | null;
+                /**
+                 * The usual day: the median of the mail accepted on the days it sent in the last 14 days (workspace history only); 0 with none.
+                 */
+                usualDay?: number;
                 /**
                  * Recipients SES accepted in the last 30 days.
                  */
@@ -2744,6 +2957,10 @@ export type CampaignQueued = {
          */
         sizeJump: number | null;
         /**
+         * This send ÷ the workspace's usual day (history.workspace.usualDay); null without one.
+         */
+        usualJump?: number | null;
+        /**
          * The recommended daily batches; null when one day covers everyone.
          */
         plan: {
@@ -2752,12 +2969,32 @@ export type CampaignQueued = {
              */
             batches: Array<number>;
             /**
+             * The first day's small batch and wait, inside its batch; null when the first day is small already.
+             */
+            firstBatch?: {
+                /**
+                 * Recipients the first day starts with.
+                 */
+                size: number;
+                /**
+                 * Minutes it then waits for their bounces and rejections before the rest of the day's batch.
+                 */
+                waitMinutes: number;
+            } | null;
+            /**
              * How long the plan takes from its start, the hourly ramp included.
              */
             seconds: number | null;
         } | null;
         required: {
+            /**
+             * Kept as it was: a newly registered domain reads NEW_DOMAIN and a blocklist SIZE_JUMP. reason says which.
+             */
             by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * What requires the ramp. BLOCKLISTED: mail from this From domain or with these links drew replies naming a blocklist and no send has finished without any since; a consent confirmation does not waive it.
+             */
+            reason?: 'NEW_REGISTRATION' | 'BLOCKLISTED' | 'NEW_DOMAIN' | 'SIZE_JUMP';
             /**
              * The largest daily limit that counts as a ramp: the plan's first day.
              */
@@ -8050,6 +8287,10 @@ export type StartAgentDeviceAuthorizationData = {
          * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
          */
         client_name?: string;
+        /**
+         * The setup token from the person's prompt, even if it expired or was replaced: their dashboard then shows you waiting for their approval. One that was used already addresses nobody.
+         */
+        setup_token?: string;
     };
     path?: never;
     query?: never;
@@ -8242,6 +8483,67 @@ export type LookUpAgentDeviceResponses = {
 };
 
 export type LookUpAgentDeviceResponse = LookUpAgentDeviceResponses[keyof LookUpAgentDeviceResponses];
+
+export type ListWaitingAgentDevicesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/waiting';
+};
+
+export type ListWaitingAgentDevicesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListWaitingAgentDevicesError = ListWaitingAgentDevicesErrors[keyof ListWaitingAgentDevicesErrors];
+
+export type ListWaitingAgentDevicesResponses = {
+    /**
+     * Success
+     */
+    200: WaitingAgentDevices;
+};
+
+export type ListWaitingAgentDevicesResponse = ListWaitingAgentDevicesResponses[keyof ListWaitingAgentDevicesResponses];
 
 export type ApproveAgentDeviceData = {
     body: {
@@ -10136,6 +10438,10 @@ export type ListTopicsData = {
          * true lists the archived topics instead.
          */
         archived?: 'true' | 'false';
+        /**
+         * true adds each topic’s counts (counts).
+         */
+        counts?: 'true' | 'false';
     };
     url: '/v1/topics';
 };

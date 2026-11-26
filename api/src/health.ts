@@ -4,6 +4,7 @@ import { ApiError, databaseCodeOf, errors, log, logError, response, security, tr
 import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUE, QUEUES, REQUESTS, SQLSTATES, TICK, WAKE_QUEUES } from './health-thresholds.js';
 import { countDatabaseError, LATENCY_BUCKETS, WRITE_LIMITS } from './health-counters.js';
 import { slackCard } from './operator-alerts.js';
+import { disabledSettings } from './config.js';
 import { postSlack } from './reputation-alerts.js';
 
 // Health: the system says when something falls behind (docs/operations.md is the runbook).
@@ -45,6 +46,7 @@ const KINDS = {
   'server-errors': { emoji: ':x:', label: 'Server errors', severity: 'critical', unit: 'responses', section: 'requests' },
   'errors': { emoji: ':x:', label: 'Errors', severity: 'warning', unit: 'lines', section: 'requests' },
   'dispatcher-failing': { emoji: ':rotating_light:', label: 'Dispatcher failing', severity: 'warning', unit: 'failures', section: 'requests' },
+  'link-domain-held': { emoji: ':no_entry:', label: 'Marketing link domain held', severity: 'critical', unit: 'domains', section: 'database' },
   'database-errors': { emoji: ':card_file_box:', label: 'Database errors', severity: 'critical', unit: 'errors', section: 'requests' },
   'database-connections': { emoji: ':card_file_box:', label: 'Database connections', severity: 'warning', unit: 'connections', section: 'database' },
   'database-transaction': { emoji: ':card_file_box:', label: 'Long transaction', severity: 'warning', unit: 'seconds', section: 'database' },
@@ -81,7 +83,7 @@ type CampaignRow = { id: string; workspaceId: string; state: string; total: numb
   /** The provider account's send rate. */ account: number | null; /** The rate the release planner reads, shown beside the others and never compared with. */ planned: number | null;
   accepted: number | null; delivered: number | null; bounced: number | null; complained: number | null };
 type CounterRow = { kind: string; key: string; n: number; errors: number; ms: number; slowest: number; n5: number; errors5: number; slowest5: number; verySlow5: number; stormMinutes: number; stormRate: number; hist: number[] | null };
-type Database = { connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
+type Database = { heldDomains?: string[]; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
 export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Failed[] | null; campaigns: CampaignRow[] | null; counters: CounterRow[] | null; database: Database | null };
 /**
@@ -117,9 +119,10 @@ const Health = z.object({
   requests: z.object({ count: z.number().int(), errors: z.number().int() }).nullable().describe('The last 15 minutes.'),
   database: z.object({ connections: z.number().int(), maxConnections: z.number().int(), longTransactions: z.number().int(), oldestTransactionSeconds: z.number().int(), slowQueries: z.number().int(), lockWaits: z.number().int(),
     sizeBytes: z.number(), diskBytes: z.number().nullable().describe('DATABASE_DISK_GB, when set.') }).nullable(),
+  settings: z.array(z.object({ feature: z.string(), settings: z.array(z.string()) })).optional().describe('Optional features this Worker turned off because their setting was set but not valid, or only in part (OPTIONAL_FEATURE_DISABLED in its log): their names, never a value.'),
 }).openapi('OperatorHealth');
 type Health = z.infer<typeof Health>;
-type Measured = Omit<Health, 'generatedAt' | 'stale' | 'delivery' | 'alerts'>;
+type Measured = Omit<Health, 'generatedAt' | 'stale' | 'delivery' | 'alerts' | 'settings'>;
 type Rollup = Measured & { memory: Memory };
 
 /** A quantile's upper bound from a latency histogram: the bucket it falls in, or the slowest request for the last one. */
@@ -283,7 +286,8 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
 
   let database: Rollup['database'] = null;
   if (sample.database) {
-    const d = sample.database;
+    const { heldDomains, ...d } = sample.database;
+    for (const domain of heldDomains ?? []) find('link-domain-held', domain, 1, `Marketing releases using ${id(domain)} are paused after a confirmed DBL listing.`, DATABASE.remindMinutes);
     if (held('database-connections', d.maxConnections > 0 && d.connections >= d.maxConnections * DATABASE.connectionShare, DATABASE.sustain))
       find('database-connections', null, d.connections, `${count(d.connections)} of ${count(d.maxConnections)}.`, DATABASE.remindMinutes);
     if (d.oldestTransactionSeconds >= DATABASE.transactionSeconds)
@@ -352,7 +356,7 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
       (SELECT hist FROM h WHERE h.kind=m.kind AND h.key=m.key) AS hist
     FROM m GROUP BY m.kind,m.key`)).rows);
   const activity = sql`pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()`;
-  const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT (SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
+  const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
       current_setting('max_connections')::int AS "maxConnections",(SELECT count(*) FROM ${activity} AND xact_start<now()-interval '1 minute')::int AS "longTransactions",
       coalesce((SELECT extract(epoch FROM now()-min(xact_start)) FROM ${activity}),0)::int AS "oldestTransactionSeconds",
       (SELECT count(*) FROM ${activity} AND state='active' AND query_start<now()-interval '30 seconds')::int AS "slowQueries",
@@ -537,7 +541,8 @@ export async function readHealth(runtime: Pick<Runtime, 'db' | 'config'>): Promi
   const empty: Measured = { queues: [], jobs: null, campaigns: null, feedbackLagSeconds: null, routes: null, errors: null, requests: null, database: null };
   const { memory: _, ...measured } = state?.rollup ?? { ...empty, memory: null };
   return { generatedAt: state?.generatedAt ?? null, stale: state?.stale ?? true, delivery: runtime.config.operatorSlackWebhookUrl ? 'slack' : 'off',
-    alerts: alerts.filter(alert => isKind(alert.kind)).map(alert => ({ ...alert, label: KINDS[alert.kind as Kind].label, words: alert.words.replaceAll('`', ''), runbook: runbookOf(alert.kind as Kind) })), ...measured };
+    alerts: alerts.filter(alert => isKind(alert.kind)).map(alert => ({ ...alert, label: KINDS[alert.kind as Kind].label, words: alert.words.replaceAll('`', ''), runbook: runbookOf(alert.kind as Kind) })), ...measured,
+    settings: disabledSettings() };
 }
 
 export function registerHealth(app: App) {

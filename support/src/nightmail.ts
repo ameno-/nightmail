@@ -28,7 +28,7 @@ export type MirroredMessage = { id: string; author: 'customer' | 'agent' | 'syst
   /** A held answer's: staff paused the agent, the output gate held it, access shrank, the conversation ended, or an earlier build wrote it. */
   reason?: 'paused' | 'gate' | 'access' | 'closed' | 'earlier';
   delivery?: 'sent' | 'failed' | 'held'; at?: string };
-export type MirroredState = { subject?: string; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3'; brief?: { title: string; summary: string; ask: string; recommendation: string } }; turns?: number; costUsd?: number; blockedWork?: number; pauseForTicket?: true };
+export type MirroredState = { subject?: string; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3'; brief?: { title: string; summary: string; ask: string; recommendation: string; tried?: { tool: string; finding: string }[] } }; turns?: number; costUsd?: number; blockedWork?: number; pauseForTicket?: true };
 /** Whether staff paused the agent: checked before every turn and every send. */
 export type InboxState = { id: string; status: 'open' | 'ticketed' | 'closed'; agentState: 'active' | 'paused'; pausedBy: 'staff' | 'ticket' | null; pausedAt: string | null; queuedReplies: number };
 /** A staff reply waiting for this Worker to deliver it. */
@@ -38,7 +38,9 @@ export type ConversationEvidence = { kind: 'handoff'; token: string } | { kind: 
 export type Mode = 'member' | 'non_member' | 'pending_signin' | 'unverified';
 export type Verification = 'handoff' | 'dmarc' | 'signin' | 'none';
 /** A registration's answer (POST /v1/operator/support/conversations): Nightmail's decision about the conversation. */
-export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification; status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean };
+export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification; status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean;
+  /** Email: the message passed the sender checks a general answer needs (api/src/support-conversations.ts emailEvidence). */
+  generalAnswer?: boolean };
 export type ScopeWorkspace = { id: string; name: string; role: 'owner' | 'admin' | 'member' };
 /** GET /v1/support/scope: who the conversation is for and what it can read now, read at the start of every turn. */
 export type Scope = {
@@ -81,8 +83,34 @@ export interface SupportPlatform {
   mirrorState(conversationId: string, state: MirroredState): Promise<PlatformReply<InboxState>>;
   inboxState(conversationId: string): Promise<PlatformReply<InboxState>>;
   pullOutbox(conversationId?: string): Promise<PlatformReply<{ data: OutboxReply[] }>>;
+  /** Conversations whose sender asked, from the sign-in link, to be answered by email instead (one conversation's, after its wake). */
+  generalAnswers(conversationId?: string): Promise<PlatformReply<{ data: { conversationId: string; messageId: string; requestedAt: string }[] }>>;
   markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed'): Promise<PlatformReply<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>>;
+  // One path to a human (api/src/support-staff-mail.ts): the staff emails Nightmail wrote, and each one sent.
+  staffMail(): Promise<PlatformReply<{ data: StaffEmail[] }>>;
+  staffMailSent(key: string, sent: { threadId: string; messageId: string }): Promise<PlatformReply<{ key: string; sentAt: string }>>;
+  /** A staff email failed to send this time, with its error's code: after three tries Glass shows it until it goes. */
+  staffMailFailed(key: string, failed: { code: string }): Promise<PlatformReply<{ key: string; attempts: number; failed: boolean; sent: boolean }>>;
+  /**
+   * Before an email to a support address is a customer's: whether it replies to a staff email. reply true: Nightmail made
+   * it a note on its conversation (a verified staff sender) or ignored it, and it is never a conversation here.
+   */
+  staffMailReply(messageId: string, team: string | null): Promise<PlatformReply<StaffReply>>;
+  // The feedback triage agent (api/src/feedback-triage.ts, triage.ts): the reports due (claimed, each at most twice), and
+  // for one report, by its conversation, a request's trace and the reports beside it (its own workspace only), and its one note.
+  feedbackDue(limit: number): Promise<PlatformReply<{ data: FeedbackReport[] }>>;
+  feedbackRequest(conversationId: string, requestId: string): Promise<PlatformReply>;
+  feedbackRelated(conversationId: string): Promise<PlatformReply>;
+  feedbackTriage(conversationId: string, note: TriageNoteInput): Promise<PlatformReply<{ conversationId: string; ticketId: string | null; messageId: string; classification: string; createdAt: string }>>;
 }
+/** What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply). */
+export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null };
+/** An agent feedback report to triage: Nightmail's facts, and its text as its filer wrote it (untrusted). */
+export type FeedbackReport = { conversationId: string; ticketId: string; filedAt: string; operation: string | null; requestId: string | null; text: string };
+/** The triage agent's one note: its summary and likely cause, a suggested classification, and duplicates by ticket ID. */
+export type TriageNoteInput = { summary: string; cause: string; classification: 'bug' | 'docs_gap' | 'neither'; duplicates: string[] };
+/** A staff email to send from the support address to the team: a new thread, or a reply in threadId to replyToMessageId. */
+export type StaffEmail = { key: string; threadId: string | null; replyToMessageId: string | null; subject: string; text: string; html: string };
 /** A platform reply's body, or (any other status than `ok`) a NightmailError the work queue can classify. */
 export function platformBody<T>(reply: PlatformReply<T>, ok = [200, 201]): T {
   if (ok.includes(reply.status)) return reply.body;
@@ -146,16 +174,16 @@ export function nightmailApi(env: Env, which: 'support' | 'intake' = 'support') 
     events: (query: { addressId?: string; after?: string; limit: number }) =>
       call<{ data: InboundEvent[]; cursor: string }>('GET', `/v1/inbound/events?${new URLSearchParams({ types: 'message.received', limit: String(query.limit), ...(query.addressId ? { addressId: query.addressId } : {}), ...(query.after ? { after: query.after } : {}) })}`),
     /** A new conversation from the support address, or from `addressId` when the caller pinned one (ticket emails, the chat follow-up thread). */
-    startThread: (input: { to: string[]; subject: string; text: string; replyTo?: string[]; addressId?: string }, idempotencyKey: string) =>
+    startThread: (input: { to: string[]; subject: string; text: string; html?: string; replyTo?: string[]; addressId?: string }, idempotencyKey: string) =>
       call<{ id: string; threadId: string }>('POST', '/v1/inbound/threads', { addressId: env.SUPPORT_ADDRESS_ID, ...input }, idempotencyKey),
     /**
      * A reply in an email conversation, only to the reviewed recipients (Nightmail refuses a reply whose recipients changed),
      * from the address and under the key chosen once when the reply was queued (conversation.ts `route`). addressId null:
      * the address the message came in on. A retry sends the same request, so Nightmail replays it instead of sending twice.
      */
-    reply: (threadId: string, input: { replyToMessageId: string; text: string; to: string; subject?: string; addressId: string | null }, idempotencyKey: string) =>
+    reply: (threadId: string, input: { replyToMessageId: string; text: string; html?: string; to: string; subject?: string; addressId: string | null }, idempotencyKey: string) =>
       call<{ id: string; threadId: string }>('POST', `/v1/inbound/threads/${encodeURIComponent(threadId)}/reply`, {
-        ...(input.addressId === null ? {} : { addressId: input.addressId }), replyToMessageId: input.replyToMessageId, text: input.text, to: [input.to], cc: [], expectedRecipients: { to: [input.to], cc: [], bcc: [] },
+        ...(input.addressId === null ? {} : { addressId: input.addressId }), replyToMessageId: input.replyToMessageId, text: input.text, ...input.html ? { html: input.html } : {}, to: [input.to], cc: [], expectedRecipients: { to: [input.to], cc: [], bcc: [] },
         ...(input.subject ? { subject: input.subject } : {}),
       }, idempotencyKey),
   };

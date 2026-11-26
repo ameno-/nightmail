@@ -104,8 +104,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'operator':
       case 'support': {
         const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerSupportInbox }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./support-inbox.js'), import('./ui-notes.js')]);
-        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }, { registerAbuseAlerts }, { registerHealth }, { registerGlass }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./health.js'), import('./glass.js')]);
-        return (target: App) => { registerOperator(target); registerHealth(target); registerGlass(target); registerAbuse(target); registerAbuseAlerts(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
+        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }, { registerAbuseAlerts }, { registerHealth }, { registerGlass }, { registerSupportStaffMail }, { registerFeedbackTriage }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./health.js'), import('./glass.js'), import('./support-staff-mail.js'), import('./feedback-triage.js')]);
+        return (target: App) => { registerOperator(target); registerHealth(target); registerGlass(target); registerAbuse(target); registerAbuseAlerts(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); registerSupportStaffMail(target); registerFeedbackTriage(target); };
       }
       case 'billing': {
         const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
@@ -140,8 +140,10 @@ const ROUTE_HINTS: [RegExp, RegExp, string][] = [
 ];
 const routeHint = (method: string, path: string) => { const hint = ROUTE_HINTS.find(([m, p]) => m.test(method) && p.test(path)); return hint ? ` ${hint[2]}` : ''; };
 export function unmatchedTemplate(path: string) {
-  const segments = path.split('?')[0]!.split('/').filter(Boolean);
+  // Empty segments stay (a trailing or doubled slash is often the whole mistake: POST /v1/domains/ matches nothing).
+  const segments = path.split(/[?#]/)[0]!.split('/').slice(1);
   const shown = segments.slice(0, 12).map(raw => {
+    if (!raw) return '';
     let s: string; try { s = decodeURIComponent(raw); } catch { return '{value}'; }
     if (s.includes('@')) return '{email}';
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '{uuid}';
@@ -153,7 +155,46 @@ export function unmatchedTemplate(path: string) {
     if (s.length > 32 || (/\d/.test(s) && /[a-z]/i.test(s) && s.length >= 16)) return '{token}';
     return /^[a-z][a-z0-9_-]{0,31}$/i.test(s) ? s.toLowerCase() : '{value}';
   });
-  return `/${shown.join('/')}${segments.length > 12 ? '/…' : ''}`;
+  const template = `/${shown.join('/')}${segments.length > 12 ? '/…' : ''}`;
+  return template.length > UNMATCHED_MAX ? `${template.slice(0, UNMATCHED_MAX)}…` : template;
+}
+const UNMATCHED_MAX = 200;
+type RouteRow = { method: string; template: string; segments: (string | null)[] };
+const routeTables = new WeakMap<object, { size: number; rows: RouteRow[] }>();
+/** The app's own routes as public templates (/v1/domains/{id}), from its route table; never from a request. Groups of
+ *  routes register on first use, so the table is read again whenever the app has more routes than last time. */
+function routeTable(app: { routes: { method: string; path: string }[] }) {
+  const cached = routeTables.get(app);
+  let rows = cached?.size === app.routes.length ? cached.rows : undefined;
+  if (!rows) {
+    rows = app.routes.filter(r => r.method !== 'ALL' && !r.path.includes('*') && r.path.startsWith('/v1/')).map(r => {
+      const segments = r.path.split('/').slice(1).map(s => s.startsWith(':') ? null : s);
+      return { method: r.method, template: '/' + r.path.split('/').slice(1).map(s => s.startsWith(':') ? `{${s.slice(1).replace(/\{.*$/, '')}}` : s).join('/'), segments };
+    });
+    rows = [...new Map(rows.map(r => [r.method + ' ' + r.template, r])).values()];
+    routeTables.set(app, { size: app.routes.length, rows });
+  }
+  return rows;
+}
+/**
+ * What an unmatched request most likely meant, from the routes this app answers: the same route without a trailing or
+ * doubled slash, the methods a path that exists does take, or the closest route for this method (the most leading
+ * segments in common, at least the resource after /v1). Only templates from the route table go back, never the path sent.
+ */
+export function unmatchedAdvice(routes: RouteRow[], method: string, path: string): { message: string; details: Record<string, unknown> } | null {
+  const sent = path.split(/[?#]/)[0]!.split('/').slice(1), tidy = sent.filter(Boolean);
+  const fits = (r: RouteRow, parts: string[]) => r.segments.length === parts.length && r.segments.every((s, i) => s === null ? !!parts[i] : s === parts[i]);
+  const here = routes.filter(r => fits(r, tidy));
+  const same = here.find(r => r.method === method);
+  if (same && tidy.length !== sent.length) return { message: `${method} ${same.template} exists: send it without the extra slash.`, details: { closest: { method, path: same.template } } };
+  if (here.length && !same) {
+    const allowed = [...new Set(here.map(r => r.method))].sort();
+    return { message: `${here[0]!.template} doesn’t take ${method}; it takes ${allowed.join(', ')}.`, details: { path: here[0]!.template, allowedMethods: allowed } };
+  }
+  const score = (r: RouteRow) => { let n = 0; while (n < r.segments.length && n < tidy.length && (r.segments[n] === null || r.segments[n] === tidy[n])) n++; return n; };
+  const best = routes.filter(r => r.method === method).map(r => ({ r, n: score(r) })).filter(x => x.n >= 2)
+    .sort((a, b) => b.n - a.n || Math.abs(a.r.segments.length - tidy.length) - Math.abs(b.r.segments.length - tidy.length) || a.r.template.localeCompare(b.r.template))[0];
+  return best ? { message: `The closest is ${method} ${best.r.template}.`, details: { closest: { method, path: best.r.template } } } : null;
 }
 // At most UNMATCHED_PER_WINDOW unmatched paths per workspace (or per anonymous caller) every 10 minutes per isolate: a
 // burst of guesses shows its shape, a crawler doesn't fill the log. The request line itself is written either way.
@@ -293,7 +334,11 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // Reviewing that invitation before joining authenticates the same way and changes nothing.
     if (c.req.method === 'GET' && /^\/v1\/workspaces\/invitations\/[^/]+$/.test(c.req.path)) return next();
     // Reading and confirming an emailed support message authenticate the same way: its sender may have no workspace yet.
+    // So does asking for a sign-in link to its address, the way through when the session's sign-in proves no mailbox.
     if ((c.req.method === 'GET' || c.req.method === 'POST') && /^\/v1\/support-conversations\/[^/]+\/claim$/.test(c.req.path)) return next();
+    if (c.req.method === 'POST' && /^\/v1\/support-conversations\/[^/]+\/sign-in-link$/.test(c.req.path)) return next();
+    // Being answered by email instead takes only the emailed link: the holder reads the conversation's mailbox (signed in or not).
+    if (c.req.method === 'POST' && /^\/v1\/support-conversations\/[^/]+\/answer-by-email$/.test(c.req.path)) return next();
     // A support action is confirmed by the person it was proposed to, in its own workspace (src/support-actions.ts).
     if (c.req.method === 'GET' ? /^\/v1\/support-actions\/[^/]+$/.test(c.req.path) : c.req.method === 'POST' && /^\/v1\/support-actions\/[^/]+\/(?:confirm|decline)$/.test(c.req.path)) return next();
     // Provider redirects cannot carry a workspace header. This route authenticates the OIDC
@@ -404,7 +449,14 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
     return c.json({ error: apiFailureBody(responseError, requestId) }, responseError.status as ContentfulStatusCode);
   });
-  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: `Route not found.${routeHint(c.req.method, c.req.path)} Every endpoint is listed in /llms.txt and /docs.md.`, requestId: c.get('requestId'), retryable: false } }, 404); });
+  // An agent's guess gets what it needs to try again once, not again and again: that no route answers this, the closest
+  // one or the methods this path takes (from this app's route table), and where every operation is listed. Not retryable.
+  app.notFound(c => {
+    c.set('failure', { code: 'NOT_FOUND', unmatched: true });
+    const advice = /^\/v1\//.test(c.req.path) ? unmatchedAdvice(routeTable(app), c.req.method, c.req.path) : null;
+    if (advice?.details.allowedMethods) c.header('Allow', (advice.details.allowedMethods as string[]).join(', '));
+    return c.json({ error: { code: 'NOT_FOUND', message: `Route not found: no endpoint answers ${c.req.method} on this path.${routeHint(c.req.method, c.req.path)}${advice ? ` ${advice.message}` : ''} Every operation is listed in /openapi.json, /llms.txt and /docs.md.`, requestId: c.get('requestId'), retryable: false, ...(advice ? { details: [advice.details] } : {}) } }, 404);
+  });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
   // analytics: whether a signed-out dashboard page records its use (DASHBOARD_ANALYTICS); signed in, /v1/me says so.
   // security.txt (RFC 9116) for the hosted service; a self-hosted installation has its own contact, so it has none.
@@ -460,8 +512,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full); registerFeedback(full);
-  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }, { registerGlass }, { registerLinkedImages }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js'), import('./glass.js'), import('./linked-images.js')]));
-  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full); registerGlass(full); registerLinkedImages(full);
+  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }, { registerGlass }, { registerLinkedImages }, { registerSupportStaffMail }, { registerFeedbackTriage }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js'), import('./glass.js'), import('./linked-images.js'), import('./support-staff-mail.js'), import('./feedback-triage.js')]));
+  registerSupportNotes(full); registerSupportActions(full); registerSupportStaffMail(full); registerFeedbackTriage(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full); registerGlass(full); registerLinkedImages(full);
   return full;
 }
 

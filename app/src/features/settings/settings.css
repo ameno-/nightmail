@@ -135,7 +135,7 @@
 .ui-select-trigger.settings-default-region { width: 320px; max-width: 100%; }
 .settings-region-link { display: flex; align-items: center; width: 100%; min-height: var(--control-height); padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
 .settings-region-link:is(:hover, :focus-visible) { text-decoration-color: currentColor; }
-.domain-group-title { display: grid; gap: var(--space-4); min-width: 0; flex: 1 1 280px; }
+.domain-group-title { display: grid; gap: var(--space-4); min-width: 0; flex: 1 1 auto; }
 .ui-section-header:has(> .domain-group-title) { flex-wrap: wrap; }
 .settings-account-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .settings-aws-details { padding-top: var(--space-8); }

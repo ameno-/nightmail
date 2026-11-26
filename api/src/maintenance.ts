@@ -330,6 +330,11 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     expired('abuse_alerts', 'abuse_alerts', at('created_at'), sql`created_at < now()-interval '1 year'`),
     // An erasure's floor outlives every record it could still apply to (the sign-in log, 30 days; signals, 90).
     expired('abuse_floors', 'abuse_floors', at('ignore_through'), sql`ignore_through < now()-interval '90 days'`),
+    // Delivery history (src/delivery-history.ts): a recipient domain 180 days after a workspace last mailed it; blocklist counts after 180 days.
+    expired('delivery_domain_stats', 'delivery_domain_stats', at('last_seen'), sql`last_seen < now() - interval '180 days'`),
+    expired('delivery_blocklist_daily', 'delivery_blocklist_daily', at('day'), sql`day < current_date - 180`),
+    // Recipient domains campaigns stopped releasing to (src/send-guards.ts), 90 days on.
+    expired('campaign_stopped_domains', 'campaign_stopped_domains', at('stopped_at'), sql`stopped_at < now() - interval '90 days'`),
     // The audit trail past its retention (src/audit.ts RETENTION); the table refuses to delete anything earlier. No row
     // locks: the application may not update it (42501), and only the hourly run takes it.
     { name: 'audit_events', oldest: sql`SELECT min(retain_until) FROM audit_events WHERE retain_until <= now()`, statement: () => sql`WITH gone AS (DELETE FROM audit_events WHERE id IN
@@ -340,6 +345,10 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     // with it the sender address it kept; a Message-ID's binding once its Date is too old to bind anyway.
     expired('support_email_signins', 'support_email_signins', at('created_at'), sql`signed_in_at IS NULL AND created_at < now() - interval '7 days'`),
     expired('support_email_bindings', 'support_email_bindings', at('created_at'), sql`created_at < now() - interval '7 days'`),
+    // The support agent's safe actions take turns per target for at most 10 minutes (src/support-actions.ts ACTION_TURNS).
+    expired('support_action_slots', 'support_action_slots', at('at'), sql`at < now() - interval '1 day'`),
+    // SMTP refusals (src/smtp-refusals.ts) are kept 7 days for support.
+    expired('smtp_refusals', 'smtp_refusals', at('at'), sql`at < now() - interval '7 days'`),
     // Support transcripts (src/support-inbox.ts), their events and their subjects go 90 days after the conversation closed
     // (agent feedback's, after its ticket was resolved).
     expiredTogether('support_messages', [{ table: 'support_messages', by: at('created_at'), where: sql`conversation_id IN (${closedLongAgo})` },
@@ -676,6 +685,10 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['BYO_HEALTH_QUEUE_FAILED', async () => { await (await import('./byo-regional.js')).queueByoHealth(runtime); }],
     // Abuse monitoring (src/abuse.ts): a bounded, leased slice. Hosted, and only while it is on.
     ['ABUSE_HOURLY_FAILED', async () => { await (await import('./abuse.js')).abuseHourly(runtime); }],
+    // Delivery history (src/delivery-history.ts): finished mail folded into per-domain and per-contact history, leased and bounded.
+    ['DELIVERY_HISTORY_FAILED', async () => { await (await import('./delivery-history.js')).deliveryHistoryHourly(runtime); }],
+    // Registration dates of the domains sent from and linked on (src/domain-age.ts), for the send review. Hosted only.
+    ['DOMAIN_REGISTRATIONS_FAILED', async () => { await (await import('./domain-age.js')).refreshRegistrations(runtime); }],
     // Daily exact recount of sending_campaign_tallies and sending_metrics_hourly.
     ['SENDING_TALLIES_RECOUNT_FAILED', async () => { await recountSendingTallies(runtime); }],
     // The daily exact recount of every list's counts.

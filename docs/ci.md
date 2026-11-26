@@ -7,7 +7,9 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 `gh pr merge <n>` enqueues a PR. The queue is enabled on the **classic `dev` branch protection**, not the disabled `dev merge queue` ruleset. It merges onto the latest `dev` and the entries ahead of it only after the required `merge_group` checks (`build`, `acceptance`, `cls`, `preview`, `gateway`, `support`) pass. Only accounts allowed to push `dev` can enqueue.
 
 - **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
-- **Cost:** each PR's required checks run twice, once on the PR and once in the queue. The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
+- **Cost:** ordinary PRs run selected suites twice, once on the PR and once in the queue. The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
+- **Landing batches:** a PR from a branch in this repository whose name starts with `land/batch-` runs the full build and audit. Its five heavy suites are marked unselected, so their required checks pass through the usual skip check. Forks and other branch names use normal PR selection.
+- **Why the name cannot bypass the gate:** the shortcut applies only to the PR event. Before a batch can merge into `dev`, the queue checks the combined commit against the latest `dev`, using the same path rules as for any other entry. Every selected suite must pass on that commit; a green PR cannot substitute for it.
 - **Path-gated checks:** the six required check names always report a result. A check passes only if its selected suite succeeded, or path detection succeeded and deliberately skipped it. Detection uses the PR merge checkout's first parent, or the **live dev tip** on a queue entry's first-parent chain (including pending PRs ahead of it). If dev has already advanced past the group, run everything.
 - **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
@@ -34,16 +36,16 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | When | Job | What it proves |
 | --- | --- | --- |
 | PR, merge group, direct `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
-| PR, merge group, direct `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
+| PR, merge group, direct `dev` push | `acceptance` | Four isolated Postgres/S3 shards (two integration, two simulated), each with the **deadlock guard** |
 | PR, merge group, direct `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
-| PR, merge group, direct `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page across four independent runners, and the support Worker tests |
+| PR, merge group, direct `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page across nine independent runners, and the support Worker tests on two fixtures |
 | Every `dev` push | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, once each by default (5, 10 or 20 by hand), reported in one issue |
 | `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
 | On demand (`api/ bun run tear:ci`) | Model-based tear suite | Runs on demand against a disposable local Postgres (`anomalyco/tear` is private); public CI's `acceptance` shard verifies the disposable-DB guard on all 11 real `api/tear/**/*.host.ts` processes |
 
-CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every selected matrix job to succeed.
+CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for the PR/queue acceptance and support shards and lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every selected matrix job to succeed. Acceptance, support and CLS also require a report from each expected shard and check the sum against the unsharded inventory (production and TV separately for CLS). Acceptance counts runnable registered cases; opt-in skips and nightly-only quarantines are excluded, and nested subtests run with their parent.
 
 ## Releasing to production
 
@@ -168,7 +170,7 @@ A flaky check costs every PR a re-run and teaches everyone to ignore red. The po
 
 ### CLS shards
 
-PR/queue CI divides the complete measurement list round-robin across four Postgres/browser fixtures after sorting by weight, distributing the shared and exclusive measurements separately within each fixture API's traffic. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. The `alone` pages (the running homepage machine) still run one at a time after the shared pages on each shard's own fixture. A failing shard uploads its own shift sources. Local and nightly runs default to the whole list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=4 bun run cls` from `app/` (indices 0–3).
+PR/queue CI hashes each shared measurement's page, viewport/theme and mode across eight Postgres/browser fixtures. A ninth runs the exclusive pages one at a time and the television build. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. A failing shard uploads its own shift sources. Local and nightly runs default to the whole production list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=9 bun run cls` from `app/` (indices 0–7 or `alone`).
 
 ### CLS: web fonts load before any text, every run
 

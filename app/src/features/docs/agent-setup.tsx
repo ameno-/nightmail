@@ -26,12 +26,12 @@ export const setupTokenPlaceholder = `${secretPrefixes.agentSetup}… (added whe
 // The agent's own API key (api/src/agent-setup.ts): from the setup token a copy carries, else the device flow, which an
 // owner or admin approves at /connect.
 function keyLines(origin: string, token: string | null | undefined) {
-  const device = `POST ${origin}/v1/agent/device (JSON body {"client_name":"<your name>"}), show me its verification_uri_complete and user_code, then poll POST ${origin}/v1/agent/device/token with {"device_code":"<device_code>"} every interval seconds until it returns the key (AUTHORIZATION_PENDING means keep waiting).`
+  const device = (body: string) => `POST ${origin}/v1/agent/device (JSON body ${body}), then show me its verification_uri_complete link on its own line and tell me to open it and approve you, with its user_code; poll POST ${origin}/v1/agent/device/token with {"device_code":"<device_code>"} every interval seconds until it returns the key (AUTHORIZATION_PENDING means keep waiting, and show me the link again if I haven't approved).`
   const keep = `Save the key it returns as ${apiKeyEnv} in the project's environment (a gitignored .env), never in code or a commit; it's shown once. It sends email and manages domains, inboxes and receiving; it can't create API keys, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords, and can't manage members or billing.`
-  if (token === undefined) return [`- No ${apiKeyEnv} yet? Get your own key with a device code: ${device} ${keep}`]
+  if (token === undefined) return [`- No ${apiKeyEnv} yet? Get your own key with a device code: ${device('{"client_name":"<your name>"}')} ${keep}`]
   return [
     `- Get your own API key first: exchange this one-time setup token (it works once, for 15 minutes) with POST ${origin}/v1/agent/setup and the JSON body {"token":"${token ?? setupTokenPlaceholder}","client_name":"<your name>"}. ${keep}`,
-    `- If the setup token was already used or has expired, use a device code instead: ${device}`,
+    `- If the setup token has expired or was replaced, ask me for a fresh copy of this prompt: that's quickest. Its refusal also carries a device code (error.details[0]): show me its link on its own line and poll it. If it was already used and you don't have the key, get a device code: ${device(`{"client_name":"<your name>","setup_token":"${token ?? setupTokenPlaceholder}"}`)}`,
   ]
 }
 
@@ -66,7 +66,7 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
   const to = email ?? (membersOnly ? `the email address I sign in to ${productName} with (ask me which)` : 'an address I control (ask me which)')
   lines.push(
     // A new workspace's built-in domain sends from its first moment: a send while it finishes setting up waits for it.
-    `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}${domain.builtIn ? 'built-in: it needs no DNS and sends now; a send in its first seconds waits while it finishes setting up' : `status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}`}).`,
+    `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}${domain.builtIn ? 'built-in: it needs no DNS and sends now; a send in its first seconds waits while it finishes setting up' : `status: ${verified ? 'verified' : `pending; its DNS records are in GET /v1/domains/${domain.id} (dns: each record's name, type, value and status): publish them at the DNS provider (or ask me to), then POST /v1/domains/${domain.id}/verify checks them now. They also verify automatically, and sending works once verified. One-click DNS setup is mine to do in the dashboard`}`}}).`,
     `- Send a first email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. Give it a short, real subject and plain text: "test" or placeholder words in either send it to spam. 202 means queued, not delivered.`,
   )
   // The built-in domain's limits up front, so the agent doesn't find them one refused send at a time.

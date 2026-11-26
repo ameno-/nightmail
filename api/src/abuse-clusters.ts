@@ -10,7 +10,7 @@ import { operatorActor, type OperatorIdentity } from './operator.js';
 // each with a risk score and the reasons behind every point, and the operator API that reads them.
 //
 // Monitoring only: a score ranks what a person looks at. Nothing here blocks, pauses or limits anyone, nothing on the
-// send path reads it, and NIGHTMAIL_ABUSE_ENFORCE is still unused.
+// send path reads it; abuse monitoring is monitor-only.
 // - Grouping is incremental and bounded: the hourly job (src/abuse.ts) calls refreshClusters for the entities whose
 //   links changed, then rescores the clusters longest unscored. A group is found by walking links outward from one
 //   entity, a few statements a step, up to a fixed size.

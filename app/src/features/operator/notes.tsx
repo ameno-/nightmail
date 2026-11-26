@@ -7,7 +7,7 @@ import { useSession } from '../../data/context'
 import { noteKinds, noteSeverities, noteStatuses, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
 import { relativeTime, shortDateTime } from '../../lib/format'
 import { setUiNotesMode, useUiNotesMode } from '../../lib/ui-notes-mode'
-import { NotesToolbar, noteColumnDefs, StaffOnly, useOperatorTabs } from './skeletons'
+import { GlassLink, NotesToolbar, noteColumnDefs, StaffOnly, useOperatorTabs } from './skeletons'
 import { errorText } from '../../data/types'
 import { useDebounced } from '../../lib/pagination'
 
@@ -72,7 +72,7 @@ export function OperatorNotesPage() {
   const filtered = Boolean(q || kind || status)
   const clearFilters = () => { setSearch(''); setParams(previous => { const next = new URLSearchParams(previous); for (const name of ['q', 'status', 'kind']) next.delete(name); return next }, { replace: true }) }
   return <>
-    <PageHeader title="Operator" actions={canAct ? <Button onClick={() => setKeys(true)}>Agent keys</Button> : undefined} />
+    <PageHeader title="Operator" actions={<div className="cluster">{canAct && <Button onClick={() => setKeys(true)}>Agent keys</Button>}<GlassLink /></div>} />
     <div className="op-page">
       <Tabs value="notes" label="Operator views" items={tabs} onValueChange={value => { if (value !== 'notes') navigate(value === 'queue' ? '/operator' : `/operator?view=${encodeURIComponent(value)}`) }} />
       <NotesToolbar search={search} status={status} kind={kind} onSearch={setSearch} onStatus={value => setParam('status', value)} onKind={value => setParam('kind', value)}

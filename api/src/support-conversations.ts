@@ -1,10 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, dashboardSession, denied, errors, json, log, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, denied, digest, errors, json, log, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
 import { auditContext, auditInsert, operatorContext, recordAudit, requireOperator } from './audit.js';
 import { CONVERSATION_ID, verifyHandoffToken, type RegisteredConversation } from './support-platform.js';
 import type { MailHeader, Verdicts } from './db/mailbox.js';
-import { loopHeaderNames, productName } from './brand.js';
+import { clientIpHeader, loopHeaderNames, productName } from './brand.js';
 import { mailboxProven } from './account-policy.js';
 
 // Support conversations (api/README.md "Support integration"). The support platform registers each chat or email
@@ -30,7 +30,8 @@ type Ceiling = { method: 'GET' | 'POST'; path: string; roles: SupportRole[]; cou
  * decides them. A role reads a workspace here exactly when its own session may call the counterpart there. A route
  * missing here is refused to every conversation. `views: false`: reading it names no workspace's data, so it writes no
  * customer-visible "support viewed" row. `chatOnly`: an email conversation is refused (it proposes nothing, keeps no notes, and
- * reads only the account's status, domains and sending: never billing, the activity trail, request logs or webhooks).
+ * reads only the account's status, domains and sending: never billing, the activity trail, request logs, webhooks or
+ * receiving configuration).
  */
 export const SUPPORT_CEILINGS: Ceiling[] = [
   // Its domains, webhook failures and activity follow their own counterparts (CONTEXT_SECTIONS).
@@ -57,12 +58,28 @@ export const SUPPORT_CEILINGS: Ceiling[] = [
   { method: 'POST', path: '/v1/support/actions', roles: MANAGERS, counterpart: 'GET /v1/webhooks', chatOnly: true },
   { method: 'GET', path: '/v1/support/actions/{id}', roles: MANAGERS, counterpart: 'GET /v1/webhooks', chatOnly: true },
   { method: 'POST', path: '/v1/support/domains/{id}/verify', roles: MANAGERS, counterpart: 'GET /v1/domains', chatOnly: true },
+  // Safe actions the agent takes alone (support-actions.ts): a receiving host's Check MX now is its domain's Check now; a
+  // forward's Send again is an endpoint's. Risky changes it only proposes to staff, for a workspace it may act for.
+  { method: 'POST', path: '/v1/support/receiving/hosts/{id}/recheck', roles: MANAGERS, counterpart: 'GET /v1/domains', chatOnly: true },
+  { method: 'POST', path: '/v1/support/receiving/forwards/{id}/resend', roles: MANAGERS, counterpart: 'GET /v1/endpoints', chatOnly: true },
+  { method: 'POST', path: '/v1/support/approvals', roles: MANAGERS, counterpart: 'GET /v1/api-keys', chatOnly: true },
   { method: 'GET', path: '/v1/support/screen', roles: EVERYONE, counterpart: 'GET /v1/emails', chatOnly: true },
   { method: 'GET', path: '/v1/support/campaigns', roles: EVERYONE, counterpart: 'GET /v1/campaigns', chatOnly: true },
   { method: 'GET', path: '/v1/support/campaigns/{id}', roles: EVERYONE, counterpart: 'GET /v1/campaigns', chatOnly: true },
   { method: 'GET', path: '/v1/support/emails/{id}/lint', roles: EVERYONE, counterpart: 'GET /v1/emails', chatOnly: true },
   { method: 'GET', path: '/v1/support/campaigns/{id}/lint', roles: EVERYONE, counterpart: 'GET /v1/campaigns', chatOnly: true },
   { method: 'GET', path: '/v1/support/audience/health', roles: EVERYONE, counterpart: 'GET /v1/lists', chatOnly: true },
+  // Receiving (src/support-receiving.ts) is an owner's or admin's in the dashboard. Its hosts are a domain's status, which
+  // email reads too; routes, endpoints and held addresses are receiving configuration, a chat's. Receiving domains and
+  // releasing a held address are behind mailbox.ts admin(); GET /v1/inbound/policy is that same gate without the region
+  // settings the domains list also needs, so it stands in for both.
+  { method: 'GET', path: '/v1/support/receiving/hosts', roles: MANAGERS, counterpart: 'GET /v1/inbound/policy' },
+  { method: 'GET', path: '/v1/support/receiving/routes', roles: MANAGERS, counterpart: 'GET /v1/routing', chatOnly: true },
+  { method: 'GET', path: '/v1/support/receiving/retired', roles: MANAGERS, counterpart: 'GET /v1/inbound/policy', chatOnly: true },
+  { method: 'GET', path: '/v1/support/receiving/forwards', roles: MANAGERS, counterpart: 'GET /v1/endpoints', chatOnly: true },
+  // SMTP refusals (src/smtp-refusals.ts): mail apps sign in with app passwords and send-only keys, an owner's or admin's
+  // in the dashboard (API keys). Each names the reply the app got, which can name an attached file: a chat's.
+  { method: 'GET', path: '/v1/support/smtp/refusals', roles: MANAGERS, counterpart: 'GET /v1/api-keys', chatOnly: true },
   { method: 'GET', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/me', views: false },
   { method: 'POST', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/me', views: false },
   // Notes are the person's own (src/support-notes.ts), filtered by their memberships, never a workspace's data.
@@ -99,16 +116,17 @@ export const SIGNIN_DAYS = 7;
 const SENT_WITHIN_DAYS = 3;
 const Mode = z.enum(['member', 'non_member', 'pending_signin', 'unverified']);
 const Registered = z.object({
-  id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode.describe('member: reads the account by role; non_member: general answers; pending_signin and unverified: the same fixed reply, no model turn.'),
+  id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode.describe('member: reads the account by role; non_member: general answers; pending_signin and unverified: the same fixed reply with a sign-in for that message, then (generalAnswer, nobody claimed it in time) a general answer.'),
   verification: z.enum(['handoff', 'dmarc', 'signin', 'none']), status: z.enum(['open', 'ticketed', 'closed']),
   workspaceId: z.string().nullable().describe('The one workspace in scope: a chat’s, or the one an email narrowed to. Null: every membership.'),
   contentShared: z.boolean().describe('Whether the customer let support read message content (a chat, in its own workspace).'),
   created: z.boolean().describe('False when this registration repeated or added to an earlier one.'),
+  generalAnswer: z.boolean().optional().describe('Email only: whether this message passed the sender checks a general answer needs (a From that DMARC verified, not sent through Nightmail itself, not a replay). A message waiting for its sender\u2019s sign-in gets a general answer when nobody claims it only then.'),
 }).openapi('SupportConversationRegistration');
 type Row = { id: string; channel: 'chat' | 'email'; mode: z.infer<typeof Mode>; verification: RegisteredConversation['verification']; status: RegisteredConversation['status']; workspace_id: string | null;
   content_workspace_id: string | null; user_id: string | null; pending_address: string | null };
-const view = (row: Row, created: boolean): RegisteredConversation => ({ id: row.id, channel: row.channel, mode: row.mode, verification: row.verification, status: row.status,
-  workspaceId: row.workspace_id, contentShared: !!row.content_workspace_id, created });
+const view = (row: Row, created: boolean, generalAnswer?: boolean): RegisteredConversation => ({ id: row.id, channel: row.channel, mode: row.mode, verification: row.verification, status: row.status,
+  workspaceId: row.workspace_id, contentShared: !!row.content_workspace_id, created, ...generalAnswer === undefined ? {} : { generalAnswer } });
 const columns = sql`id, channel, mode, verification, status, workspace_id, content_workspace_id, user_id, pending_address`;
 /** The support platform's service binding, and nothing else: an operator's own session gets 403 too. */
 export const supportPlatformOnly = async (c: Ctx) => {
@@ -153,10 +171,12 @@ export function sameMailbox(a: string, b: string) {
  * - `non_member`: verified, but no such account, or one without a workspace (general answers);
  * - `pending_signin`: an account's address (up to case) that doesn't bind;
  * - `unverified`: anything else.
- * The last two get the same fixed reply, with a sign-in for this message (`signIn`). dkimAligned records whether a sole
+ * The last two get the same fixed reply, with a sign-in for this message (`signIn`). `generalAnswer`: the sender checks a
+ * general answer needs (`non_member`'s: verified, and not sent through Nightmail itself), which also decide whether a
+ * message waiting for its sign-in gets a general answer when nobody claims it. dkimAligned records whether a sole
  * signature of the From domain passed too.
  */
-async function emailEvidence(db: DbExecutor, addressIds: string[], messageId: string) {
+export async function emailEvidence(db: DbExecutor, addressIds: string[], messageId: string) {
   const { rows: [m] } = await db.execute<{ thread_id: string; from_address: string; verdicts: Verdicts; headers: MailHeader[]; author_verified: boolean | null; rfc_message_id: string | null;
     ses_message_id: string | null; sending_email_id: string | null; addressed: boolean; recent: boolean }>(sql`SELECT m.thread_id, m.from_address, m.verdicts, m.headers, m.message_id AS rfc_message_id,
       m.ses_message_id, m.sending_email_id, links.author_verified,
@@ -203,14 +223,14 @@ async function emailEvidence(db: DbExecutor, addressIds: string[], messageId: st
       (SELECT count(*)::int FROM workspace_members wm WHERE wm.user_id = u.id) AS memberships
     FROM nightmail_users u WHERE u.email_verified AND lower(u.email) = ${from} LIMIT 2`);
   const owner = owners.length === 1 ? owners[0]! : null, exact = !!owner && sameMailbox(owner.email.trim(), written);
-  const eligible = verified && !selfSent && exact && owner!.proven && addressed;
+  const generalAnswer = verified && !selfSent, eligible = generalAnswer && exact && owner!.proven && addressed;
   const userId = eligible && owner!.memberships > 0 ? owner!.id : null;
-  const mode: Row['mode'] = userId ? 'member' : verified && !selfSent && (!owner || eligible) ? 'non_member' : owners.length ? 'pending_signin' : 'unverified';
-  return { from, threadId: m.thread_id, userId, mode, signIn: mode === 'pending_signin' || mode === 'unverified', verification: verified ? 'dmarc' as const : 'none' as const,
+  const mode: Row['mode'] = userId ? 'member' : generalAnswer && (!owner || eligible) ? 'non_member' : owners.length ? 'pending_signin' : 'unverified';
+  return { from, threadId: m.thread_id, userId, mode, signIn: mode === 'pending_signin' || mode === 'unverified', generalAnswer, verification: verified ? 'dmarc' as const : 'none' as const,
     rfcMessageId: m.rfc_message_id, evidence: { message: messageId, dmarc, dkimAligned, mailboxProven: !!owner?.proven, addressed, ...(selfSent ? { selfSent: true } : {}) } };
 }
-/** The same email again, for an account it already bound (a replay of a signed copy): it binds nobody, and asks for a sign-in. */
-const replayed = (found: NonNullable<Awaited<ReturnType<typeof emailEvidence>>>) => ({ ...found, userId: null, mode: 'pending_signin' as Row['mode'], signIn: true, evidence: { ...found.evidence, replayed: true } });
+/** The same email again, for an account it already bound (a replay of a signed copy): it binds nobody, asks for a sign-in, and gets no general answer meanwhile (it was answered once). */
+const replayed = (found: NonNullable<Awaited<ReturnType<typeof emailEvidence>>>) => ({ ...found, userId: null, mode: 'pending_signin' as Row['mode'], signIn: true, generalAnswer: false, evidence: { ...found.evidence, replayed: true } });
 
 /**
  * The sign-in one email waits for, as the person signed in may see or confirm it: the conversation an open email one with
@@ -227,6 +247,79 @@ async function signinFor(db: DbExecutor, conversationId: string, messageId: stri
     ${lock ? sql`FOR UPDATE OF s, si` : sql``}`);
   if (!target || target.address.toLowerCase() !== user.email.trim().toLowerCase() || (target.signed_by ?? user.userId) !== user.userId || (target.user_id ?? user.userId) !== user.userId) return null;
   return target;
+}
+
+/** The address one email's sign-in waits for, while it can still be confirmed (signinFor's checks but the person's), or null. */
+async function waitingAddress(db: DbExecutor, conversationId: string, messageId: string) {
+  const { rows: [row] } = await db.execute<{ address: string }>(sql`SELECT si.address FROM support_conversations s
+    JOIN support_email_signins si ON si.conversation_id = s.id AND si.message_id = ${messageId}
+    WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND si.created_at > now() - make_interval(days => ${SIGNIN_DAYS}::int)`);
+  return row?.address ?? null;
+}
+/** An address as it is shown to someone who hasn't proved it: its first character and its domain's, and the last label (r•••@e•••.com). */
+export function maskedAddress(address: string) {
+  const at = address.lastIndexOf('@'), domain = address.slice(at + 1), dot = domain.lastIndexOf('.'), first = (part: string) => [...part][0] ?? '';
+  return `${first(address.slice(0, at))}•••@${first(domain)}•••${dot > 0 ? domain.slice(dot) : ''}`;
+}
+/** The address as this session may see it: whole when its own sign-in proved that mailbox, else masked. */
+async function shownAddress(c: Ctx, address: string) {
+  const { accountSessionMailbox } = await import('./account-login.js');
+  return (await accountSessionMailbox(c.env, c.req.raw.headers))?.toLowerCase() === address.toLowerCase() ? address : maskedAddress(address);
+}
+/**
+ * A session whose sign-in proves no mailbox (403 MAILBOX_SIGN_IN_REQUIRED) asks about an email that still waits for its
+ * sender: the refusal says the way through, in error.details[0] (address: where the email came from, as shownAddress shows
+ * it; nextStep: the request that emails a sign-in link there). It stays 403 and not retryable: asking again as it is gets
+ * the same. For an email that waits for nobody it is the plain 403.
+ */
+async function mailboxStep(c: Ctx, error: unknown, conversationId: string, messageId: string) {
+  if (!(error instanceof ApiError) || error.code !== 'MAILBOX_SIGN_IN_REQUIRED') return error;
+  const address = await waitingAddress(c.env.db, conversationId, messageId);
+  error.retryable = false;
+  if (address) error.details = [{ address: await shownAddress(c, address),
+    nextStep: { operationId: 'sendSupportSignInLink', method: 'POST', path: `/v1/support-conversations/${conversationId}/sign-in-link`, body: { messageId } } }];
+  return error;
+}
+/** Sign-in links one email's Continue page may have sent (POST …/sign-in-link), a day: per conversation, and per address over every conversation. */
+export const SUPPORT_LINKS = { perConversation: 3, perAddress: 5 } as const;
+/** "Answer me by email instead" requests per conversation and per network: auth_state_slots' 8 in 11 minutes. */
+const ANSWER_SLOTS = 8;
+
+/** What releaseGeneralAnswer did. */
+export type GeneralAnswerRelease = 'released' | 'already_answered' | 'already_released' | 'not_waiting';
+/** How long a release stays on the support platform's due list (GET /v1/operator/support/general-answers) unanswered. */
+const RELEASE_DUE = sql`interval '1 day'`;
+/**
+ * "Answer me by email instead": the sender of an email support couldn't verify, waiting for a sign-in that can't come
+ * (an address with no account, mail that fails the sender checks), opened the sign-in link emailed to the conversation's
+ * address and pressed it. That is the mailbox proof the sender checks couldn't give, so the conversation is due at once,
+ * without them, for the support platform's general-answers-only turn: no account tools, reads or data in the answer; a
+ * ticket and the staff email when it can't answer that way. The answer goes to the conversation's address, in its
+ * thread, and covers every email of theirs still waiting there. Once per conversation. In the caller's transaction (the
+ * row lock serializes presses); after it commits, wake the support platform (support-inbox.ts wakeSupport) as the claim
+ * does, and its sweep finds the release anyway (GET /v1/operator/support/general-answers).
+ * - released: due now; its waiting emails are owed a reply from now (No reply sent);
+ * - already_released: this conversation was released before;
+ * - already_answered: something already answered that email (the automatic general answer, a staff reply);
+ * - not_waiting: no such email waiting for a sign-in in an open email conversation (unknown, claimed, closed, or past SIGNIN_DAYS).
+ */
+export async function releaseGeneralAnswer(tx: DbExecutor, conversationId: string, messageId: string): Promise<GeneralAnswerRelease> {
+  if (!CONVERSATION_ID.test(conversationId) || !/^msg_[0-9a-f]{32}$/.test(messageId)) return 'not_waiting';
+  const { reached } = await import('./support-inbox.js');
+  const { rows: [row] } = await tx.execute<{ signed: boolean; released: boolean; answered: boolean }>(sql`SELECT si.signed_in_at IS NOT NULL AS signed,
+      EXISTS (SELECT FROM support_email_signins r WHERE r.conversation_id = s.id AND r.general_answer_requested_at IS NOT NULL) AS released,
+      EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = s.id AND ${reached}
+        AND (o.seq > email.seq OR (email.seq IS NULL AND o.created_at >= si.created_at))) AS answered
+    FROM support_conversations s JOIN support_email_signins si ON si.conversation_id = s.id AND si.message_id = ${messageId}
+    -- The email as the inbox holds it (absent while its mirror is behind: then whatever came after it was registered).
+    LEFT JOIN LATERAL (SELECT max(m.seq) AS seq FROM support_messages m WHERE m.conversation_id = s.id AND m.author = 'customer' AND m.source_message_id = si.message_id) email ON true
+    WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND si.created_at > now() - make_interval(days => ${SIGNIN_DAYS}::int)
+    FOR UPDATE OF s, si`);
+  if (!row || row.signed) return 'not_waiting';
+  if (row.released) return 'already_released';
+  if (row.answered) return 'already_answered';
+  await tx.execute(sql`UPDATE support_email_signins SET general_answer_requested_at = clock_timestamp() WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+  return 'released';
 }
 
 export function registerSupportConversations(app: App) {
@@ -305,8 +398,8 @@ export function registerSupportConversations(app: App) {
         if (first?.message_id !== messageId) found = replayed(found);
       }
       // A message that binds nobody is answered only once its sender confirms it signed in: recorded here, for the claim.
-      const challenge = (tx: DbExecutor) => found.signIn ? tx.execute(sql`INSERT INTO support_email_signins(conversation_id, message_id, address)
-        VALUES (${conversationId}, ${messageId}, ${found.from}) ON CONFLICT DO NOTHING`) : null;
+      const challenge = (tx: DbExecutor) => found.signIn ? tx.execute(sql`INSERT INTO support_email_signins(conversation_id, message_id, address, general_answer)
+        VALUES (${conversationId}, ${messageId}, ${found.from}, ${found.generalAnswer}) ON CONFLICT DO NOTHING`) : null;
       const { rows: [existing] } = await tx.execute<Row>(sql`SELECT ${columns} FROM support_conversations WHERE id = ${conversationId} FOR UPDATE`);
       if (!existing) {
         if (found.userId && await full(tx, found.userId)) throw limitReached('email');
@@ -315,7 +408,7 @@ export function registerSupportConversations(app: App) {
             VALUES (${conversationId}, 'email', ${found.threadId}, ${found.userId}, ${found.from}, ${found.verification}, ${JSON.stringify(found.evidence)}::jsonb, ${found.mode}) RETURNING ${columns}
           ), logged AS (${audit(sql`c`, details)}) SELECT * FROM c`);
         await challenge(tx);
-        return { row: row!, created: true };
+        return { row: row!, created: true, generalAnswer: found.generalAnswer };
       }
       if (existing.channel !== 'email') throw new ApiError(409, 'SUPPORT_CONVERSATION_EXISTS', 'That conversation is a chat, not an email conversation.');
       if (existing.status === 'closed') throw new ApiError(409, 'SUPPORT_CONVERSATION_CLOSED', 'That conversation is closed. Give the message a conversation of its own.');
@@ -325,7 +418,7 @@ export function registerSupportConversations(app: App) {
       if (existing.pending_address !== found.from) throw new ApiError(409, 'SUPPORT_CONVERSATION_SENDER', 'This message is from another sender. Give it a conversation of its own.');
       if (existing.user_id) {
         if (found.userId !== existing.user_id) throw new ApiError(409, 'SUPPORT_CONVERSATION_MISMATCH', 'This message does not bind the conversation’s account. Give it a conversation of its own.');
-        return { row: existing, created: false };
+        return { row: existing, created: false, generalAnswer: found.generalAnswer };
       }
       // Unbound so far: each message is judged on its own, and one that binds its sender's account binds the conversation.
       if (found.userId && await full(tx, found.userId)) throw limitReached('email');
@@ -334,10 +427,10 @@ export function registerSupportConversations(app: App) {
           WHERE id = ${conversationId} RETURNING ${columns}
         ), logged AS (${audit(sql`c`, details)}) SELECT * FROM c`);
       await challenge(tx);
-      return { row: row!, created: false };
+      return { row: row!, created: false, generalAnswer: found.generalAnswer };
     });
     log('info', { code: 'SUPPORT_CONVERSATION_REGISTERED', conversationId, channel: 'email', mode: outcome.row.mode, details });
-    return c.json(view(outcome.row, outcome.created), outcome.created ? 201 : 200);
+    return c.json(view(outcome.row, outcome.created, outcome.generalAnswer), outcome.created ? 201 : 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/conversations/{id}/close', operationId: 'operatorCloseSupportConversation',
@@ -348,6 +441,21 @@ export function registerSupportConversations(app: App) {
       WHERE id = ${c.req.valid('param').id} RETURNING id, closed_at::text`);
     if (!row) notFound('Support conversation');
     return c.json({ id: row!.id, status: 'closed' as const, closedAt: new Date(row!.closed_at).toISOString() }, 200);
+  });
+
+  const Released = z.object({ conversationId: z.string(), messageId: z.string(), requestedAt: z.string() }).openapi('SupportGeneralAnswerDue');
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'get', path: '/v1/operator/support/general-answers', operationId: 'operatorSupportGeneralAnswersDue',
+    description: 'The support platform\u2019s due list (the binding only): conversations whose sender asked, from the sign-in link, to be answered by email instead (releaseGeneralAnswer), still open and with nothing reaching them since, oldest first. Answer each in general, once, with no account access.',
+    request: { query: z.object({ conversationId: z.string().regex(CONVERSATION_ID).optional().describe('Only this conversation\u2019s (after its wake).') }) },
+    responses: { 200: response(z.object({ data: z.array(Released) })), ...errors } }), async c => {
+    await supportPlatformOnly(c);
+    const only = c.req.valid('query').conversationId ?? null, { reached } = await import('./support-inbox.js');
+    const { rows } = await c.env.db.execute<{ conversation_id: string; message_id: string; requested_at: string }>(sql`SELECT si.conversation_id, si.message_id, si.general_answer_requested_at::text AS requested_at
+      FROM support_email_signins si JOIN support_conversations s ON s.id = si.conversation_id
+      WHERE si.general_answer_requested_at > now() - ${RELEASE_DUE} AND s.status <> 'closed' AND (${only}::text IS NULL OR si.conversation_id = ${only})
+        AND NOT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = s.id AND o.created_at > si.general_answer_requested_at AND ${reached})
+      ORDER BY si.general_answer_requested_at, si.conversation_id LIMIT 50`);
+    return c.json({ data: rows.map(r => ({ conversationId: r.conversation_id, messageId: r.message_id, requestedAt: new Date(r.requested_at).toISOString() })) }, 200);
   });
 
   // ---------- the customer's own session ----------
@@ -377,14 +485,14 @@ export function registerSupportConversations(app: App) {
     receivedAt: z.string().nullable().describe('When support received it.') });
   const MessageQuery = z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the sign-in link was for.') });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'get', path: '/v1/support-conversations/{id}/claim', operationId: 'getSupportConversationClaim',
-    description: `The email a sign-in link is for, before you confirm it (its subject, a plain-text excerpt and when it arrived), with the same checks as confirming it: only the person whose verified email sent it. Anyone else gets 404.`,
+    description: `The email a sign-in link is for, before you confirm it (its subject, a plain-text excerpt and when it arrived), with the same checks as confirming it: only the person whose verified email sent it. Anyone else gets 404. A session whose sign-in proves no mailbox gets 403 MAILBOX_SIGN_IN_REQUIRED (not retryable), and while the email waits, error.details[0] holds address (masked) and nextStep: sendSupportSignInLink.`,
     request: { params: ConversationParam, query: MessageQuery }, responses: { 200: response(Pending), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     // Reads like reviewing an invitation: the session's sign-in must prove the account's address (no Origin on a GET).
     const { verifiedDashboardUser } = await import('./dashboard-auth.js');
-    const user = await verifiedDashboardUser(c.env, c.req.raw.headers, true);
     const conversationId = c.req.valid('param').id, messageId = c.req.valid('query').messageId;
+    const user = await verifiedDashboardUser(c.env, c.req.raw.headers, true).catch(async error => { throw await mailboxStep(c, error, conversationId, messageId); });
     const target = await signinFor(c.env.db, conversationId, messageId, user, false);
     if (!target) return notFound('Support conversation');
     const preview = target.text ? target.text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500) || null : null;
@@ -392,7 +500,7 @@ export function registerSupportConversations(app: App) {
     return c.json({ id: conversationId, messageId, subject: target.subject?.slice(0, 200) ?? null, preview, receivedAt: target.received_at ? new Date(target.received_at).toISOString() : null }, 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/claim', operationId: 'claimSupportConversation',
-    description: `Confirm, signed in, that you wrote one email ${productName} support couldn’t verify: when your verified email is the address it came from, support answers that email, once, and the conversation is yours. Anyone else gets 404.`,
+    description: `Confirm, signed in, that you wrote one email ${productName} support couldn’t verify: when your verified email is the address it came from, support answers that email from your account, once (when it already sent a general answer, only what needed your account), and the conversation is yours. Anyone else gets 404. A session whose sign-in proves no mailbox gets 403 MAILBOX_SIGN_IN_REQUIRED with the same details as getSupportConversationClaim.`,
     request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the sign-in link was for.') }).strict()) },
     responses: { 200: response(Claimed), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -400,8 +508,8 @@ export function registerSupportConversations(app: App) {
     // workspace, from the dashboard's own origin. Never a bearer credential (refused inside) or the support platform.
     if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     const { invitationRecipient } = await import('./dashboard-auth.js');
-    const user = await invitationRecipient(c.env, c.req.raw), userId = user.userId;
     const conversationId = c.req.valid('param').id, messageId = c.req.valid('json').messageId;
+    const user = await invitationRecipient(c.env, c.req.raw).catch(async error => { throw await mailboxStep(c, error, conversationId, messageId); }), userId = user.userId;
     const context = { ...auditContext(c), actor: { type: 'member' as const, id: userId, userId, via: 'dashboard' as const } };
     const claimed = await c.env.db.transaction(async tx => {
       await admit(tx, userId);
@@ -429,6 +537,122 @@ export function registerSupportConversations(app: App) {
     if (c.env.deferNudge) c.env.deferNudge(async () => { await wakeSupport(c.env.config, conversationId); });
     else await wakeSupport(c.env.config, conversationId);
     return c.json(claimed, 200);
+  });
+
+  const LinkRequested = z.object({ requested: z.literal(true), address: z.string().describe('Where the link goes, as getSupportConversationClaim’s 403 shows it.') });
+  app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/sign-in-link', operationId: 'sendSupportSignInLink',
+    description: `The way through 403 MAILBOX_SIGN_IN_REQUIRED on one email's Continue page: emails a sign-in link to the address that email came from (never another: the body names only the message, and anything else in it is ignored). Following the link and signing in with the account for that address proves its mailbox, and the page opens again to confirm the email. Signed in, from the dashboard. The answer is the same 202 whether or not a link went out (one is made and sent only when an account has that address; otherwise nothing is); at most ${SUPPORT_LINKS.perConversation} a day per conversation and ${SUPPORT_LINKS.perAddress} per address, and as many as pending sign-ins per network, past which it is 429. Presses from the account the link would be for (signed in to it with a sign-in that proves no mailbox, the person the email came from) neither count against those daily limits nor are refused by them, so a leaked Continue link can't use them up and lock that person out; everyone else's presses count the same whether or not an account has the address. An email that waits for nobody gets 404.`,
+    request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the Continue page is for.') })) },
+    responses: { 202: response(LinkRequested), ...errors } }), async c => {
+    if (!c.env.config.multiTenant) return notFound('Endpoint');
+    if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
+    // Someone signed in, with any sign-in (it is the one that can't confirm), from the dashboard's own origin, who holds
+    // this email's link. Never a bearer credential.
+    const [{ LINK_ANSWER_MS, requireDashboardOrigin }, { verifiedDashboardUser }] = await Promise.all([import('./account-login.js'), import('./dashboard-auth.js')]);
+    requireDashboardOrigin(c.env, c.req.raw);
+    const presser = await verifiedDashboardUser(c.env, c.req.raw.headers);
+    // Every network's allowance of sign-in links (account-login.ts /api/auth/sign-in/link), before anything is looked up.
+    const slots = await c.env.db.execute(sql`SELECT reserve_auth_state(${await digest(`signin-link:${c.req.header(clientIpHeader) ?? 'unknown'}`)}) AS ok`);
+    if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
+    const conversationId = c.req.valid('param').id, messageId = c.req.valid('json').messageId, answerAt = Date.now() + LINK_ANSWER_MS;
+    const { LINK_MINUTES, newLinkId } = await import('./signups.js'), { signinLink } = await import('./account-notices.js');
+    const address = await c.env.db.transaction(async tx => {
+      const { rows: [target] } = await tx.execute<{ address: string; user_id: string | null; signed_by: string | null }>(sql`SELECT si.address, s.user_id, si.user_id AS signed_by
+        FROM support_conversations s JOIN support_email_signins si ON si.conversation_id = s.id AND si.message_id = ${messageId}
+        WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND si.created_at > now() - make_interval(days => ${SIGNIN_DAYS}::int)`);
+      if (!target) return null;
+      const email = target.address.toLowerCase();
+      // The account a link is for (`u`): its verified address is this one and it can confirm this email (nobody else bound it).
+      const forAccount = sql`u.email_verified AND lower(u.email) = ${email} AND (${target.user_id}::text IS NULL OR u.id = ${target.user_id})
+        AND (${target.signed_by}::text IS NULL OR u.id = ${target.signed_by})`;
+      // One request per address at a time (the waitlist's links take the same lock), so both counts hold.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${email},46400))`);
+      // That account's own presses, from a session that proves no mailbox, are the person the email came from asking: they
+      // don't count against anyone else's, so someone holding a leaked link can't use up the day's links and lock them out,
+      // and they have a daily allowance of their own per address (as many as the address's), so they never make unlimited
+      // mail either. Every other press counts, whether or not a link is made, so a refusal never says whether an account has
+      // the address (only the account itself is told apart, and it knows its own address).
+      const { rows: [own] } = await tx.execute<{ is: boolean }>(sql`SELECT EXISTS (SELECT FROM nightmail_users u WHERE u.id = ${presser.userId} AND ${forAccount}) AS is`);
+      if (own!.is) {
+        const charged = await tx.execute(sql`INSERT INTO api_request_budgets AS b(workspace_id, key_id, window_start, used) VALUES ('global', ${`support-signin-own:${await digest(email)}`}, date_trunc('day', now()), 1)
+          ON CONFLICT (workspace_id, key_id) DO UPDATE SET used = CASE WHEN b.window_start = excluded.window_start THEN b.used + 1 ELSE 1 END, window_start = excluded.window_start
+          WHERE b.window_start <> excluded.window_start OR b.used < ${SUPPORT_LINKS.perAddress} RETURNING 1`);
+        if (!charged.rowCount) throw new ApiError(429, 'SIGN_IN_LINK_LIMIT', 'Too many sign-in links were asked for today. Use one already sent, or try again tomorrow.');
+      } else {
+        const today = sql`link_window_at > now() - interval '1 day'`;
+        const { rows: [asked] } = await tx.execute<{ conversation: number; address: number }>(sql`SELECT
+          (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE conversation_id = ${conversationId} AND ${today}) AS conversation,
+          (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE address = ${target.address} AND ${today}) AS address`);
+        if (asked!.conversation >= SUPPORT_LINKS.perConversation || asked!.address >= SUPPORT_LINKS.perAddress)
+          throw new ApiError(429, 'SIGN_IN_LINK_LIMIT', 'Too many sign-in links were asked for today. Use one already sent, or try again tomorrow.');
+        await tx.execute(sql`UPDATE support_email_signins SET link_requests = CASE WHEN ${today} THEN link_requests + 1 ELSE 1 END,
+          link_window_at = CASE WHEN ${today} THEN link_window_at ELSE now() END WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+      }
+      // A link, and its email, only for that account: a link to anyone else would prove nothing. Otherwise nothing is made or
+      // sent, and the answer is the same.
+      const workspaceId = c.env.config.platformDomainWorkspace, id = newLinkId();
+      const { rows: [link] } = workspaceId ? await tx.execute<{ id: string }>(sql`INSERT INTO nightmail_signin_links(id, email, conversation_id, message_id, expires_at)
+        SELECT ${id}, ${email}, ${conversationId}, ${messageId}, now() + make_interval(mins => ${LINK_MINUTES}::int)
+        WHERE EXISTS (SELECT FROM nightmail_users u WHERE ${forAccount})
+        RETURNING id`) : { rows: [] };
+      if (link) await tx.execute(signinLink(workspaceId!, link.id));
+      return target.address;
+    });
+    if (!address) return notFound('Support conversation');
+    log('info', { code: 'SUPPORT_SIGNIN_LINK_REQUESTED', conversationId });
+    // A link and its email take a few writes more than none: the answer waits until a fixed time after the request.
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, answerAt - Date.now())));
+    c.header('Cache-Control', 'no-store');
+    return c.json({ requested: true as const, address: await shownAddress(c, address) }, 202);
+  });
+
+  const AnsweredByEmail = z.object({
+    outcome: z.enum(['released', 'already_released', 'answered', 'already_answered']).describe('released: support answers by email now; already_released: it was asked before and the answer hasn\u2019t gone yet, nothing new; answered: it was asked before and the answer has gone since, nothing new; already_answered: support answered that email before anyone asked, nothing new.'),
+    address: z.string().describe('Where the answer goes: the address the email came from, as getSupportConversationClaim’s 403 shows it.'),
+  });
+  app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: [], method: 'post', path: '/v1/support-conversations/{id}/answer-by-email', operationId: 'answerSupportConversationByEmail',
+    description: `"Answer me by email instead", on one email's Continue page: whoever holds the link support emailed to the conversation's address (its conversation and message IDs) asks to be answered by email, signed in as anyone or not at all, from the dashboard. Support then answers in general, with no account access, at the stored address in the same thread, once per conversation (releaseGeneralAnswer). Nothing is attached to any account and nothing of the email is shown; the body names only the message, and anything else in it is ignored. Never on GET. The answer comes at a fixed time and is the same whatever account the address has; an email that isn't waiting (unknown, claimed, closed, or older than ${SIGNIN_DAYS} days) gets 404. At most ${ANSWER_SLOTS} requests per conversation and per network in 11 minutes, past which 429 ANSWER_BY_EMAIL_LIMIT.`,
+    request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the Continue page is for.') })) },
+    responses: { 200: response(AnsweredByEmail), ...errors } }), async c => {
+    if (!c.env.config.multiTenant) return notFound('Endpoint');
+    if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use the dashboard.', { credential: 'dashboard' });
+    const [{ LINK_ANSWER_MS, requireDashboardOrigin }, { wakeSupport }] = await Promise.all([import('./account-login.js'), import('./support-inbox.js')]);
+    requireDashboardOrigin(c.env, c.req.raw);
+    const conversationId = c.req.valid('param').id, messageId = c.req.valid('json').messageId, answerAt = Date.now() + LINK_ANSWER_MS;
+    // Per network and per conversation (as many as pending sign-ins, in 11 minutes), before anything is looked up.
+    for (const peer of [`answer-by-email:${c.req.header(clientIpHeader) ?? 'unknown'}`, `answer-by-email:${conversationId}`]) {
+      const { rows: [slot] } = await c.env.db.execute<{ ok: boolean }>(sql`SELECT reserve_auth_state(${await digest(peer)}) AS ok`);
+      if (!slot?.ok) throw new ApiError(429, 'ANSWER_BY_EMAIL_LIMIT', 'Too many requests to answer by email. Try again in a few minutes.');
+    }
+    // Nobody is acting as a person here: the trail names the request, internal, with no person.
+    const context = { ...auditContext(c), actor: { type: 'system' as const, id: null, via: 'dashboard' as const, label: 'Answer me by email instead' } };
+    const answered = await c.env.db.transaction(async tx => {
+      let outcome: GeneralAnswerRelease | 'answered' = await releaseGeneralAnswer(tx, conversationId, messageId);
+      if (outcome === 'not_waiting') return null;
+      // Asked before: whether the answer has actually gone out since (an agent's answer or a staff reply, sent; not a held
+      // draft, a queued reply or a notice). The presser holds the link mailed to that address, where it went.
+      if (outcome === 'already_released') {
+        const { rows: [since] } = await tx.execute<{ went: boolean }>(sql`SELECT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = ${conversationId}
+            AND o.author IN ('agent', 'staff') AND o.kind IS DISTINCT FROM 'held' AND o.delivery = 'sent'
+            AND o.created_at > (SELECT min(r.general_answer_requested_at) FROM support_email_signins r WHERE r.conversation_id = ${conversationId})) AS went`);
+        if (since!.went) outcome = 'answered';
+      }
+      const { rows: [row] } = await tx.execute<{ address: string }>(sql`SELECT address FROM support_email_signins WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+      // A trail row needs a workspace or a person: it is the support address's workspace's (Nightmail's own), internal.
+      if (outcome === 'released') await tx.execute(auditInsert(context, { action: 'support.answer_by_email', workspaceId: sql`w.id`, target: { type: 'support_conversation', id: conversationId }, details: { message: messageId }, ticketRef: conversationId, internal: true },
+        { from: sql`(SELECT coalesce((SELECT t.workspace_id FROM support_conversations s JOIN mail_threads t ON t.id = s.thread_id WHERE s.id = ${conversationId}), ${c.env.config.platformDomainWorkspace ?? null}::text) AS id) w`, where: sql`w.id IS NOT NULL` }));
+      return { outcome, address: row!.address };
+    });
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, answerAt - Date.now())));
+    if (!answered) return notFound('Support conversation');
+    // Committed: wake the support platform with the conversation's ID, as a claim does (its sweep finds the release anyway).
+    if (answered.outcome === 'released') {
+      if (c.env.deferNudge) c.env.deferNudge(async () => { await wakeSupport(c.env.config, conversationId); });
+      else await wakeSupport(c.env.config, conversationId);
+    }
+    log('info', { code: 'SUPPORT_ANSWER_BY_EMAIL', conversationId, outcome: answered.outcome });
+    c.header('Cache-Control', 'no-store');
+    return c.json({ outcome: answered.outcome, address: await shownAddress(c, answered.address) }, 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/content-access', operationId: 'shareSupportConversationContent',

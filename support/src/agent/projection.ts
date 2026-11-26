@@ -22,12 +22,16 @@ const ESCAPED = /&(?:amp|lt|gt|#x(?:226E|226F|FE64|FE65|FF1C|FF1E));/g;
  */
 export const unfenced = (text: string) => text.replace(ESCAPED, e => e === '&amp;' ? '&' : e === '&lt;' ? '<' : e === '&gt;' ? '>' : String.fromCharCode(parseInt(e.slice(3, -1), 16)));
 /** Outside text as the model reads it: fenced, inside <untrusted> (naming where it came from, when the harness knows). */
-export const untrusted = (text: string, source?: 'chat' | 'email') => `<untrusted${source ? ` source="${source}"` : ''}>${fenced(text)}</untrusted>`;
+export const untrusted = (text: string, source?: 'chat' | 'email' | 'report') => `<untrusted${source ? ` source="${source}"` : ''}>${fenced(text)}</untrusted>`;
 
 /** Fields support routes return that are about Nightmail's side of the conversation, never the customer's data. */
 const DROP = new Set(['grant', 'operatorId', 'operator', 'ticketRef', 'token', 'tokenHash', 'internal', 'ipNetwork', 'userAgent', 'actorLabel', 'retainUntil', 'watch', 'watchFlag', 'handoffId', 'via']);
-/** Text written by other people (recipients, mail servers, the customer's own content): data, never instructions. */
-const UNTRUSTED = new Set(['subject', 'diagnostic', 'diagnosticCode', 'text', 'html', 'snippet', 'lastError', 'pauseReason', 'reason', 'message', 'name', 'previewText', 'replyText', 'body']);
+/**
+ * Text written by other people (recipients, mail servers, the customer's own content such as a route's pattern and note,
+ * the docs search_docs quotes, the recipient domains of a refused SMTP send): data, never instructions.
+ */
+const UNTRUSTED = new Set(['subject', 'diagnostic', 'diagnosticCode', 'text', 'html', 'snippet', 'lastError', 'pauseReason', 'reason', 'message', 'name', 'previewText', 'replyText', 'body',
+  'note', 'match', 'page', 'section', 'recipientDomains']);
 /**
  * Internal IDs the model never needs (a conversation names its person itself), removed from every tool result and the
  * prefetched summary: people's, actors' and support's. Workspace, domain, campaign, email, delivery, webhook, request and

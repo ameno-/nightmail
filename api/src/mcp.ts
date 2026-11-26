@@ -159,7 +159,7 @@ export const workspaceTools: Tool[] = [
   { name: 'setDefaultWorkspace', description: 'Set the workspace this connection’s calls use when they name none. One of your own workspaces, by ID, slug or name.',
     inputSchema: { type: 'object', properties: { workspace: WORKSPACE_ARG }, required: ['workspace'], additionalProperties: false }, outputSchema: WORKSPACE_LIST, annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false } },
 ];
-export const workspaceResource: Tool = { name: 'workspaces', description: 'Your workspaces, your role and access in each, and the default (list), or set the default (setDefault). Every tool takes workspace, an ID or name; without it, the default.',
+export const workspaceResource: Tool = { name: 'workspaces', description: 'Your workspaces with your role and access, and the default (list), or set it (setDefault). Every tool takes workspace (ID or name); without it, the default.',
   inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'setDefault'] }, workspace: { type: 'string' } }, required: ['action'] }, annotations: { idempotentHint: true, openWorldHint: false } };
 
 /**
@@ -182,7 +182,6 @@ const permits = (actor: Actor, permission: McpOperation['permission']) => permis
 /** The first of those guards that refuses this actor the operation, as what the operation needs (error.required), or null. */
 function refusal(op: McpOperation, actor: Actor): Required | null {
   const need = requiredFor(op.method, op.path, op.mailbox || op.permission === 'any' ? undefined : op.permission);
-  if (op.dashboardOnly) return { ...need, credential: 'dashboard' };
   const mail = op.mailbox ? workspaceMailAccess(actor, op.method, op.path) : null;
   if (mail === 'UNRESTRICTED_KEY_REQUIRED' || (op.unrestricted && actor.domains.length)) return { ...need, scope: 'workspace' };
   if (mail === 'ADMIN_REQUIRED') return need;
@@ -238,8 +237,8 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   const key = 'key' in principal ? principal : null;
   const credential = request.headers.get('authorization')?.match(/^(?:Bearer|DPoP)\s+(.+)$/i)?.[1];
   const redact = (text: string) => credential ? text.split(credential).join('[REDACTED]') : text;
-  // Members, invitations and Activity are Hosted workspace administration; a self-hosted installation answers them 404.
-  const allowed = ([, op]: [string, McpOperation]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.memberAdmin || runtime.config.multiTenant) && authorized(op, connection ? connection.listing : key!.key);
+  // Members, invitations and Activity are Hosted-only; SES region writes are self-hosted-only (Hosted answers 409).
+  const allowed = ([, op]: [string, McpOperation]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.memberAdmin || runtime.config.multiTenant) && (!op.selfHostedOnly || !runtime.config.multiTenant) && authorized(op, connection ? connection.listing : key!.key);
   const operations = new Map([...catalog].filter(allowed));
   const params = new URL(request.url).searchParams;
   // rituals is the rules toolset's name from before the rename, kept for URLs configured with it.

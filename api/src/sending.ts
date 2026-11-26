@@ -1,3 +1,5 @@
+import { queueListRisk } from './list-risk-lines.js';
+import { blocklistPause, blocklistWindow, campaignBlocklistReplies, planHeldWhy, planWindowHealthy, stopDeadDomains, stoppedDomains } from './send-guards.js';
 import { cachedDashboardRead, mailRevision } from './dashboard-cache.js';
 import { talliesEnabled } from './sending-tallies.js';
 import { boundRequestBody } from './request-body.js';
@@ -32,7 +34,7 @@ import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threa
 import { assertTopics, topicAllows, topicRule, type TopicRule } from './topics.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { decodedDisplayName, AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
-import { foundLinkOrigin, linkChoice, linkChoices, linkOrigin, linkReview, recordLinkUse } from './link-domains.js';
+import { foundLinkOrigin, linkAllowance, linkChoice, linkChoices, linkOrigin, linkReview, recordLinkUse } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -46,9 +48,9 @@ import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
 import { RecipientWarning, recipientWarnings, RiskBreakdown } from './list-hygiene.js';
-import { assertBuiltinInput, assertBuiltinRecipients, assertBuiltinStillSends, awaitBuiltinSetup, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
+import { assertBuiltinInput, assertBuiltinRecipients, assertBuiltinStillSends, awaitBuiltinSetup, BUILTIN_NOTE, builtinReplyPolicy, isBuiltinHost } from './builtin-domain.js';
 import { ATTACHMENT_LIMITS_TEXT, ATTACHMENT_REFUSALS_TEXT, ATTACHMENT_RULES_TEXT, UPLOAD_HEADERS } from './attachment-limits.js';
-import { estimateFinish, judgeReadiness, RAMP, RAMP_HOUR_MS, rampPlan, rampStart, READINESS_REASONS, type RampAt, type ReadinessReason } from './standing-model.js';
+import { estimateFinish, judgeReadiness, LEGACY_READINESS_REASONS, LEGACY_REASON, RAMP, RAMP_HOUR_MS, rampLines, rampStart, READINESS_REASONS, type RampAt, type RampLines, type ReadinessReason } from './standing-model.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
@@ -246,24 +248,40 @@ async function activeFeedbackLag(db: DbExecutor): Promise<FeedbackLag | null> {
 
 const Delivery = z.object({ total: z.number().int().describe('Fixed recipient count once the audience is frozen (recipients expected while a large audience is being captured).'), prepared: z.number().int().describe('Recipients whose message was validated.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: Failure.nullable().describe('Why the campaign failed or was canceled by the system.'),
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.'),
-    plan: z.array(z.number().int()).nullable().describe('Sent with the recommended plan: its daily batches (one 24-hour window each; the last repeats). Null otherwise.'), batch: z.number().int().nullable().describe('With a plan: the batch the current window releases, from 1.') }),
+    plan: z.array(z.number().int()).nullable().describe('Sent with the recommended plan: its daily batches (one 24-hour window each; the last repeats). Null otherwise.'), batch: z.number().int().nullable().describe('With a plan: the batch the current window releases, from 1.'),
+    held: z.object({ since: z.string(), batch: z.number().int().describe('The batch the plan repeats, from 1.'), why: z.array(z.enum(['bounces', 'complaints', 'blocklist'])).describe('What made the last day unhealthy: hard bounces over 3% of at least 100 accepted, complaints over 0.08% (at least 2), or a reply naming a blocklist.'), toGrow: z.string().describe('What lets the plan open its next batch, in a sentence.') }).nullable().optional().describe('With a plan whose growth is checked: held on the same batch since the day before it was not healthy; null while it grows.'),
+    firstBatch: z.object({ size: z.number().int().describe('Recipients the first day starts with.'), waitMinutes: z.number().int().describe('Minutes it then waits for their bounces and rejections before the rest of the day\'s batch.') }).nullable().optional().describe('With a plan: its first day\'s small batch and the wait after it.') }),
   consent: z.object({ source: z.string(), confirmedAt: z.string() }).nullable().describe('The consent source confirmed at launch, if any.'),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
-  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'ramp', 'link_record']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender\'s first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour\'s step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace\'s sending is paused, or with own link hosts, its domain\'s isn\'t active yet); it continues by itself.'),
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'ramp', 'link_record']), linkHold: z.enum(['daily_budget', 'blocklist']).optional().describe('When present, the daily pacing window is the shared link allowance, or the link record is held for operator review.'), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender\'s first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour\'s step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace\'s sending is paused, or with own link hosts, its domain\'s isn\'t active yet); it continues by itself.'),
+  stoppedDomains: z.array(z.object({ domain: z.string(), stoppedAt: z.string() })).optional()
+    .describe('Recipient domains this campaign stopped sending to because its mail there kept bouncing for good (the rest of its recipients there are counted in canceled, are not charged and are not suppressed), oldest first, at most 50. Empty unless the guard is on.'),
   feedbackLag: z.object({ oldestMs: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 /** The daily cap of a campaign's `index`th 24-hour window: its plan's batch (the last repeating), else pacePerDay; null for none. */
 const dailyCap = (row: Pick<typeof campaigns.$inferSelect, 'pacePlan' | 'pacePerDay' | 'windowIndex'>, index = row.windowIndex) =>
   row.pacePlan?.length ? row.pacePlan[Math.min(index, row.pacePlan.length - 1)]! : row.pacePerDay;
-function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null) {
+/** When a plan's first small batch is waiting for its feedback: the end of that wait (ms), else null. Only in the first window. */
+const firstBatchWait = (row: Pick<typeof campaigns.$inferSelect, 'pacePlan' | 'paceFirstBatch' | 'paceFirstWaitMinutes'>, index: number, windowStartedAt: string | null, nowMs: number) => {
+  if (!row.pacePlan?.length || !row.paceFirstBatch || !row.paceFirstWaitMinutes || index !== 0 || !windowStartedAt) return null;
+  const until = Date.parse(windowStartedAt) + row.paceFirstWaitMinutes * 60_000;
+  return nowMs < until ? until : null;
+};
+type StoppedDomain = { domain: string; stoppedAt: string };
+function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null, stopped: StoppedDomain[] = []) {
   if (!row.reviewId) return null;
   const next = dailyCap(row) !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
+  const wait = row.waitingReason === 'link_budget' ? { reason: 'pacing_window', linkHold: 'daily_budget' }
+    : row.waitingReason === 'link_listing' ? { reason: 'link_record', linkHold: 'blocklist' } : { reason: row.waitingReason };
   return Delivery.parse({ total: row.total, prepared: row.prepared, expanded: row.expanded, canceled: row.canceled, error: row.error ?? null,
     pacing: { perDay: row.pacePerDay, autoPause: row.autoPause, rateShare: row.rateShare ?? 1, windowStartedAt: row.windowStartedAt, windowExpanded: row.windowExpanded, nextWindowAt: next,
-      plan: row.pacePlan, batch: row.pacePlan ? Math.min(row.windowIndex, row.pacePlan.length - 1) + 1 : null },
+      plan: row.pacePlan, batch: row.pacePlan ? Math.min(row.windowIndex, row.pacePlan.length - 1) + 1 : null,
+      firstBatch: row.pacePlan && row.paceFirstBatch && row.paceFirstWaitMinutes ? { size: row.paceFirstBatch, waitMinutes: row.paceFirstWaitMinutes } : null,
+      // Only while it still sends: a finished or canceled campaign isn't repeating a batch.
+      held: row.pacePlan && row.planHeld && ['sending', 'paused'].includes(row.state) ? { ...row.planHeld, toGrow: 'It opens its next batch after a day with hard bounces at most 3% of what was accepted, complaints under 0.08% and no reply naming a blocklist: remove the addresses that bounce or complain, and fix whatever the blocklist lists.' } : null },
     consent: row.consent ? { source: row.consent.source, confirmedAt: row.consent.confirmedAt } : null,
-    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { reason: row.waitingReason, until: row.waitingUntil } : null,
-    feedbackLag: ['preparing', 'sending', 'paused'].includes(row.state) ? feedbackLag : null });
+    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { ...wait, until: row.waitingUntil } : null,
+    feedbackLag: ['preparing', 'sending', 'paused'].includes(row.state) ? feedbackLag : null, stoppedDomains: stopped });
 }
 const CampaignRamp = z.object({ step: z.number().int().describe('The step the campaign releases at, from 1.'), steps: z.number().int().describe('How many steps the ramp has; past the last one only the other limits apply.'), ceilingPerHour: z.number().int().describe('Most recipients this step releases in its hour.'),
   startedAt: z.string().nullable().describe('When this step\'s hour started: its first release. Null before it.'), released: z.number().int().describe('Recipients released since this step\'s hour started.') })
@@ -498,15 +516,23 @@ const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional()
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional(),
   listId: z.string().min(1).max(120).optional().describe('Only campaigns whose audience list is this one: a newsletter\u2019s issues.'),
   newsletter: z.enum(['true', 'false']).optional().describe('true: only campaigns whose audience list is a newsletter. false: only the others, with no list or a list that is not a newsletter.') }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
-const HistoryFigures = z.object({ largestSend: z.number().int().describe('Most recipients SES accepted from one campaign in the last 90 days.'), sent: z.number().int().describe('Recipients SES accepted in the last 30 days.'),
+const HistoryFigures = z.object({ largestSend: z.number().int().describe('Most recipients SES accepted from one campaign in the last 90 days.'),
+  firstSentAt: z.string().nullable().optional().describe('When this workspace first had mail accepted (workspace history only); null with none.'),
+  usualDay: z.number().int().optional().describe('The usual day: the median of the mail accepted on the days it sent in the last 14 days (workspace history only); 0 with none.'), sent: z.number().int().describe('Recipients SES accepted in the last 30 days.'),
   bounceRate: z.number().nullable().describe('Hard bounces ÷ accepted over the last 30 days; null with nothing sent.'), complaintRate: z.number().nullable().describe('Complaints ÷ accepted over the last 30 days; null with nothing sent.') });
 const CampaignReadiness = z.object({
   verdict: z.enum(['ready', 'ramp_recommended', 'ramp_required']).describe('ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan "recommended"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise.'),
   summary: z.string().nullable().describe('Why, in one or two plain sentences, when a ramp is recommended or required.'),
-  reasons: z.array(z.object({ code: z.enum(READINESS_REASONS), message: z.string() })).describe('Every finding behind the verdict.'),
-  domain: z.object({ name: z.string(), firstSeenAt: z.string().nullable().describe('When the From domain (or the domain it is under) was added to this workspace.'), ageDays: z.number().int().nullable(),
+  reasons: z.array(z.object({ code: z.enum(LEGACY_READINESS_REASONS), message: z.string() })).describe('The findings behind the verdict in the original codes, one per code: a newly registered domain, one new here and a new link domain read NEW_DOMAIN, a jump over the usual day SIZE_JUMP; blocklist findings appear only in findings. Prefer findings.'),
+  findings: z.array(z.object({ code: z.enum(READINESS_REASONS), message: z.string() })).optional().describe('Every finding behind the verdict, with its own code: NEW_REGISTRATION (registered recently, from public registry data), NEW_HERE (registered long ago, new to this workspace), NEW_DOMAIN (added recently, registration not known), USUAL_JUMP, NEW_LINK_DOMAIN, BLOCKLISTED_BEFORE (an earlier send drew replies naming a blocklist and none has finished without since), BLOCKLIST_UNCOUNTED (a recent send\'s blocklist replies aren\'t counted yet, so it isn\'t taken for clean), and the original codes.'),
+  unavailable: z.string().optional().describe('Present when part of the review couldn\'t be worked out just now (sizing the plan): what was left out, in a sentence. The review is then the one without that part, and its verdict is at least ramp_recommended. A launch that fails the same way is refused, 503 SEND_PLAN_UNAVAILABLE (retryable), with nothing sent.'),
+  domain: z.object({ name: z.string(), firstSeenAt: z.string().nullable().describe('When the From domain (or the domain it is under) was added to this workspace.'), ageDays: z.number().int().nullable().describe('Days since it was added to this workspace: its history here, not its age.'),
+    registeredAt: z.string().nullable().optional().describe('When its registrable domain was registered (YYYY-MM-DD), from public registry data; null when not known (never taken for old).'),
+    registeredDays: z.number().int().nullable().optional().describe('Days since registeredAt; null when not known.'),
+    linkDomain: z.object({ name: z.string().describe('The registrable domain the links go on, when it is not the From domain\'s.'), registeredAt: z.string().nullable(), registeredDays: z.number().int().nullable() }).nullable().optional(),
     dmarc: z.enum(['reject', 'quarantine', 'none', 'missing', 'invalid']).nullable().describe('The DMARC policy last observed; null when not checked yet.'),
     mailFrom: z.enum(['verified', 'pending', 'failed', 'not_configured']).describe('The custom MAIL FROM domain (aligned SPF).'),
+    sharedLinkPacing: z.boolean().optional().describe('This campaign shares the link domain’s daily sending allowance.'),
     linkHost: z.enum(['not_configured']).describe('Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.'),
     ownLinkHost: z.object({ hostname: z.string().describe('links.<domain>.'), active: z.boolean().describe('true: the links go there. false: it isn\u2019t set up yet, so they go on linkOrigin (the link domain) meanwhile.') }).nullable()
       .describe('The domain\'s own link host, when this workspace has them; null without one.'),
@@ -517,13 +543,19 @@ const CampaignReadiness = z.object({
     createdAt: z.string().nullable(), lastSentAt: z.string().nullable().describe('When a campaign last went to this list.'),
     lastImport: z.object({ at: z.string(), contacts: z.number().int(), consent: z.string().nullable().describe('The consent evidence it was imported with, if any.') }).nullable() }),
   sizeJump: z.number().nullable().describe('This send ÷ the largest campaign its domain sent in the last 90 days; null without one.'),
+  usualJump: z.number().nullable().optional().describe('This send ÷ the workspace\'s usual day (history.workspace.usualDay); null without one.'),
   plan: z.object({ batches: z.array(z.number().int()).describe('Recipients per day, in order: one batch a day, the most engaged first and never-mailed last.'),
+    firstBatch: z.object({ size: z.number().int().describe('Recipients the first day starts with.'), waitMinutes: z.number().int().describe('Minutes it then waits for their bounces and rejections before the rest of the day\'s batch.') }).nullable().optional().describe('The first day\'s small batch and wait, inside its batch; null when the first day is small already.'),
     seconds: z.number().int().nullable().describe('How long the plan takes from its start, the hourly ramp included.') }).nullable().describe('The recommended daily batches; null when one day covers everyone.'),
-  required: z.object({ by: z.enum(['NEW_DOMAIN', 'SIZE_JUMP']), maxPerDay: z.number().int().describe('The largest daily limit that counts as a ramp: the plan\'s first day.') }).nullable(),
+  required: z.object({ by: z.enum(['NEW_DOMAIN', 'SIZE_JUMP']).describe('Kept as it was: a newly registered domain reads NEW_DOMAIN and a blocklist SIZE_JUMP. reason says which.'),
+    reason: z.enum(['NEW_REGISTRATION', 'BLOCKLISTED', 'NEW_DOMAIN', 'SIZE_JUMP']).optional().describe('What requires the ramp. BLOCKLISTED: mail from this From domain or with these links drew replies naming a blocklist and no send has finished without any since; a consent confirmation does not waive it.'), maxPerDay: z.number().int().describe('The largest daily limit that counts as a ramp: the plan\'s first day.') }).nullable(),
 }).describe('Whether this campaign is ready to send as it is: its domain, its sender\'s history, its list and how much larger it is than before, with a verdict and a plan. Hosted shared sending with live SES can require the plan; elsewhere it is advice.').openapi('CampaignReadiness');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int(),
   risky: z.number().int().describe('Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address known to be undeliverable): the send skips them. Not in eligible.'),
-  riskyByReason: RiskBreakdown.shape.byReason, readiness: CampaignReadiness.nullable().optional().describe('With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.') }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
+  riskyByReason: RiskBreakdown.shape.byReason,
+  topicExcluded: z.number().int().optional().describe('With a topic: the subscribed contacts it leaves out (who opted out of it, or for a topic only people who opt in get, who didn\u2019t). Counted in unsubscribed, not in eligible.'),
+  approximate: z.literal(true).optional().describe('The topic\u2019s effect on this list couldn\u2019t be counted in time: eligible and topicExcluded are estimated from the workspace\u2019s choices about the topic. Sending counts it exactly.'),
+  readiness: CampaignReadiness.nullable().optional().describe('With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.') }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
 const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Omit to keep the current region selection. An unpinned regional MX draft follows its From domain.') }).strict() }).strict().openapi('CampaignUpdateInput');
 const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('CampaignArchiveInput');
@@ -616,10 +648,21 @@ async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, 
   const lag = rows.some(row => row.reviewId && ['preparing', 'sending', 'paused'].includes(row.state))
     ? await activeFeedbackLag(db).catch(() => null)
     : null;
+  // Recipient domains a campaign stopped sending to (src/send-guards.ts), for its sender: one read by the table's key.
+  const stopped = new Map<string, StoppedDomain[]>();
+  const launched = rows.filter(row => row.reviewId).map(row => row.id);
+  if (launched.length) for (const item of (await db.execute<StoppedDomain & { campaign_id: string }>(sql`SELECT campaign_id, domain,
+      to_char(stopped_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "stoppedAt" FROM campaign_stopped_domains
+      WHERE campaign_id = ANY(${sql.param(launched)}::text[]) AND workspace_id = ${a.workspaceId} ORDER BY campaign_id, stopped_at, domain`)).rows) {
+    const list = stopped.get(item.campaign_id) ?? [];
+    // The domain and when, never the counts that tripped it: those would show the private line (NIGHTMAIL_RAMP domainStop).
+    if (list.length < 50) list.push({ domain: item.domain, stoppedAt: item.stoppedAt });
+    stopped.set(item.campaign_id, list);
+  }
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
-    return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row, lag), ...estimates ? { sendEstimate: estimates.get(row.id) ?? null } : {} };
+    return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row, lag, stopped.get(row.id)), ...estimates ? { sendEstimate: estimates.get(row.id) ?? null } : {} };
   });
 }
 /**
@@ -662,23 +705,62 @@ async function sendEstimates(runtime: Runtime, db: DbExecutor, a: Actor, rows: C
  * with that import's consent evidence) and how much larger this send is, then the verdict and the plan. Two statements;
  * `audience` brings the recipients. `lastSent`: when the list was last sent to, if the caller already knows.
  */
-async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { id: string; draft: CampaignDraft },
-  audience: { recipients: number; matched: number | null; risky: number; neverMailed: number | null; lastSent: string | null }) {
+type ReviewedAudience = { recipients: number; matched: number | null; risky: number; neverMailed: number | null; lastSent: string | null };
+/**
+ * The send review. With the private ramp lines (NIGHTMAIL_RAMP) it sizes the plan by them. If that fails (an error or a
+ * statement past its limit), a preview gets the review without them, saying so (unavailable) and never less cautious
+ * than ramp_recommended. A launch (`launch`) is refused instead, retryable, with nothing sent or kept: without the
+ * lines it would lose the ramps only they require (after blocklist replies, for a newly registered domain), the first
+ * small batch and the split, so it never goes out on the fallback. A refusal the review means (an ApiError) stands.
+ */
+async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { id: string; draft: CampaignDraft }, audience: ReviewedAudience, o: { launch?: boolean } = {}) {
+  if (!runtime.config.rampLines) return reviewSend(runtime, db, a, row, audience, false);
+  try {
+    return await reviewSend(runtime, db, a, row, audience, true);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    const failure = error as { name?: unknown; message?: unknown; stack?: unknown; code?: unknown } | null;
+    log('error', { code: 'SEND_REVIEW_PLAN_UNAVAILABLE', stage: o.launch ? 'launch' : 'preview', campaignId: row.id, errorType: typeof failure?.name === 'string' ? failure.name : typeof error,
+      sqlState: failure?.code ?? null, detail: String(failure?.message ?? error).slice(0, 200),
+      frame: typeof failure?.stack === 'string' ? failure.stack.split('\n').find(line => line.trimStart().startsWith('at '))?.trim().slice(0, 200) ?? null : null });
+    if (o.launch) {
+      const refused = new ApiError(503, 'SEND_PLAN_UNAVAILABLE', 'The send plan couldn\'t be worked out just now, so nothing was sent and the campaign is still a draft. Try again in a minute.', undefined, true);
+      refused.retryAfterSeconds = 60;
+      throw refused;
+    }
+    const plain = await reviewSend(runtime, db, a, row, audience, false);
+    const unavailable = 'This send\'s plan couldn\'t be sized just now, so this review leaves that part out and recommends sending in batches.';
+    return { ...plain, verdict: plain.verdict === 'ready' ? 'ramp_recommended' as const : plain.verdict, summary: plain.summary ?? unavailable, unavailable };
+  }
+}
+async function reviewSend(runtime: Runtime, db: DbExecutor, a: Actor, row: { id: string; draft: CampaignDraft }, audience: ReviewedAudience, tuned: boolean) {
   const domain = (row.draft.from.split('@')[1] ?? '').toLowerCase(), listId = row.draft.audience?.listId ?? null, r = RAMP.readiness, c = RAMP.check;
-  const clean = sql`bounced<=accepted*${c.bounceRate}::float8 AND (complained<${c.complaints}::int OR complained<=accepted*${c.complaintRate}::float8)`;
+  // Where this campaign's links go (src/link-domains.ts): a blocklist lists the link domain as readily as the sender's.
+  const links = await linkReview(runtime, db, a.workspaceId, row.draft.from), linkHost = links.origin ? new URL(links.origin).hostname.toLowerCase() : null;
+  // Clean: within the ramp check's bounce and complaint lines, no reply named a blocklist in the days it went out, and the
+  // delivery history has counted it (src/delivery-history.ts), so a send not counted yet is never taken for clean.
+  // Without the private ramp lines (NIGHTMAIL_RAMP) the review is today's: clean is the bounce and complaint lines alone.
+  const clean = sql`bounced<=accepted*${c.bounceRate}::float8 AND (complained<${c.complaints}::int OR complained<=accepted*${c.complaintRate}::float8)${tuned ? sql` AND NOT blocked AND counted` : sql``}`;
   const [f] = (await db.execute<{ first_seen: string | null; dmarc: string | null; mail_from: string | null; ws_largest: number; dom_largest: number; dom_clean: number;
-    dom_accepted: number; dom_bounced: number; dom_complained: number; ws_accepted: number | null; ws_bounced: number | null; ws_complained: number | null;
+    dom_accepted: number; dom_bounced: number; dom_complained: number; ws_accepted: number | null; ws_bounced: number | null; ws_complained: number | null; usual_day: number | null; first_sent: string | null;
+    blocked_day: string | null; last_clean_done: string | null; uncounted: boolean;
     list_created: string | null; last_import: { at: string; contacts: number; consent: string | null } | null; rate: number; hosted: boolean }>(sql`WITH dom AS (
       SELECT dc.created_at, dc.identity->'dmarc'->>'status' AS dmarc, dc.identity->'ses'->'MailFromAttributes'->>'MailFromDomainStatus' AS mail_from FROM domain_claims dc
       WHERE dc.workspace_id=${a.workspaceId} AND (dc.name=${domain} OR right(${domain}, length(dc.name)+1)='.'||dc.name) ORDER BY length(dc.name) DESC LIMIT 1
     ), sent AS MATERIALIZED (
-      SELECT c.created_at, lower(split_part(c.draft->>'from','@',2)) AS domain, t.accepted, t.bounced, t.complained FROM sending_campaigns c
+      SELECT c.created_at, c.state, lower(split_part(c.draft->>'from','@',2)) AS domain, t.accepted, t.bounced, t.complained,
+        c.updated_at <= coalesce((SELECT cursor_at FROM delivery_history_state WHERE id='rollup'), '-infinity') AS counted,
+        EXISTS (SELECT 1 FROM delivery_blocklist_daily b WHERE b.workspace_id=c.workspace_id AND b.from_domain=lower(split_part(c.draft->>'from','@',2))
+          AND b.day BETWEEN c.created_at::date AND c.created_at::date+3 AND b.rejections>0) AS blocked FROM sending_campaigns c
       CROSS JOIN LATERAL (SELECT coalesce(sum(accepted),0)::float8 AS accepted, coalesce(sum(bounced),0)::float8 AS bounced, coalesce(sum(complained),0)::float8 AS complained
         FROM sending_campaign_tallies t WHERE t.workspace_id=c.workspace_id AND t.campaign_id=c.id AND NOT t.simulated) t
       WHERE c.workspace_id=${a.workspaceId} AND c.id<>${row.id} AND NOT c.simulated AND c.expanded>0 AND c.created_at>now()-make_interval(days=>${r.lookbackDays}::int)
     ), hours AS (
       SELECT sum(accepted)::float8 AS a, sum(bounced)::float8 AS b, sum(complained)::float8 AS c FROM (SELECT hour, sum(accepted) AS accepted, sum(bounced) AS bounced, sum(complained) AS complained
         FROM sending_metrics_hourly WHERE workspace_id=${a.workspaceId} AND hour>=now()-make_interval(days=>${r.windowDays}::int) GROUP BY hour HAVING sum(simulated)=0) x
+    ), days AS (
+      SELECT date_trunc('day', hour) AS day, sum(accepted)::float8 AS a FROM sending_metrics_hourly WHERE workspace_id=${a.workspaceId} AND hour>=now()-interval '14 days'
+      GROUP BY 1 HAVING sum(simulated)=0 AND sum(accepted)>0
     )
     SELECT (SELECT created_at::text FROM dom) AS first_seen, (SELECT dmarc FROM dom) AS dmarc, (SELECT mail_from FROM dom) AS mail_from,
       coalesce((SELECT max(accepted) FROM sent),0)::int AS ws_largest, coalesce((SELECT max(accepted) FROM sent WHERE domain=${domain}),0)::int AS dom_largest,
@@ -687,6 +769,11 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
       coalesce((SELECT sum(bounced) FROM sent WHERE domain=${domain} AND created_at>now()-make_interval(days=>${r.windowDays}::int)),0)::int AS dom_bounced,
       coalesce((SELECT sum(complained) FROM sent WHERE domain=${domain} AND created_at>now()-make_interval(days=>${r.windowDays}::int)),0)::int AS dom_complained,
       (SELECT a FROM hours)::bigint AS ws_accepted, (SELECT b FROM hours)::bigint AS ws_bounced, (SELECT c FROM hours)::bigint AS ws_complained,
+      (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY a) FROM days)::bigint AS usual_day,
+      (SELECT min(hour)::text FROM sending_metrics_hourly WHERE workspace_id=${a.workspaceId} AND accepted>0 AND simulated=0) AS first_sent,
+      (SELECT max(day)::text FROM delivery_blocklist_daily WHERE workspace_id=${a.workspaceId} AND (from_domain=${domain} OR link_host=${linkHost ?? ''}) AND day>current_date-90 AND rejections>0) AS blocked_day,
+      (SELECT max(created_at)::text FROM sent WHERE domain=${domain} AND state='done' AND ${clean}) AS last_clean_done,
+      EXISTS (SELECT 1 FROM sent WHERE domain=${domain} AND NOT counted) AS uncounted,
       (SELECT created_at::text FROM audience_lists WHERE workspace_id=${a.workspaceId} AND id=${listId}) AS list_created,
       (SELECT jsonb_build_object('at',i.created_at,'contacts',i.imported,'consent',(SELECT ca.evidence FROM audience_consent_audit ca WHERE ca.workspace_id=i.workspace_id
           AND ca.contact_id=i.sample_contact_ids[1] AND ca.import_id=i.id LIMIT 1))
@@ -694,17 +781,32 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
       coalesce((SELECT max_send_rate FROM ${limitsTable(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${row.draft.region}),0)::float8 AS rate,
       ${runtime.config.multiTenant ? sharedConnection(a.workspaceId) : sql`false`} AS hosted`)).rows;
   const live = !!f!.hosted && !isSimulatedSes(runtime), ageDays = f!.first_seen ? Math.floor((Date.now() - Date.parse(f!.first_seen)) / DAY_MS) : null;
-  const links = await linkReview(runtime, db, a.workspaceId, row.draft.from);
+  // How old the From domain and the domain its links go on are on the internet (src/domain-age.ts), apart from how long they have sent here.
+  const age = await wrapModuleLoad(() => import('./domain-age.js'));
+  const fromRoot = await age.registrableRoot(domain), linkRoot = await age.registrableRoot(links.origin ? new URL(links.origin).hostname : null);
+  const registered = await age.registeredDays(db, [fromRoot, linkRoot]), reg = fromRoot ? registered.get(fromRoot) ?? null : null;
+  const link = linkRoot && linkRoot !== fromRoot ? { name: linkRoot, registeredAt: registered.get(linkRoot)?.at ?? null, registeredDays: registered.get(linkRoot)?.days ?? null } : null;
+  const usualDay = Number(f!.usual_day ?? 0), firstSentDays = f!.first_sent ? Math.floor((Date.now() - Date.parse(f!.first_sent)) / DAY_MS) : null;
   const dmarc = f!.dmarc && ['reject', 'quarantine', 'none', 'missing', 'invalid'].includes(f!.dmarc) ? f!.dmarc as 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' : null;
   const n = audience.recipients, wsAccepted = Number(f!.ws_accepted ?? 0);
   const judged = judgeReadiness({ recipients: n, matched: audience.matched, risky: audience.risky, neverMailed: audience.neverMailed, domainAgeDays: ageDays,
     dmarc: dmarc === null ? null : !['missing', 'invalid'].includes(dmarc), largestSend: f!.dom_largest, largestCleanSend: f!.dom_clean,
-    accepted: wsAccepted, bounced: Number(f!.ws_bounced ?? 0), complained: Number(f!.ws_complained ?? 0), enforced: live });
-  const batches = rampPlan(n, f!.dom_clean), first = batches[0] ?? 0, fmt = (v: number) => v.toLocaleString('en-US'), share = (v: number, of: number) => `${(100 * v / of).toFixed(of && v / of < 0.1 ? 1 : 0)}%`;
+    accepted: wsAccepted, bounced: Number(f!.ws_bounced ?? 0), complained: Number(f!.ws_complained ?? 0), enforced: live,
+    registeredDays: reg?.days ?? null, linkRegisteredDays: link?.registeredDays ?? null, usualDay, lines: tuned ? rampLines(runtime.config.rampLines) : undefined,
+    blocklisted: !!f!.blocked_day && !(f!.last_clean_done && f!.last_clean_done.slice(0, 10) > f!.blocked_day), blocklistUncounted: !!f!.uncounted });
+  const batches = judged.plan, first = batches[0] ?? 0, fmt = (v: number) => v.toLocaleString('en-US'), share = (v: number, of: number) => `${(100 * v / of).toFixed(of && v / of < 0.1 ? 1 : 0)}%`;
   const rampAt = live ? rampStart(await rampHistory(db, a.workspaceId)) : RAMP.steps.length;
   const seconds = batches.length > 1 ? estimateFinish({ recipients: n, start: 0, ratePerSecond: Number(f!.rate), perDay: batches, ramp: rampAt < RAMP.steps.length ? { step: rampAt, startedAt: null, released: 0 } : null }) : null;
+  const ago = (days: number | null) => days === null ? 'recently' : days === 0 ? 'today' : days === 1 ? 'yesterday' : `${fmt(days)} days ago`;
+  const month = (at: string | null) => at ? new Date(at + 'T00:00:00Z').toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }) : 'an unknown date';
   const messages: Record<ReadinessReason, () => string> = {
-    NEW_DOMAIN: () => `${domain} was added ${ageDays === 0 ? 'today' : ageDays === 1 ? 'yesterday' : `${ageDays} days ago`}.`,
+    NEW_DOMAIN: () => `${domain} was added ${ago(ageDays)}, and when it was registered isn't known yet.`,
+    NEW_HERE: () => `${fromRoot ?? domain} was registered in ${month(reg?.at ?? null)}; it was added here ${ago(ageDays)}${firstSentDays !== null && firstSentDays !== ageDays ? ` and this workspace first sent mail ${ago(firstSentDays)}` : ''}.`,
+    NEW_REGISTRATION: () => `${fromRoot ?? domain} was registered ${ago(reg?.days ?? null)} (${month(reg?.at ?? null)}). Mailbox providers distrust mail from a domain that new.`,
+    NEW_LINK_DOMAIN: () => `Its links go on ${link?.name}, registered ${ago(link?.registeredDays ?? null)}.`,
+    BLOCKLISTED_BEFORE: () => `Replies to this workspace's mail ${linkHost && linkHost !== domain ? `from ${domain} or with links on ${linkHost}` : `from ${domain}`} named a blocklist on ${f!.blocked_day}, and no send has finished without one since.`,
+    BLOCKLIST_UNCOUNTED: () => `The last send's blocklist replies aren't counted yet, so it isn't treated as a clean send.`,
+    USUAL_JUMP: () => `This send is ${fmt(Math.round(judged.usualJump!))} times this workspace's usual day (${fmt(usualDay)} emails).`,
     SIZE_JUMP: () => `This send is ${fmt(Math.round(judged.jump!))} times the largest campaign ${domain} sent in the last ${r.lookbackDays} days (${fmt(f!.dom_largest)}).`,
     NO_HISTORY: () => f!.dom_largest ? `${domain}'s largest campaign in the last ${r.lookbackDays} days went to ${fmt(f!.dom_largest)} people.` : `${domain} hasn't sent a campaign in the last ${r.lookbackDays} days.`,
     RISKY_LIST: () => `${fmt(audience.risky)} risky addresses (${share(audience.risky, audience.matched ?? 1)} of the list) will be skipped.`,
@@ -713,22 +815,30 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
     BOUNCES: () => `${share(Number(f!.ws_bounced), wsAccepted)} of the last ${r.windowDays} days' mail bounced.`,
     COMPLAINTS: () => `${share(Number(f!.ws_complained), wsAccepted)} of the last ${r.windowDays} days' mail was marked as spam.`,
   };
-  const summary = judged.requiredBy === 'NEW_DOMAIN' ? `This domain is new and this list is much larger than anything it has sent. Mailbox providers block new senders who send to huge lists at once, so we'll send ${fmt(first)} today and grow from there.`
+  const fb = judged.firstBatch, opening = fb ? ` The first day starts with ${fmt(fb.size)}, then waits ${fb.waitMinutes} minutes for their bounces and rejections before the rest.` : '';
+  const headline = judged.requiredBy === 'BLOCKLISTED' ? `Mail from this sender drew replies naming a blocklist. Until a send finishes without any, sends go out in batches: we'll send ${fmt(first)} today and grow from there.`
+    : judged.requiredBy === 'NEW_REGISTRATION' ? `This domain was registered recently and this list is much larger than anything it has sent. Mailbox providers block new domains that send to huge lists at once, so we'll send ${fmt(first)} today and grow from there.`
+    : judged.requiredBy === 'NEW_DOMAIN' ? `This domain is new and this list is much larger than anything it has sent. Mailbox providers block new senders who send to huge lists at once, so we'll send ${fmt(first)} today and grow from there.`
     : judged.requiredBy === 'SIZE_JUMP' ? `This list is much larger than anything this domain has sent. Mailbox providers block senders who jump to huge lists at once, so we'll send ${fmt(first)} today and grow from there.`
     : judged.verdict === 'ramp_recommended' && batches.length > 1 ? `Send this over ${batches.length} days: ${fmt(first)} of the most engaged recipients first, people never mailed before last.` : null;
+  const summary = headline && headline + opening;
   const rate = (part: number, whole: number) => whole > 0 ? part / whole : null;
-  return CampaignReadiness.parse({ verdict: judged.verdict, summary, reasons: judged.reasons.map(code => ({ code, message: messages[code]() })),
+  const findings = judged.reasons.map(code => ({ code, message: messages[code]() }));
+  const legacy = findings.flatMap(f => { const code = (LEGACY_READINESS_REASONS as readonly string[]).includes(f.code) ? f.code as (typeof LEGACY_READINESS_REASONS)[number] : LEGACY_REASON[f.code]; return code ? [{ code, message: f.message }] : []; })
+    .filter((f, i, all) => all.findIndex(g => g.code === f.code) === i);
+  return CampaignReadiness.parse({ verdict: judged.verdict, summary, reasons: legacy, findings,
     domain: { name: domain, firstSeenAt: f!.first_seen ? new Date(f!.first_seen).toISOString() : null, ageDays, dmarc,
       mailFrom: f!.mail_from === 'SUCCESS' ? 'verified' : f!.mail_from === 'PENDING' ? 'pending' : f!.mail_from === 'FAILED' || f!.mail_from === 'TEMPORARY_FAILURE' ? 'failed' : 'not_configured',
-      linkHost: 'not_configured', ownLinkHost: links.own, linkOrigin: links.origin },
-    history: { workspace: { largestSend: f!.ws_largest, sent: wsAccepted, bounceRate: rate(Number(f!.ws_bounced ?? 0), wsAccepted), complaintRate: rate(Number(f!.ws_complained ?? 0), wsAccepted) },
+      ...(!row.draft.requiredNotice && runtime.config.linkHost && runtime.config.linkWarmup && links.origin === `https://${runtime.config.linkHost}` ? { sharedLinkPacing: true } : {}),
+      linkHost: 'not_configured', ownLinkHost: links.own, linkOrigin: links.origin, registeredAt: reg?.at ?? null, registeredDays: reg?.days ?? null, linkDomain: link },
+    history: { workspace: { largestSend: f!.ws_largest, firstSentAt: f!.first_sent ? new Date(f!.first_sent).toISOString() : null, usualDay, sent: wsAccepted, bounceRate: rate(Number(f!.ws_bounced ?? 0), wsAccepted), complaintRate: rate(Number(f!.ws_complained ?? 0), wsAccepted) },
       domain: { largestSend: f!.dom_largest, sent: f!.dom_accepted, bounceRate: rate(f!.dom_bounced, f!.dom_accepted), complaintRate: rate(f!.dom_complained, f!.dom_accepted) } },
     list: { recipients: n, risky: audience.risky, neverMailed: audience.neverMailed, createdAt: f!.list_created ? new Date(f!.list_created).toISOString() : null,
       lastSentAt: audience.lastSent ? new Date(audience.lastSent).toISOString() : null,
       lastImport: f!.last_import ? { at: new Date(f!.last_import.at).toISOString(), contacts: f!.last_import.contacts, consent: f!.last_import.consent } : null },
-    sizeJump: judged.jump === null ? null : Math.round(judged.jump * 10) / 10,
-    plan: batches.length > 1 ? { batches, seconds: seconds === null ? null : Math.round(seconds / 1000) } : null,
-    required: judged.requiredBy ? { by: judged.requiredBy, maxPerDay: first } : null });
+    sizeJump: judged.jump === null ? null : Math.round(judged.jump * 10) / 10, usualJump: judged.usualJump === null ? null : Math.round(judged.usualJump * 10) / 10,
+    plan: batches.length > 1 ? { batches, seconds: seconds === null ? null : Math.round(seconds / 1000), firstBatch: judged.firstBatch } : null,
+    required: judged.requiredBy ? { by: judged.requiredBy === 'NEW_REGISTRATION' ? 'NEW_DOMAIN' : judged.requiredBy === 'BLOCKLISTED' ? 'SIZE_JUMP' : judged.requiredBy, reason: judged.requiredBy, maxPerDay: first } : null });
 }
 // Per-statement limits of the reads a dashboard repeats (budgetedRead): a list walk or aggregate gets 5 seconds; the
 // campaign detail's status counts, polled every few seconds while it sends and read through one campaign's index, get 3.
@@ -1447,6 +1557,16 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
     }
     shadowBilling(d.billing, wid);
     if (d.allowed) {
+      if (s.kind === 'marketing') {
+        // Pre-upgrade scheduled snapshots carry the generated header rather than a separate origin.
+        const origin = s.linkOrigin ?? s.headers.find(h => h.Name.toLowerCase() === 'list-unsubscribe')?.Value.match(/^<(https?:\/\/[^/]+)\/unsubscribe\//)?.[1];
+        if (origin) {
+          const n = hostedCost(s.to, s.cc, s.bcc), allowance = await linkAllowance(tx, runtime.config, wid, origin);
+          // Roll back admission's charges along with the attempt, and retry the same scheduled email.
+          if (allowance && n > allowance.left) throw new JobDeferred(allowance.until, payload);
+          if (new URL(origin).hostname === runtime.config.linkHost) await recordLinkUse(tx, wid, runtime.config.linkHost, n);
+        }
+      }
       const route = d.mails[0]!;
       const needsVerdict = !isSimulatedSes(runtime) && !s.screenVerdict && ((route.connection?.kind === 'shared' && runtime.config.hostedScreen) || (s.screen && s.kind === 'transactional'));
       const { rows: [lim] } = await tx.execute<{ rate: number | null }>(route.connection?.aws_account_id
@@ -1512,6 +1632,7 @@ async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boo
       if (m.kind === 'marketing') {
         // Only the token's hash and destination come from local preparation; the statement gives it the workspace.
         const link = await (await loadOpsUnsub()).createUnsubscribeLink(origins[i] ?? linkHostMissing(), '', snapshot.to[0]!);
+        snapshot.linkOrigin = origins[i];
         marketingFooter(snapshot, link.url, { postalAddress }); message.token = { hash: link.record.tokenHash, email: link.record.email };
       }
     } catch (e) { if (e instanceof ModuleLoadError) throw e; message.invalid = atItem(e, batch ? i : undefined); }
@@ -1761,6 +1882,8 @@ const admissionMails = (runtime: Runtime, out: Outgoing[]): AdmissionMail[] => o
  */
 async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identity: Identity, options: { batch: boolean; campaign?: { id: string; revision: number }; scheduledAt?: string }): Promise<SendReceipt | { data: SendReceipt[] }> {
   const runtime = call.runtime, cfg = runtime.config, sim = isSimulatedSes(runtime), key = call.key, batch = options.batch, at = options.scheduledAt;
+  const guarded = !at && (cfg.linkHost || cfg.linkHosts) && out.some(m => m.snapshot.kind === 'marketing' && m.snapshot.linkOrigin);
+  if (guarded && !call.db) return runtime.db.transaction(db => admitSends({ ...call, db }, body, out, identity, options));
   // A scheduled send keeps the region it asked for, if any: its release resolves the sender's region again.
   if (at) for (const m of out) if (m.snapshot.region) m.snapshot.requestedRegion = m.snapshot.region;
   let expanded = 0;
@@ -1828,6 +1951,20 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     if (key !== undefined) await (call.db ?? runtime.db).execute(sql`DELETE FROM sending_idempotency WHERE workspace_id = ${result.workspace_id} AND actor_key_id = ${result.id} AND path = ${call.path} AND request_key = ${key}`);
     throw recipientIneligibleError(result.ineligible, batch);
   }
+  if (guarded) {
+    const counts = new Map<string, number>();
+    for (const { snapshot, recipients } of out) if (snapshot.kind === 'marketing' && snapshot.linkOrigin) counts.set(snapshot.linkOrigin, (counts.get(snapshot.linkOrigin) ?? 0) + recipients);
+    for (const [origin, n] of [...counts].sort(([a], [b]) => a.split('.').reverse().join('.').localeCompare(b.split('.').reverse().join('.')))) {
+      const budget = await linkAllowance(call.db!, cfg, a.workspaceId, origin);
+      if (budget && n > budget.left) {
+        const error = new ApiError(429, budget.reason === 'link_listing' ? 'LINK_DOMAIN_HELD' : 'LINK_BUDGET_REACHED',
+          budget.reason === 'link_listing' ? 'Marketing on this link domain is paused for review.' : 'The shared link domain has no room for this send today. Campaigns send the remainder on later days.', undefined, true);
+        error.retryAfterSeconds = Math.max(1, Math.ceil((Date.parse(budget.until)-Date.now())/1000));
+        throw error;
+      }
+      if (new URL(origin).hostname === cfg.linkHost) await recordLinkUse(call.db!, a.workspaceId, cfg.linkHost, n);
+    }
+  }
   // Its release job wakes the dispatcher at its time; one due within a minute needs the scheduler awake now to follow it.
   if (at) { if (Date.parse(at) - Date.now() < 60_000) a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); return receipt; }
   const maxSendRate = typeof result.max_send_rate === 'number' && result.max_send_rate > 0 ? result.max_send_rate : undefined;
@@ -1885,8 +2022,6 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   // whose use these recipients are recorded in; refused while the workspace is paused.
   const choose = marketing ? linkChoices(call.runtime, db, a.workspaceId) : undefined;
   const choices = choose ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? choose(m.from).catch(error => { throw atItem(error, batch ? i : undefined); }) : undefined)) : [];
-  const shared = choices.flatMap((choice, i) => choice?.shared ? [{ host: choice.shared.host, recipients: hostedCost(mails[i]!.to, mails[i]!.cc, mails[i]!.bcc) }] : []);
-  if (shared.length) await recordLinkUse(db, a.workspaceId, shared[0]!.host, shared.reduce((n, s) => n + s.recipients, 0));
   const out = await directMessages(call.runtime, mails, batch, address, choices.map(choice => choice?.origin));
   if (sealed) for (const m of out) m.snapshot.sealed = true;
   if (platformTestTo) for (const m of out) m.platformTestTo = platformTestTo;
@@ -2040,7 +2175,9 @@ function passThrough(snapshot: EmailSnapshot, mime: string, bulk: boolean) {
   if (bulk) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'Signed or encrypted mail can’t be sent as bulk mail.');
   snapshot.mime = mime;
 }
-export type MailboxSendRequest = { protocolEnvelope?:boolean; mime?: string; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };
+export type MailboxSendRequest = { protocolEnvelope?:boolean; mime?: string; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[];
+  /** A thread reply: the received message it answers (builtin-domain.ts builtinReplyException). */
+  builtinReply?: import('./builtin-domain.js').BuiltinReply };
 /** Queues one transactional email from a mailbox through the send admission and dispatch pipeline, with extra MIME
  * headers. Only sendFromMailbox calls it, under the send locks it holds. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: SendScope, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
@@ -2048,7 +2185,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   // A built-in domain stops sending once the workspace's own verifies, and its Reply-To stays at its own name, here as on POST /v1/emails/send.
   await assertBuiltinStillSends(runtime, db, a.workspaceId, [request.from]);
   assertBuiltinInput(runtime.config, [{ from: request.from, replyTo: request.replyTo, attachments: request.attachments }]);
-  await assertBuiltinRecipients(runtime, db, a.workspaceId, [{ from: request.from, recipients: [...request.to, ...request.cc, ...request.bcc] }]);
+  const { replyGranted } = await assertBuiltinRecipients(runtime, db, a.workspaceId, [{ from: request.from, recipients: [...request.to, ...request.cc, ...request.bcc] }], false, request.builtinReply);
   const schema = request.protocolEnvelope ? ProtocolSendInput : SendInput;
   const parsed = schema.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.protocolEnvelope?[...request.to,...request.cc,...request.bcc]:request.to, cc:request.protocolEnvelope?[]:request.cc, bcc:request.protocolEnvelope?[]:request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
@@ -2063,7 +2200,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   const message: Outgoing = { snapshot, recipients: hostedCost(request.to, request.cc, request.bcc), marketing: !!isBulk, oversize };
   // The mailbox rules admitted this sender and these attachments; the sending log's reader rule is for other callers.
   const decided = admitted(runtime, (await db.execute<{ s: Admitted | Refused }>(sql`SELECT ${await admission(runtime, a.workspaceId, actorJson(a),
-    { stage: 'send', locks: held, mails: admissionMails(runtime, [message]), ...charges(runtime, [message]) }, undefined, actorAssets(a, snapshot.attachments, true))} AS s`)).rows[0]!.s,
+    { stage: 'send', locks: held, mails: admissionMails(runtime, [message]), ...charges(runtime, [message]), ...(replyGranted ? { builtin: builtinReplyPolicy(runtime.config) } : {}) }, undefined, actorAssets(a, snapshot.attachments, true))} AS s`)).rows[0]!.s,
     a.workspaceId, { oversize: () => oversize });
   const route = decided.mails[0]!;
   snapshot.region = route.region;
@@ -2790,6 +2927,12 @@ export function registerSending(app: App) {
     if (!campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSED', 'Only a paused campaign, or one that failed after releasing recipients, can be resumed.');
     if (campaign.state === 'paused' && campaign.quarantines >= 2 && QUARANTINE_CODES.includes(campaign.pauseReason?.code ?? ''))
       throw new ApiError(409, 'QUARANTINE_REVIEW_REQUIRED', 'This campaign was quarantined twice for list quality. An operator reviews it before it sends again: ask for a review from the dashboard.');
+    // Paused for blocklist replies: the sender resumes once none has arrived for the window; an operator can release it any time.
+    if (campaign.state === 'paused' && campaign.pauseReason?.code === 'BLOCKLISTED') {
+      const window = blocklistWindow(rampLines(c.env.config.rampLines));
+      if ((await campaignBlocklistReplies(db, a.workspaceId, campaign.id, { minutes: window })).emails)
+        throw new ApiError(409, 'BLOCKLIST_REPLIES_ARRIVING', 'Replies naming a blocklist are still arriving for this campaign. Fix the listed domain or link and resume once they stop, or ask for a review.');
+    }
     await requiredNoticesAllowed(db, campaign.draft, a.workspaceId);
     const ref = { workspaceId: a.workspaceId, id: campaign.id }, next = runningState(campaign);
     await db.execute(resumeCampaign(ref, next));
@@ -3006,9 +3149,11 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // The send review as of now (src/standing-model.ts RAMP.readiness). A send it requires a ramp for goes with the
   // recommended plan, a daily limit no larger than its first day, or a consent source the sender confirms.
   const readiness = draft.requiredNotice ? null : await sendReadiness(runtime, db, a, { id: campaignId, draft },
-    { recipients: judgedRecipients ?? queued, matched: null, risky: risky?.total ?? 0, neverMailed: null, lastSent: await audienceMod.listLastSent(db, a, draft.audience.listId) });
+    { recipients: judgedRecipients ?? queued, matched: null, risky: risky?.total ?? 0, neverMailed: null, lastSent: await audienceMod.listLastSent(db, a, draft.audience.listId) }, { launch: true });
   const plan = input.pacing?.plan === 'recommended' && readiness?.plan ? readiness.plan.batches : null;
-  if (readiness?.required && !plan && !input.consent && !(input.pacing?.perDay != null && input.pacing.perDay <= readiness.required.maxPerDay))
+  // A consent confirmation answers a new domain or a size jump, not a blocklist: after one, only a ramp will do.
+  const consentWaives = !!input.consent && readiness?.required?.reason !== 'BLOCKLISTED';
+  if (readiness?.required && !plan && !consentWaives && !(input.pacing?.perDay != null && input.pacing.perDay <= readiness.required.maxPerDay))
     throw new ApiError(422, 'RAMP_REQUIRED', `${readiness.summary} Send it with the recommended plan (pacing.plan "recommended"), a daily limit of at most ${readiness.required.maxPerDay.toLocaleString('en-US')}, or confirm where this list's consent comes from (consent).`, 'pacing');
   const consent = input.consent ? { source: input.consent.source, confirmedBy: a.keyId, confirmedAt: now() } : null;
   // The send locks. The campaign is still the revision that was captured, or the launch fails and its capture rolls back.
@@ -3018,6 +3163,9 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const reviewed={...row.draft,...route.binding ? {region:route.region,binding:route.binding} : {},postalAddress,...links ? {linkOrigin:links} : {}};
   const contentHash = await digest(canonical({ version: 2, draft: reviewed, rendered }));
   await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered, capturedAt, capturedCount, staticPrepared: false });
+  // The list-risk measure of a marketing campaign's list, recorded on this review by a job (src/list-risk.ts); it decides nothing.
+  if (!draft.requiredNotice && draft.audience?.listId) await db.execute(queueListRisk(a.workspaceId, campaignId, reviewId, draft.audience.listId,
+    readiness ? { verdict: readiness.verdict, required: readiness.required?.reason ?? readiness.required?.by ?? null, reasons: (readiness.findings ?? readiness.reasons).map(reason => reason.code) } : null));
   await reserveCampaign(runtime, db, held, a, a.keyId, queued);
   // Who confirmed the notice and when, in the workspace's Activity.
   if (draft.requiredNotice) await recordAudit(db, c, { action: 'campaign.required_notice_confirmed', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaignId },
@@ -3029,7 +3177,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const ref = campaignRef(a, campaignId);
   const moved = await db.execute(launchCampaign(ref, { reviewId, resolvedRegion:route.region!==row.draft.region ? route.region : undefined, actorKeyId: a.keyId, simulated: isSimulatedSes(runtime), total: queued, requestId: requestId ?? null, scheduledAt: input.scheduledAt ?? null,
     pacePerDay: input.pacing?.perDay ?? null, autoPause: input.pacing?.autoPause ?? true, rateShare: input.pacing ? input.pacing.rateShare ?? 0.5 : null,
-    pacePlan: plan, rampRequiredCap: readiness?.required?.maxPerDay ?? null, consent }));
+    pacePlan: plan, firstBatch: plan ? readiness?.plan?.firstBatch ?? null : null, rampRequiredCap: readiness?.required?.maxPerDay ?? null, consent }));
   if (!moved.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being sent; fetch it and try again.');
   await db.execute(queueCampaignRun(ref, requestId ? { requestId } : {}));
   await db.execute(queueCampaignStats(ref, input.scheduledAt ?? null));
@@ -3443,9 +3591,8 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
     sizeCheck(keyed, rows);
     return { mail: { ...mail, snapshot: withoutLegacyFonts({ ...keyed, headers: [...keyed.headers] }) }, rows, unsubscribe: undefined, stored: { kind: 'marketing' as const, deferredCampaign: true, requiredNotice: true as const }, keyed };
   }
-  // The link host the launch froze. A review frozen before link hosts has none: its links go on the sender's link host as
-  // it is now, or are refused on Hosted without one, never on this installation's own domain.
-  const origin = review.draft.linkOrigin ?? await linkOrigin(runtime, runtime.db, a.workspaceId, review.draft.from);
+  // Keep the origin charged at release (or already rendered on an earlier attempt). Only older rows need a fresh lookup.
+  const origin = mail.snapshot.linkOrigin ?? (mail.snapshot.unsubscribeUrl ? new URL(mail.snapshot.unsubscribeUrl).origin : undefined) ?? review.draft.linkOrigin ?? await linkOrigin(runtime, runtime.db, a.workspaceId, review.draft.from);
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
   const reused = mail.snapshot.unsubscribeUrl?.startsWith(`${origin}/unsubscribe/`) ? mail.snapshot.unsubscribeUrl : undefined;
   // Its link is about the campaign's topic (src/topics.ts), when it has one: its one-click opts out of that topic alone.
@@ -3494,7 +3641,10 @@ const campaignOutcomes = (wid: string, campaign: SQL) => sql`SELECT
     count(*) FILTER (WHERE status <> 'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed')))::int AS accepted,
     count(*) FILTER (WHERE status = 'bounced')::int AS bounced, count(*) FILTER (WHERE status = 'complained')::int AS complained, max(created_at) AS last
     FROM sending_emails WHERE workspace_id = ${wid} AND campaign_id = ${campaign}`;
-async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, hosted = false, probe?: number): Promise<{ code: string; message: string } | null> {
+async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, hosted = false, probe?: number, lines?: RampLines): Promise<{ code: string; message: string } | null> {
+  // Replies naming a blocklist first (src/send-guards.ts): the probe and every later check.
+  const listed = lines ? await blocklistPause(db, a.workspaceId, campaignId, lines) : null;
+  if (listed) return listed;
   const [row] = (await db.execute<{ accepted: number; bounced: number; complained: number }>(campaignOutcomes(a.workspaceId, sql`${campaignId}`))).rows;
   const percent = (part: number, whole: number) => `${(100 * part / whole).toFixed(2)}%`;
   if (probe !== undefined && row!.accepted && (row!.bounced / row!.accepted > PROBE.bounceRate || row!.complained >= PROBE.complaints))
@@ -4131,11 +4281,11 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   // (src/link-domains.ts). With none to use (the workspace paused, or with own link hosts only, none active), it waits
   // without releasing anyone and looks again every 15 minutes; a domain's own host turning active wakes it at once
   // (wakeLinkRecordHolds). On the link domain, the release records its recipients there.
-  let shared: { host: string } | undefined;
+  let releaseOrigin = row.reviewDraft!.requiredNotice ? undefined : row.reviewDraft!.linkOrigin;
   if (!row.reviewDraft!.linkOrigin && !row.reviewDraft!.requiredNotice) {
     const choice = await linkChoice(runtime, runtime.db, a.workspaceId, row.reviewDraft!.from).catch(error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return null; throw error; });
     if (!choice) return hold('link_record', new Date(nowMs + LINK_RECORD_RECHECK_MS).toISOString());
-    shared = choice.shared;
+    releaseOrigin = choice.origin;
   }
   // A stale/nonexistent sample is not an unlimited allowance. When a known quota (or a
   // previously held campaign) needs a new sample, use the dispatcher's elected cache refresher.
@@ -4172,6 +4322,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   // opens; a resume restarts the 30 minutes so a deliberate resume is not immediately re-paused.
   const hosted = runtime.config.multiTenant && row.account?.kind === 'shared';
   // `rampStep`: a ramp step's batch paused it. That batch is done with: a resume starts a new hour on the same step.
+  const guardLines = rampLines(runtime.config.rampLines);
   const quarantine = async (unhealthy: { code: string; message: string }, rampStep?: number) => {
     const paused = await runtime.db.transaction(async tx => {
       const moved = await tx.execute(hosted ? quarantineCampaign(ref, unhealthy) : pauseCampaign(ref, unhealthy));
@@ -4181,6 +4332,8 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       return moved;
     });
     if (paused.rows.length) log('warn', { code: 'CAMPAIGN_AUTO_PAUSED', campaignId: row.id, reason: unhealthy.code, ...rampStep === undefined ? {} : { rampStep: rampStep + 1 } });
+    // A blocklist is everyone's problem on a shared pool: one operator alert (src/operator-alerts.ts).
+    if (paused.rows.length && unhealthy.code === 'BLOCKLISTED') await (await wrapModuleLoad(() => import('./operator-alerts.js'))).blocklistAlert(runtime.db, a.workspaceId, row.id);
     return 'done' as const;
   };
   // The list probe: release only the probe, wait for its feedback, then check it before releasing the rest. A sender in
@@ -4210,7 +4363,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (row.autoPause && (row.priorityLagMs ?? 0) >= FEEDBACK_LAG_HOLD_MS) {
       return hold('feedback_lag', new Date(dbNow + 60_000).toISOString());
     }
-    const unhealthy = await campaignHealth(runtime.db, a, row.id, true, probe);
+    const unhealthy = await campaignHealth(runtime.db, a, row.id, true, probe, guardLines);
     if (unhealthy) return quarantine(unhealthy);
     await runtime.db.execute(clearProbe(ref));
   } else if (probe !== null) probeLeft = probe - row.expanded;
@@ -4222,11 +4375,16 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     return hold('feedback_lag', new Date(dbNow + 60_000).toISOString());
   }
   if (row.autoPause && (!row.healthCheckedAt || nowMs - Date.parse(row.healthCheckedAt) >= AUTO_PAUSE.intervalMs)) {
-    const unhealthy = await campaignHealth(runtime.db, a, row.id, hosted);
+    const unhealthy = await campaignHealth(runtime.db, a, row.id, hosted, undefined, guardLines);
     if (unhealthy) return quarantine(unhealthy);
+    // Recipient domains this campaign's mail mostly bounced at lately: the rest there is skipped (src/send-guards.ts).
+    await stopDeadDomains(runtime.db, a.workspaceId, row.id, guardLines).catch(() => log('warn', { code: 'CAMPAIGN_DOMAIN_STOP_FAILED', campaignId: row.id }));
     await runtime.db.execute(noteHealthChecked(ref));
   }
   // Daily pacing: at most pacePerDay recipients, or the plan's batch, per rolling 24-hour window.
+  // A plan's first small batch, out: wait for its bounces and rejections (the automatic pause reads them) before the rest of the day.
+  const firstWait = firstBatchWait(row, row.windowIndex, row.windowStartedAt, nowMs);
+  if (firstWait !== null && row.windowExpanded >= row.paceFirstBatch!) await hold('pacing_window', new Date(firstWait).toISOString());
   if (cap !== null && row.windowStartedAt && !rolling && row.windowExpanded >= cap) await hold('pacing_window', new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString());
   // The ramp (src/standing-model.ts RAMP): Hosted live campaigns, exempt workspaces too. Its first release places it, from
   // the workspace's history. A step's hour releases at most its ceiling; once the hour is over, its batch is checked when
@@ -4290,6 +4448,11 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (screened <= 0) return 'again';
   }
   const draft = row.reviewDraft!, limits_ = limitsTable(runtime);
+  // A plan opens its next batch only after a healthy day (src/send-guards.ts, when the setting turns it on). Judged here,
+  // before the send locks: the release below holds the workspace's admission row, which every send waits on. Judged a few
+  // minutes early too, so a day that ends while this step runs still has its judgement.
+  const judged = guardLines.planHealth && row.pacePlan?.length && row.windowStartedAt && Date.now() - Date.parse(row.windowStartedAt) >= DAY_MS - 10 * 60_000
+    ? { window: row.windowStartedAt, day: await planWindowHealthy(runtime.db, a.workspaceId, row.id, row.windowStartedAt) } : null;
   const released = await runtime.db.transaction(async db => {
     const held = await lockSendScope(db, a.workspaceId, { campaignId: row.id });
     const campaign = await findCampaign(db, a, row.id, true);
@@ -4309,10 +4472,21 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     // A capped campaign opens a new 24-hour window when the previous one has elapsed (or on its first release); with a
     // plan, each window after the first is its next batch.
     const opening = dailyCap(campaign) !== null && (!campaign.windowStartedAt || Date.now() - Date.parse(campaign.windowStartedAt) >= DAY_MS);
-    const windowStart = opening ? now() : campaign.windowStartedAt, windowIndex = opening && campaign.windowStartedAt ? campaign.windowIndex + 1 : campaign.windowIndex;
-    const windowUsed = opening ? 0 : campaign.windowExpanded, windowCap = dailyCap(campaign, windowIndex);
+    // A plan opens its next batch only after a healthy day (judged above); otherwise the same batch again. A window another
+    // run opened meanwhile isn't opening here, so the judgement always matches the window it opens after.
+    const grows = !(opening && campaign.windowStartedAt && campaign.pacePlan?.length) || !guardLines.planHealth || (judged?.window === campaign.windowStartedAt ? judged.day.healthy : true);
+    if (!grows) log('info', { code: 'CAMPAIGN_PLAN_HELD', campaignId: campaign.id, batch: campaign.windowIndex + 1 });
+    // The sender sees a held plan, since when and why (delivery.pacing.held); it clears when the plan grows again.
+    // Cleared whenever it grows (also when the guard was turned off since), so it never says a growing plan is held.
+    if (opening && campaign.windowStartedAt && campaign.pacePlan?.length && (!grows || campaign.planHeld))
+      await db.execute(sql`UPDATE sending_campaigns SET plan_held=${grows || !judged ? null : JSON.stringify({ since: campaign.planHeld?.since ?? now(), batch: campaign.windowIndex + 1, why: planHeldWhy(judged.day) })}::jsonb WHERE workspace_id=${a.workspaceId} AND id=${campaign.id}`);
+    const windowStart = opening ? now() : campaign.windowStartedAt, windowIndex = opening && campaign.windowStartedAt ? campaign.windowIndex + (grows ? 1 : 0) : campaign.windowIndex;
+    const windowUsed = opening ? 0 : campaign.windowExpanded, dayCap = dailyCap(campaign, windowIndex);
+    // In the first window, before the first small batch's wait is over, only the first small batch goes.
+    const windowCap = dayCap !== null && (windowIndex === 0 && campaign.paceFirstBatch && campaign.pacePlan?.length && (opening || firstBatchWait(campaign, 0, windowStart, Date.now()) !== null))
+      ? Math.min(dayCap, campaign.paceFirstBatch) : dayCap;
     const paceLeft = windowCap === null ? Number.POSITIVE_INFINITY : windowCap - windowUsed;
-    if (paceLeft <= 0) throw new JobDeferred(new Date(Date.parse(windowStart!) + DAY_MS).toISOString(), payload);
+    if (paceLeft <= 0) throw new JobDeferred(new Date(Date.parse(windowStart!) + (windowCap !== dayCap ? campaign.paceFirstWaitMinutes! * 60_000 : DAY_MS)).toISOString(), payload);
     const sesAllowance = Math.min(sesCapacity, shareCapacity) - buffer!.total;
     if (sesAllowance <= 0) return sesCapacity <= shareCapacity ? 'ses_daily_quota' as const : 'hosted_daily_quota' as const;
     const cBuf = campaignBuffer(buffer!.rate), wBuf = workspaceBuffer(buffer!.rate);
@@ -4328,16 +4502,22 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, buffer!.rate)).toISOString(), payload);
     }
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);
-    const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
+    const links = releaseOrigin ? await linkAllowance(db, runtime.config, a.workspaceId, releaseOrigin) : null;
+    if (links && !links.left) {
+      await db.execute(holdCampaign(ref, links.reason, links.until));
+      return { count: 0, completed: false, linkUntil: links.until, hostedUntil: null, balanceUntil: null };
+    }
+    const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, Math.min(capacity, links?.left ?? capacity));
     if (!chunk.length || chunk.some((recipient, index) => !recipient.content_hash || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
     // Refuse unknown future hash formats before releasing any row so the campaign pauses intact instead of burning recipients.
     if (chunk.some(recipient => !isSupportedContentHash(recipient.content_hash))) throw unsupportedHashFormat();
     const delivered = campaign.deliveredOnly ? await deliveredBefore(db, a.workspaceId, campaign.id, chunk.map(r => r.recipient.email)) : null;
+    const stopped = await stoppedDomains(db, campaign.id), stoppedAt = (email: string) => stopped.size > 0 && stopped.has(email.slice(email.lastIndexOf('@') + 1).toLowerCase());
     const affordable = allowed.hostedLeft ?? Number.POSITIVE_INFINITY;
     // The processed prefix: every recipient up to the last affordable one that is sent; skipped ones cost nothing.
     const processed: typeof chunk = [], recipients: typeof chunk = [];
     for (const r of chunk) {
-      const send = !r.screen_rejected && (!delivered || delivered.has(r.recipient.email.toLowerCase()));
+      const send = !r.screen_rejected && (!delivered || delivered.has(r.recipient.email.toLowerCase())) && !stoppedAt(r.recipient.email);
       if (send && recipients.length >= affordable) break;
       processed.push(r); if (send) recipients.push(r);
     }
@@ -4371,9 +4551,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     // per-recipient headers, base content, asset IDs, or denormalized attachment links.
     const prepared=recipients.map(r=>({id:rowId('email'),ordinal:r.ordinal,address:r.recipient.email,subject:r.subject??draft.subject}));
     // On the link domain: the release's recipients are recorded there (src/link-domains.ts recordLinkUse).
-    if (shared && prepared.length) await recordLinkUse(db, a.workspaceId, shared.host, prepared.length);
+    if (runtime.config.linkHost && releaseOrigin === `https://${runtime.config.linkHost}` && prepared.length) await recordLinkUse(db, a.workspaceId, runtime.config.linkHost, prepared.length);
     const tpl = row.reviewScreen?.template;
-    const stub={kind:'marketing',deferredCampaign:true,...(tpl ? { screenVerdict: { status: 'passed', spam: tpl.spam, model: tpl.model, digest: tpl.key } } : {})};
+    const stub={kind:'marketing',deferredCampaign:true,...(!draft.linkOrigin && releaseOrigin ? {linkOrigin:releaseOrigin} : {}),...(tpl ? { screenVerdict: { status: 'passed', spam: tpl.spam, model: tpl.model, digest: tpl.key } } : {})};
     if (prepared.length) await db.execute(sql`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,scheduled_at)
       SELECT p.id,${a.workspaceId},${a.keyId},${draft.region},${campaign.id},${campaign.reviewId},p.ordinal,${draft.from},jsonb_build_array(p.address),'[]','[]',p.subject,${JSON.stringify(stub)}::jsonb,${campaign.simulated},true,${campaign.scheduledAt}
       FROM jsonb_to_recordset(${JSON.stringify(prepared)}::jsonb) p(id text,ordinal int,address text,subject text)`);
@@ -4389,6 +4569,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   if (released.count) try { await runtime.dispatch?.(draft.region, row.account?.aws_account_id, released.count, row.account?.kind, false, Number(row.rate) > 0 ? Number(row.rate) : undefined); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId: row.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
   // Usually the oldest bucket expires first. Also notice an earlier refund or operator raise.
   // Waiting on balance: billing.restored wakes the run as soon as credit lands; otherwise look again in an hour.
+  if ('linkUntil' in released && released.linkUntil) throw new JobDeferred(released.linkUntil, payload);
   if (released.balanceUntil && !released.completed) throw new JobDeferred(released.balanceUntil, payload);
   if (released.hostedUntil) throw new JobDeferred(new Date(Math.min(Date.parse(released.hostedUntil),dbNow+QUOTA_REFRESH_MS)).toISOString(),payload);
   if (released.completed) { if (!released.count) await settle(); return 'done'; }

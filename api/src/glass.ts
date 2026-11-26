@@ -13,7 +13,7 @@ import { regionLabels } from './region-labels.js';
 import { MicroCentsJson } from './billing/money.js';
 import { PUBLIC_ROUTE } from './analytics-traffic.js';
 import { gradeCounts, registerGlassDeliverability } from './glass-deliverability.js';
-import { noReplyCount } from './support-inbox.js';
+import { noReplyCount, supportWeek } from './support-inbox.js';
 
 // Glass (/glass in the dashboard): everything going on in the installation on one page, for operators. One read that
 // returns every figure, cached GLASS_TTL_SECONDS per installation, so the page's 30-second refresh costs one statement
@@ -79,7 +79,13 @@ const Glass = z.object({
   receiving: z.object({ today: int, spam: int, atLeast: z.boolean(), hourly: z.array(int).describe('The last 24 hours, oldest first.'), day: Day }),
   builtin: z.object({ active: int, ready: int.describe('Built-in domains that send.'), revoked: int,
     parent: z.object({ name: z.string(), ok: z.boolean(), problem: z.string().nullable(), trippedAt: z.string().nullable(), resetAt: z.string().nullable(), checkedAt: z.string() }).nullable() }),
-  support: z.object({ open: int, ticketed: int, noReply: int.describe('Conversations in Needs you because the customer wrote and nothing was sent back for 10 minutes. Should always be 0.'), hourly: z.array(int).describe('Conversations started per hour, the last 24.'), day: Day,
+  support: z.object({ open: int, ticketed: int, noReply: int.describe('Conversations in Needs you because the customer wrote and nothing was sent back for 10 minutes. Should always be 0.'),
+    staffMailFailed: int.describe('Emails to the team (src/support-staff-mail.ts) the support platform failed to send three times and that haven\u2019t gone since. Should always be 0.'),
+    overLimit: int.describe('Emails of the last 7 days that passed the sender checks but got only the sign-in reply: nobody claimed them, and the answering limits refused their general answer (the support platform\u2019s unanswered entry). Nobody is told of them; a count to watch, not a fault.'),
+    week: z.object({ answerable: int.describe('Conversations started in the last 7 days, leaving out agent feedback and those counted apart.'),
+      withoutHuman: int.describe('Of answerable, those that ended (closed, marked done, or quiet for 24 hours after an agent answer) with no staff reply, no ticket for a person (a feature request the agent logged doesn\u2019t count), no held answer, no failed send and never "no reply sent". Whether the answers were right is not measured.'),
+      apart: int.describe('Conversations started in the last 7 days with a bug, billing, abuse report, privacy or legal ticket: a person handles those by design.'),
+      atLeast: z.boolean().describe(`Counted over the newest ${GLASS_CAP.toLocaleString('en-US')} conversations only.`) }).describe('The support AI\u2019s week.'), hourly: z.array(int).describe('Conversations started per hour, the last 24.'), day: Day,
     configured: z.object({ chat: z.boolean().describe('NIGHTMAIL_SUPPORT_SIGNING_KEY and NIGHTMAIL_SUPPORT_URL are set.'), email: z.boolean().describe('NIGHTMAIL_SUPPORT_ADDRESS_IDS is set.') }) }),
   screening: z.object({ compared: Count.describe('Content screened by both classifiers in the last 24 hours (the newest at most).'),
     agree: z.number().nullable().describe('Share of those where both gave the same verdict.'), jevFlagged: int, jevfFlagged: int,
@@ -109,7 +115,8 @@ type Raw = {
   places: Omit<Places, 'open'>; joined: { today: z.infer<typeof Split>; week: z.infer<typeof Split>; last: number; previous: number }; joined_daily: number[]; joined_hourly: number[]; funnel: Glass['signups']['funnel'];
   mail_previous: Glass['sending']['previous'] | null; steps: Glass['delivery']['steps']; ramp: { ramping: number; waiting: number };
   received_day: { last: number; previous: number }; builtin: { active: number; revoked: number; ready: number }; parent: Glass['builtin']['parent'];
-  support: { open: number; ticketed: number; last: number; previous: number; no_reply: number }; support_hourly: number[];
+  support: { open: number; ticketed: number; last: number; previous: number; no_reply: number; staff_mail_failed: number; over_limit: number }; support_hourly: number[];
+  support_week: { answerable: number; without_human: number; apart: number; capped: boolean };
   screen: { n: number; agree: number; both: number; jev_flagged: number; jevf_flagged: number; jev_failed: number; jevf_failed: number } ; screened: { screened: number; rejected: number }; screened_hourly: number[];
   api: { back: number; key: string; n: number }[]; api_recent: { slowest: number; hist: number[] | null }[]; views_day: { last: number; previous: number };
   minutes: number[]; today: Glass['sending']['today']; hourly: Glass['sending']['hourly']; queued: number; held: number;
@@ -188,8 +195,13 @@ export async function readGlass(runtime: Pick<Runtime, 'db' | 'config'>): Promis
       (SELECT json_build_object('name',p.name,'ok',p.ok,'problem',p.problem,'trippedAt',${utc(sql`p.tripped_at`)},'resetAt',${utc(sql`p.reset_at`)},'checkedAt',${utc(sql`p.checked_at`)})
         FROM builtin_parent p ORDER BY p.name LIMIT 1) AS parent,
       (SELECT json_build_object('open',count(*) FILTER (WHERE c.status='open'),'ticketed',count(*) FILTER (WHERE c.status='ticketed'),
-          'last',count(*) FILTER (WHERE c.created_at>=t.day),'previous',count(*) FILTER (WHERE c.created_at>=t.since48 AND c.created_at<t.day),'no_reply',${noReplyCount})
+          'last',count(*) FILTER (WHERE c.created_at>=t.day),'previous',count(*) FILTER (WHERE c.created_at>=t.since48 AND c.created_at<t.day),'no_reply',${noReplyCount},
+          'staff_mail_failed',(SELECT count(*) FROM support_staff_emails e WHERE e.sent_at IS NULL AND e.failed_at IS NOT NULL),
+          -- Emails that passed the sender checks (general_answer) whose general answer the limits refused: their unanswered entry.
+          'over_limit',(SELECT count(*) FROM support_email_signins si WHERE si.general_answer AND si.created_at>=now()-interval '7 days' AND EXISTS (SELECT FROM support_messages u
+            WHERE u.conversation_id=si.conversation_id AND u.author='system' AND u.kind='unanswered' AND u.source_message_id=si.message_id)))
         FROM support_conversations c WHERE c.status<>'closed' OR c.created_at>=t.since48) AS support,
+      ${supportWeek(GLASS_CAP)} AS support_week,
       ${series(sql`t.day`, 'hour', 24, sql`SELECT date_trunc('hour',c.created_at,'UTC') AS at,count(*) AS n FROM support_conversations c WHERE c.created_at>=t.day GROUP BY 1`)} AS support_hourly,
       (SELECT json_build_object('n',count(*),'agree',count(*) FILTER (WHERE x.jev_flagged=x.jevf_flagged),'both',count(*) FILTER (WHERE x.jev_flagged IS NOT NULL AND x.jevf_flagged IS NOT NULL),
           'jev_flagged',count(*) FILTER (WHERE x.jev_flagged),'jevf_flagged',count(*) FILTER (WHERE x.jevf_flagged),
@@ -269,7 +281,8 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy' | 'support'>): G
       steps: { ok: num(r.steps.ok), notice: num(r.steps.notice), warn: num(r.steps.warn), restrict: num(r.steps.restrict), pause: num(r.steps.pause) }, ramping: num(r.ramp.ramping), rampWaiting: num(r.ramp.waiting) },
     receiving: { today: num(r.received.today), spam: num(r.received.spam), atLeast: r.received.capped, hourly: r.received_hourly.map(num), day: { last: num(r.received_day.last), previous: num(r.received_day.previous) } },
     builtin: { active: num(r.builtin.active), ready: num(r.builtin.ready), revoked: num(r.builtin.revoked), parent: r.parent },
-    support: { open: num(r.support.open), ticketed: num(r.support.ticketed), noReply: num(r.support.no_reply), hourly: r.support_hourly.map(num), day: { last: num(r.support.last), previous: num(r.support.previous) },
+    support: { open: num(r.support.open), ticketed: num(r.support.ticketed), noReply: num(r.support.no_reply), staffMailFailed: num(r.support.staff_mail_failed), overLimit: num(r.support.over_limit),
+      week: { answerable: num(r.support_week.answerable), withoutHuman: num(r.support_week.without_human), apart: num(r.support_week.apart), atLeast: r.support_week.capped }, hourly: r.support_hourly.map(num), day: { last: num(r.support.last), previous: num(r.support.previous) },
       configured: { chat: Boolean(config.support?.signingKey && config.support.url), email: Boolean(config.support?.addressIds?.length) } },
     screening: { compared: { n: Math.min(num(r.screen.n), GLASS_CAP), atLeast: num(r.screen.n) > GLASS_CAP }, agree: num(r.screen.both) ? num(r.screen.agree) / num(r.screen.both) : null,
       jevFlagged: num(r.screen.jev_flagged), jevfFlagged: num(r.screen.jevf_flagged), jevFailed: num(r.screen.jev_failed), jevfFailed: num(r.screen.jevf_failed),
