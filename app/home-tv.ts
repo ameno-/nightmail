@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { cpSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runnerImport, type Plugin, type Rollup } from 'vite'
 import { productName, publicOrigin } from '../api/src/brand.ts'
@@ -16,7 +16,8 @@ import { jsonLd, structuredData } from './src/features/home/tv/readable.ts'
 // - home.html's first screen (homeShell, below) and its files' cache rules (televisionFirstFiles);
 // - index.html's description and its link preview's picture and words (words and picture, below);
 // - what the Markdown twins and the structured data say of the homepage and the product (tv/readable.ts, which
-//   vite.config.ts gives price-pages.ts too).
+//   vite.config.ts gives price-pages.ts too);
+// - /commercial/: the sound and fonts of the broadcast on channel 8 (broadcast, below), which only this build has.
 
 // home.html: the homepage's first screen, painted from the HTML alone. A hosted installation's Worker answers "/" with
 // it (api/src/worker.ts); every other path, and "/" on a self-hosted one, gets index.html as before. It is index.html
@@ -206,5 +207,28 @@ const picture = (): Plugin => {
   }
 }
 
+/** The sound and fonts of channel 8's broadcast (tv/crt/commercial/public), which its player fetches from /commercial/
+ *  on that key's first press (commercial/play.js). They are kept out of app/public so that a build without the
+ *  television does not carry them: copied into this build, and served by the dev server. */
+const TYPES: Record<string, string> = { '.mp3': 'audio/mpeg', '.json': 'application/json', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8' }
+const broadcast = (): Plugin => {
+  const files = at('tv/crt/commercial/public')
+  let outDir = ''
+  return {
+    name: 'nightmail:television-broadcast',
+    configResolved(config) { outDir = resolve(config.root, config.build.outDir) },
+    configureServer(server) {
+      server.middlewares.use('/commercial', (request, response, next) => {
+        let file = ''
+        try { file = resolve(files, `.${decodeURIComponent((request.url ?? '').split('?')[0]!)}`) } catch { return next() }
+        if (!file.startsWith(files + sep) || !existsSync(file) || !statSync(file).isFile()) return next()
+        response.setHeader('Content-Type', TYPES[extname(file)] ?? 'application/octet-stream')
+        response.end(readFileSync(file))
+      })
+    },
+    writeBundle() { cpSync(files, resolve(outDir, 'commercial'), { recursive: true }) },
+  }
+}
+
 /** The plugins that make the television the homepage, in homeShell's place (vite.config.ts). */
-export const televisionHome = (): Plugin[] => [swap, words, picture(), homeShell()]
+export const televisionHome = (): Plugin[] => [swap, words, picture(), broadcast(), homeShell()]
