@@ -250,12 +250,17 @@ export type Gap = {
   /** The words a Nightmail fact naming the same thing would use. */
   subject: RegExp
   source: Source
-  /** Nightmail's half, where the line says it: "Nightmail sells no dedicated IPs." */
+  /** Nightmail's half, only where the bare line would mislead about Nightmail: "Nightmail sells no dedicated IPs.", and
+   *  a libraries line's "Nightmail’s SDK is for TypeScript." No line closes with a general "Nightmail has none": the
+   *  question or the section's title says it. */
   ours?: string
 }
 export const gap = (what: string, text: string, subject: RegExp, source: Source, ours?: string): Gap => ({ what, text, subject, source, ...ours ? { ours } : {} })
 /** Nightmail's half of a dedicated-IP line, the same for every vendor. */
 export const NO_DEDICATED_IP = 'Nightmail sells no dedicated IPs.'
+/** Nightmail's half of a libraries line: what it does have (sdk/, @nightmail/sdk, "TypeScript SDK for the Nightmail email
+ *  API"), so the line doesn't read as "no libraries". */
+export const TYPESCRIPT_SDK = 'Nightmail’s SDK is for TypeScript.'
 /** The days a page's prices were read, as its caption says them: "25 Nov 2026", or a span, "25–26 Nov 2026" (one month)
  *  or "30 Nov to 1 Dec 2026". Shared by the pages of several services. */
 export function checkedOn(days: string[]) {

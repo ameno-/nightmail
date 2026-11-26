@@ -49,16 +49,15 @@ export const faqPage = (pageUrl: string, questions: Pick<Question, 'question' | 
 })
 
 const host = (page: string) => new URL(page).hostname.replace(/^www\./, '')
-/** The vendor's gaps as an answer (prices.ts, Gap): each line in its own words, Nightmail's half where the line says it,
- *  then the days read and the pages, each linked. The same entries as an alternatives page's copy (gapsSection). */
+/** The vendor's gaps as an answer (prices.ts, Gap): each line in its own words, Nightmail's half only where the line
+ *  carries one (no general closing sentence: the question says what the list is), then the days read and the pages,
+ *  each linked. The same entries as an alternatives page's copy (gapsSection). */
 function gapsAnswer(c: Comparison): Pick<Question, 'answer' | 'links'> {
   const gaps = c.gaps ?? [], pages = [...new Map(gaps.map(item => [item.source.url, item.source])).values()]
   const name = (page: string) => host(page) + new URL(page).pathname.replace(/\/$/, '')
   const lines = gaps.map(item => item.ours ? `${item.text} ${item.ours}` : item.text)
-  const others = gaps.filter(item => !item.ours).length
-  const rest = others === gaps.length ? ' Nightmail offers none of these.' : others > 1 ? ' Nightmail offers none of the others.' : others ? ' Nightmail doesn’t offer that either.' : ''
   return {
-    answer: `${lines.join(' ')}${rest} Read ${checkedOn(gaps.map(item => item.source.checked))} on ${c.offer.vendor}’s ${pages.length > 1 ? 'pages' : 'page'}: ${listOf(pages.map(source => name(source.url)))}.`,
+    answer: `${lines.join(' ')} Read ${checkedOn(gaps.map(item => item.source.checked))} on ${c.offer.vendor}’s ${pages.length > 1 ? 'pages' : 'page'}: ${listOf(pages.map(source => name(source.url)))}.`,
     links: pages.map(source => ({ text: name(source.url), href: source.url })),
   }
 }

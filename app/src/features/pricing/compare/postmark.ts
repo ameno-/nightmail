@@ -1,4 +1,4 @@
-import { LANGUAGES, NO_DEDICATED_IP, fact, formatCount, gap, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier} from '../prices.ts'
+import { LANGUAGES, NO_DEDICATED_IP, TYPESCRIPT_SDK, fact, formatCount, gap, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Postmark (/compare/postmark): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Postmark's own pages on CHECKED: the plans and their overage in the script its pricing page draws them from.
@@ -71,6 +71,6 @@ export const postmark: Entry = {
   gaps: [
     gap('dedicated IPs', 'Postmark provides dedicated IPs to customers sending 300,000 messages a month or more.', /\bdedicated IPs?\b/i, GAPS_READ('https://postmarkapp.com/dedicated-ips', 'Dedicated IPs Available to customers sending 300k messages a month or more.'), NO_DEDICATED_IP),
     gap('weekly DMARC report digests', 'Postmark’s DMARC monitoring sends a free weekly email that summarizes the DMARC reports for your domains.', /\bDMARC (?:reports?|digests?|monitoring)\b/i, GAPS_READ('https://dmarc.postmarkapp.com/', 'A free weekly email to help monitor & implement DMARC')),
-    gap('libraries for Python, Ruby, .NET, Java and PHP', 'Postmark has official libraries for Python, Ruby (and Rails), .NET, Java and PHP.', LANGUAGES, GAPS_READ('https://postmarkapp.com/developer/integration/official-libraries', 'Official libraries - TypeScript - Python SDK - Rails gem - Ruby gem - .NET - Java - PHP')),
+    gap('libraries for Python, Ruby, .NET, Java and PHP', 'Postmark has official libraries for Python, Ruby (and Rails), .NET, Java and PHP.', LANGUAGES, GAPS_READ('https://postmarkapp.com/developer/integration/official-libraries', 'Official libraries - TypeScript - Python SDK - Rails gem - Ruby gem - .NET - Java - PHP'), TYPESCRIPT_SDK),
   ],
 }

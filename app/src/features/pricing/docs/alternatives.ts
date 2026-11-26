@@ -33,7 +33,7 @@ export const DASH = ' A dash: no price read for that size.'
 export function gapsSection(c: Comparison): Section {
   const vendor = c.offer.vendor, gaps = c.gaps ?? []
   return { id: 'gaps', title: `What ${vendor} has that ${productName} does not`, blocks: [
-    { kind: 'p', text: [`Read on ${vendor}’s own pages, ${checkedOn(gaps.map(item => item.source.checked))}. ${productName} offers none of these.`] },
+    { kind: 'p', text: [`Read on ${vendor}’s own pages, ${checkedOn(gaps.map(item => item.source.checked))}.`] },
     { kind: 'list', items: gaps.map(item => [`${item.text}${item.ours ? ` ${item.ours}` : ''} (`, { text: pageName(item.source.url), href: item.source.url }, ')']) },
   ] }
 }
