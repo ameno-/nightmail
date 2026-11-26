@@ -489,8 +489,10 @@ async function foldPayments(runtime: Hosted, run: Run) {
       if (!row) return null;
       const workspace: Guard & Entity = { type: 'workspace', id: row.workspace_id };
       if (!(await tryGuards(tx,[guardKey(workspace)])).size) return { busy: row.id, added: 0 };
+      // Payment records can outlive both their erased receipts and the 90-day
+      // privacy floor. Never reconstruct an already-expired card signal from one.
       const { rows: [current] } = await tx.execute<{ fingerprint: string | null; at: string; source_key: string }>(sql`SELECT
-        CASE WHEN NOT ${workspaceExcluded(sql`p.workspace_id`)} THEN p.card_fingerprint END AS fingerprint,${paymentKey} AS source_key,${utc(sql`p.updated_at`)} AS at
+        CASE WHEN p.updated_at>=now()-interval '90 days' AND NOT ${workspaceExcluded(sql`p.workspace_id`)} THEN p.card_fingerprint END AS fingerprint,${paymentKey} AS source_key,${utc(sql`p.updated_at`)} AS at
         FROM billing_payment_attempts p WHERE p.id=${row.id} AND p.workspace_id=${workspace.id} AND ${where}`);
       if (!current) return { busy: row.id, added: 0 };
       let added = 0;

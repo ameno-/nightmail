@@ -33795,6 +33795,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await runAbuseStage(on(one),'clusters'); await runAbuseStage(on(one),'clusters');
         assert.deepEqual((await jobsFor('user:broken1')).map(r=>r.jobs),[1]);
         assert.equal((await lag())['pending links'],null);
+        // Once retention drops an erasure's floor and receipts, the financial row
+        // can still exist. Reading it cannot recreate the expired card evidence.
+        await control.query("UPDATE abuse_state SET active_since=now()-interval '1 year'");
+        await control.query(`INSERT INTO billing_payment_attempts(id,workspace_id,kind,status,amount_uc,idempotency_key,card_fingerprint,created_by,created_at,updated_at)
+          VALUES('aged','wa','checkout','succeeded',0,'aged','aged-card','fixture',now()-interval '92 days',now()-interval '91 days')`);
+        const aged = await runAbuseStage(on(one),'payments');
+        assert.equal(aged.items,1); assert.equal(aged.added,0);
       });
 
       await t.test('minute seeding, bounded no-progress retries and the reserved customer lane', async () => {
@@ -33941,12 +33948,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await mail({ workspace: byo, html: offer(13), topic: byoTopic });                          // Sent through a connected account before the workspace moved to Hosted.
       await h.command('--workspace', excludedWorkspace, '--exclude', '--reason', 'Synthetic agreement', '--source', 'agreement');
       await mail({ workspace: excludedWorkspace, html: offer(14) });
-      await payment(wid, 'fp_abuse_fixture'); await payment(twin, 'fp_abuse_fixture'); await payment(twin, null, 'clock_timestamp()', 'failed'); await payment(excludedWorkspace, 'fp_abuse_fixture');
+      await payment(wid, 'fp_abuse_fixture'); await payment(twin, 'fp_abuse_fixture'); await payment(twin, null, 'clock_timestamp()', 'failed'); await payment(excludedWorkspace, 'fp_excluded_fixture');
       const madeBy = (await db.query('SELECT clock_timestamp() AS at')).rows[0].at as Date;
       const warnings = t.mock.method(console, 'warn', () => {});
       const queries = t.mock.method(db, 'query');
       const run = await h.hourly();
-      const statements = queries.mock.calls.map(call => String((call.arguments[0] as { text?: string })?.text ?? call.arguments[0]));
+      const reads = await Promise.all(queries.mock.calls.map(async call => (await call.result as pg.QueryResult | undefined)?.rows));
       queries.mock.restore();
       assert.deepEqual(run, { signIns: 9, payments: 4, sampled: 3, added: 8 + 7 + 6 + 8 + 2 + 18 });
       assert.equal(warnings.mock.calls.filter(call => String(call.arguments[0]).includes('"step":"signIn"')).length, 5, 'Each malformed row is passed over.');
@@ -33984,7 +33991,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // simulated, a connected account's, anything made or accepted before monitoring started, and an excluded
       // workspace, whose card's fingerprint is not even read.
       for (const id of [skipped, simulated, byo, early, excludedWorkspace]) assert.deepEqual(await signals('workspace', id), [], id);
-      assert.ok(statements.some(text => /CASE WHEN NOT[\s\S]*card_fingerprint END/.test(text)));
+      const visible = JSON.stringify(reads);
+      assert.ok(visible.includes('fp_abuse_fixture') && !visible.includes('fp_excluded_fixture'),'Only eligible fingerprints reach the folding process.');
       // Nothing stored names an address, a network, a user agent, a card, a domain, a recipient or any wording.
       const everything = JSON.stringify((await db.query('SELECT * FROM abuse_signals')).rows) + JSON.stringify((await db.query('SELECT * FROM abuse_sampling')).rows) + JSON.stringify((await db.query('SELECT * FROM abuse_state')).rows);
       for (const secret of ['abusefixture', 'abuse.fixture', 'casey', 'jane', 'burner', 'mailinator', '198.51.100', '203.0.113', 'Macintosh', 'AppleWebKit', 'fp_abuse', 'seed-inbox', 'abuse-recipient', 'example.com', 'example.org', 'promo-fixture', 'pixel', 'tracker', 'warehouse', 'jacket', 'sign-in code', 'gh-sub', 'sub-a'])
@@ -45135,7 +45143,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.deepEqual(lag(7199), []);
     const abuseDelivery = (high: number, unconfirmed: number) => lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: { late: 1, failed: high, expired: high, high, unconfirmed } } });
     assert.deepEqual(abuseDelivery(0,1), ["abuse-alerts-undelivered warning 2: 2 not delivered: 1 unposted over 60 minutes, 1 posted but unconfirmed (Slack didn't answer; check the channel)."]);
-    assert.deepEqual(abuseDelivery(1,0), ['abuse-alerts-undelivered critical 3: 3 not delivered (1 high, unposted): 1 unposted over 60 minutes, 1 refused, 1 expired unposted.']);
+    assert.deepEqual(abuseDelivery(1,0), ['abuse-alerts-undelivered critical 3: 3 not delivered (1 high, unposted): 1 unposted over 60 minutes, 1 failed, 1 expired unposted.']);
   });
 
   test('MX health: warnings stay on Health; critical opens, reminders and long recoveries are single plain Slack lines; short flaps stay quiet across ticks; operator and self-hosted access', async t => {
