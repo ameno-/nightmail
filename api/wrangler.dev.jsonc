@@ -17,6 +17,7 @@
     "run_worker_first": ["/", "/pricing", "/compare", "/compare/*", "/v1", "/v1/*", "/api", "/api/*", "/mcp", "/mcp/*", "/.well-known", "/.well-known/*", "/unsubscribe", "/unsubscribe/*", "/i/*", "/health", "/health/*", "/internal/*", "/openapi.json", "/docs.md", "/docs/operations/*", "/docs/tags/*", "/llms.txt"]
   },
   "vars": {
+    "NIGHTMAIL_MAIL_BUCKET": "nightmail-dev-mail",
     "NIGHTMAIL_MAIL_STORE": "r2",
     "PUBLIC_URL": "https://dev.nightmail.dev",
     // Mail apps connect to imap.dev.bane.mx and smtp.dev.bane.mx, the names on dev's gateway certificate. Shown only
@@ -63,6 +64,7 @@
     "NIGHTMAIL_TRUSTED_POOL": "true",
     "NIGHTMAIL_REQUIRE_DMARC_FOR_BULK": "true",
     "NIGHTMAIL_HOSTED_SCREEN": "true",
+    "NIGHTMAIL_RECEIVING_REDRIVE": "true",
     // Dev only: the pools become ready in the SES sandbox, so dev can send to the mailbox simulator and verified addresses.
     "NIGHTMAIL_ALLOW_SES_SANDBOX": "true",
     "DEFAULT_SES_REGION": "us-east-2",
@@ -72,6 +74,8 @@
     // until every send carries an SES TenantName.
     "ENABLE_LIVE_SES": "true",
     "JOB_CONCURRENCY": "6",
+    "SIMULATED_SES_LATENCY_MS": "170",
+    "SIMULATED_SES_RATE": "5000",
     "DISPATCH_SHARDS": "4",
     "DISPATCH_RATE_FACTOR": "1.05",
     "API_RATE_LIMIT_PER_MINUTE": "10000",

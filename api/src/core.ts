@@ -107,7 +107,7 @@ export interface Config {
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
   dashboardAnalytics?: boolean;
   /** Hosted: email a domain's owners once when it is still pending an hour after it was added (src/domain-setup.ts, DOMAIN_SETUP_REMINDER=on). Off unless set. */
-  /** Hosted: one NS lookup when a domain is added (createDomain, record-check.ts dnsZone). DOMAIN_NS_CHECK=off turns it off. */
+  /** Hosted: one NS lookup when a domain is added (createDomain, record-check.ts dnsZone). Always on for Hosted. */
   domainNsCheck?: boolean;
   domainSetupReminder?: boolean;
   /** Hosted: email a new workspace's owners once when it has no domain an hour after sign-up (src/domain-setup.ts, NO_DOMAIN_REMINDER=on). Off unless set. */
@@ -158,7 +158,6 @@ export interface Config {
   deploy?: { sha: string | null; at: string | null };
   /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: token alone; null: invalid configured signer, webhook disabled. */
   planetscaleWebhookSecret?: string | null;
-
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
   billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; creditProduct: string; taxCode: string; apiBase: string } };
   placementShadow?: boolean;

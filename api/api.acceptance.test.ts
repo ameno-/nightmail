@@ -978,9 +978,10 @@ test('optional Worker secrets disable only their feature on a partial rollout; c
   for (const link of [{NIGHTMAIL_LINK_SAAS_ZONE_ID:zone},{NIGHTMAIL_LINK_SAAS_TOKEN:token}]) {
     const config=loadConfig({...base,...link,NIGHTMAIL_LINK_HOST:'links.example.net',NIGHTMAIL_POSTMASTER_CREDENTIALS:token,
       NIGHTMAIL_SUPPORT_URL:'https://support.example.org',NIGHTMAIL_SUPPORT_SIGNING_KEY:token,CF_OBSERVABILITY_TOKEN:token,CF_OBSERVABILITY_ACCOUNT_ID:'bad',
-      ANALYTICS_PUSH_SECRET:token,STRIPE_SECRET_KEY:'not-a-key',STRIPE_WEBHOOK_SECRET:'whsec_fixture',DOMAIN_CONNECT_KEY_ID:'_dck1'});
+      ANALYTICS_PUSH_SECRET:token,NIGHTMAIL_PLACEMENT_SHADOW:'typo',STRIPE_SECRET_KEY:'not-a-key',STRIPE_WEBHOOK_SECRET:'whsec_fixture',DOMAIN_CONNECT_KEY_ID:'_dck1'});
     assert.deepEqual([config.linkHosts,config.linkHost,config.postmaster,config.support?.url,config.support?.signingKey,
       config.observability,config.analyticsPush,config.billing?.stripe,config.domainConnect],[undefined,'links.example.net',undefined,undefined,undefined,undefined,undefined,undefined,undefined]);
+    assert.equal(config.placementShadow,false);
     const runtime={config,db,snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){return null;}}};
     assert.equal((await app.fetch(new Request(PUBLIC_ORIGIN+'/health'),runtime)).status,200);
     const me=await app.fetch(new Request(PUBLIC_ORIGIN+'/v1/me'),runtime); assert.deepEqual([me.status,(await me.json() as Json).error?.code],[401,'AUTH_REQUIRED']);
@@ -24337,10 +24338,10 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
 
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{
   const {loadConfig,CONFIG_KEYS}=await import('./src/config.js');
-  const flags={MX_PLATFORM_AWS_ACCOUNT:'000000000001',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_BYO_V2:'true',MX_ALLOW_SES_SANDBOX:'true',MX_REQUIRE_DMARC_FOR_BULK:'true',MX_PLACEMENT_DBL_ZONE:'fixture.invalid'};
+  const flags={MX_PLATFORM_AWS_ACCOUNT:'000000000001',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_BYO_V2:'true',MX_ALLOW_SES_SANDBOX:'true',MX_REQUIRE_DMARC_FOR_BULK:'true',MX_PLACEMENT_SHADOW:'false',MX_PLACEMENT_DBL_ZONE:'fixture.invalid'};
   for (const key of Object.keys(flags)) assert.ok(CONFIG_KEYS.includes(key),'Workers must pass the legacy binding to loadConfig');
   const config=loadConfig({MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',PUBLIC_URL:PUBLIC_ORIGIN,BANE_ROOT_SECRET:AUTH_SECRET,...flags});
-  assert.deepEqual([config.platformAccount,config.regionalSending,config.trustedPool,config.byoV2,config.allowSesSandbox,config.requireDmarcForBulk,config.placementShadow,config.placementDblZone],['000000000001',true,true,true,true,true,true,'fixture.invalid']);
+  assert.deepEqual([config.platformAccount,config.regionalSending,config.trustedPool,config.byoV2,config.allowSesSandbox,config.requireDmarcForBulk,config.placementShadow,config.placementDblZone],['000000000001',true,true,true,true,true,false,'fixture.invalid']);
   assert.equal(loadConfig({MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',PUBLIC_URL:PUBLIC_ORIGIN,BANE_ROOT_SECRET:AUTH_SECRET,...flags,BANE_REGIONAL_SENDING:'false'}).regionalSending,false);
   for (const key of ['BANE_PLATFORM_AWS_ACCOUNT','MX_PLATFORM_AWS_ACCOUNT']) assert.throws(()=>loadConfig({MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',PUBLIC_URL:PUBLIC_ORIGIN,BANE_ROOT_SECRET:AUTH_SECRET,[key]:'438095551154'}),{status:503,code:'PLATFORM_ACCOUNT_RETIRED'});
 });
@@ -25660,8 +25661,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {loadConfig}=await import('./src/config.js'), {operationJobs}=await import('./src/operations.js');
       const {SESv2Client}=await import('@aws-sdk/client-sesv2'), tls=(await import('node:tls')).default,{EventEmitter}=await import('node:events');
       const cfg={BANE_ROOT_SECRET:'fixture-'.repeat(6),PUBLIC_URL:'https://fixture.example.com'};
-      assert.equal(loadConfig(cfg).placementShadow,false);
+      assert.equal(loadConfig({...cfg,BANE_PLACEMENT_SHADOW:'true'}).placementShadow,false);
       assert.equal(loadConfig({...cfg,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google'}).placementShadow,true);
+      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_PLACEMENT_SHADOW:'false'}).placementShadow,false);
       const wid=runtime.config.workspaceId,oh='us-east-2',type='domain.placement',zone='licensed-dbl.invalid';
       const create=(name:string)=>local('POST','/v1/domains',{name});
       const wire:string[]=[],ips:string[]=[],aws:string[]=[]; let mode:'live'|'private'|'redirect'|'timeout'|'listed'='live';
@@ -25915,9 +25917,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [owner,other]=[0,1].map(()=>'ws_'+randomUUID().replaceAll('-','')) as [string,string];
     const tenant=`bane-probation-${owner}`,arn=`arn:aws:ses:${oh}:${acct}:identity/${host}`,inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`,feedback=`arn:aws:sns:${oh}:${acct}:bane-feedback`,bucket=`bane-${acct}-mail-${oh}`;
     const env={MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_PLATFORM_DOMAIN_WORKSPACE:owner,PUBLIC_URL:publicUrl};
-    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',
+    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',
       ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
-    const runtime=instance.runtime,app=createApp();runtime.config.placementShadow=false;cleanup(t,instance.close);
+    const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1),($2,$2,$2)',[owner,other]);
     cleanup(t,async()=>{
       for (const table of ['jobs','sending_emails','mailboxes','mailbox_domains','operation_domains','domain_claims','hosted_operator_audit','api_request_budgets','api_keys','ses_installation_settings']) await db.query(`DELETE FROM ${table} WHERE workspace_id=ANY($1)`,[[owner,other]]);
@@ -32573,7 +32575,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const abuseModule = await import('./src/abuse.js'), { sql } = await import('drizzle-orm'), { loadConfig } = await import('./src/config.js');
       const stored = async () => (await db.query('SELECT count(*)::int AS n FROM abuse_signals')).rows[0].n as number, before = await stored();
       // Off: self-hosted; hosted without the setting; hosted before its activation time. A sign-in notes nothing and
-      // the job does not run. Production sets it but stays monitor-only: NIGHTMAIL_ABUSE_ENFORCE is never set there.
+      // the job does not run. Production sets it and stays monitor-only.
       const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), ...extra });
       const hosted = { MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google' };
       assert.deepEqual([settings({ NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T00:00:00Z' }).abuseMonitoring, settings(hosted).abuseMonitoring, settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T01:00:00+01:00' }).abuseMonitoring],
