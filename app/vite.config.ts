@@ -38,7 +38,7 @@ const fileHeaders = (): Plugin => {
       }
       // The dashboard's entry, then what the homepage's first screen loads (home-shell.ts), then the price pages' (price-pages.ts).
       for (const file of Object.values(bundle)) if (file.type === 'chunk' && file.isEntry && file.name === 'index') add(file.fileName)
-      for (const file of homeFirstFiles(Object.keys(bundle))) add(file)
+      for (const file of homeFirstFiles(Object.keys(bundle))) if (file.startsWith('fonts/')) first.add(file); else add(file)
       for (const file of priceFirstFiles(Object.keys(bundle))) add(file)
       const fonts = readdirSync(resolve(publicDir, 'fonts')).sort().map(name => `fonts/${name}`)
       const { headers, uncached } = withFileRules(readFileSync(resolve(publicDir, '_headers'), 'utf8'), [...first, ...fonts, ...Object.keys(bundle).sort()])

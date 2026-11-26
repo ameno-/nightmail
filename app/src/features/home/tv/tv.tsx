@@ -322,7 +322,10 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
       sample(shot.canvas)
     }
     const calm = matchMedia('(prefers-reduced-motion: reduce)')
-    let shown = '', raf = 0, last = 0, seen = true, track = 0, trackTo = 0, level = 0, bootAt = performance.now(), wasOn = true, bad = 0
+    // Taking over from home.html's still of this picture (takeOver, below): on and settled from the first frame, without
+    // switching on or the tape's first run-up.
+    const handoff = !!document.getElementById('home-shell')
+    let shown = '', raf = 0, last = 0, seen = true, track = 0, trackTo = 0, level = handoff ? 1 : 0, bootAt = performance.now() - (handoff ? 2100 : 0), wasOn = true, bad = 0
     const began = performance.now()
     const size = () => {
       const scale = Math.min(devicePixelRatio || 1, 2), w = Math.round(el.clientWidth * scale), h = Math.round(el.clientHeight * scale)
@@ -546,6 +549,16 @@ function CopyForAgent() {
 // After the terms (or alone, for someone signed in): the API's docs and the agent's way in.
 const More = ({ lead }: { lead?: boolean }) => <>{lead && <span aria-hidden="true"> · </span>}<a href="/docs">API docs</a><span aria-hidden="true"> · </span><CopyForAgent /></>
 
+/** home.html's first screen (app/home-shell.ts: this page as first rendered, with a still of the tape behind the glass),
+ *  over this one until now: it goes, handing on the label's focus. */
+function takeOver(set: HTMLElement | null) {
+  const shell = document.getElementById('home-shell')
+  if (!shell) return
+  const focused = shell.contains(document.activeElement)
+  shell.remove()
+  if (focused) [...set?.closest('.chy')?.querySelectorAll<HTMLElement>('.chyp-go') ?? []].find(el => el.getClientRects().length)?.focus()
+}
+
 /** The homepage: the television, the price list it plays, and the way in. */
 export function TvHome({ start, notice }: HomeProps) {
   const visitor = !start.signedIn
@@ -561,8 +574,16 @@ export function TvHome({ start, notice }: HomeProps) {
   useEffect(() => { const made = sound.current = createSound(); deck.hear = made.set; return () => { deck.hear = () => {}; made.stop() } }, [deck])
   const say = (note: string) => { deck.note = note; deck.noteAt = performance.now(); deck.wake() }
   const noise = (name: Noise, level?: number, after?: number) => sound.current?.play(name, level, after)
-  const light = useRef((level: number) => { box.current?.style.setProperty('--light', level.toFixed(3)) }).current
-  const fall = useRef(() => { setFlat(true); box.current?.style.setProperty('--light', '1') }).current
+  const light = useRef((level: number) => { box.current?.style.setProperty('--light', level.toFixed(3)); takeOver(box.current) }).current
+  const fall = useRef(() => { setFlat(true); box.current?.style.setProperty('--light', '1'); requestAnimationFrame(() => takeOver(box.current)) }).current
+  // A press on home.html's Get started made while this code loaded signs in now; its first screen gives way once the
+  // picture is drawn (light, fall), or after a while if it never is.
+  useEffect(() => {
+    const held = window as Window & { __nightmailHomeStart?: boolean }
+    if (held.__nightmailHomeStart && !start.signedIn) { delete held.__nightmailHomeStart; start.onSignIn() }
+    const late = setTimeout(() => takeOver(box.current), 3000)
+    return () => clearTimeout(late)
+  }, [])
   const tune = (to: number) => { setChannel(to); deck.channel = to; deck.switchAt = performance.now(); deck.wake() }
   // Channel 8 has something on only where the commercial can be drawn (WebGPU). Once the set has warmed up a GPU is asked
   // for (nothing is fetched for it), and the key's lamp lights only when there is one; null: not known yet.
