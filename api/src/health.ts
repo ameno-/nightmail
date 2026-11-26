@@ -303,9 +303,9 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     if (supportAiToday !== undefined && supportAiToday >= SUPPORT_AI.dailyLineUsd)
       find('support-ai-cost', null, supportAiToday, `${dollars(supportAiToday)} since midnight UTC, past the ${dollars(SUPPORT_AI.dailyLineUsd)} daily line.`, SUPPORT_AI.remindMinutes);
     if (abuseUndelivered) {
-      // Critical while a high alert is unposted over an hour (late, refused or expired): someone must hear of that one.
+      // Critical while a high alert is unposted over an hour (late, failed or expired): someone must hear of that one.
       const { late, failed, expired, high, unconfirmed = 0 } = abuseUndelivered, n = late + failed + expired + unconfirmed;
-      if (n > 0) find('abuse-alerts-undelivered', null, n, `${count(n)} not delivered${high ? ` (${count(high)} high, unposted)` : ''}: ${[late && `${count(late)} unposted over ${ABUSE.lateMinutes} minutes`, failed && `${count(failed)} refused`,
+      if (n > 0) find('abuse-alerts-undelivered', null, n, `${count(n)} not delivered${high ? ` (${count(high)} high, unposted)` : ''}: ${[late && `${count(late)} unposted over ${ABUSE.lateMinutes} minutes`, failed && `${count(failed)} failed`,
         expired && `${count(expired)} expired unposted`, unconfirmed && `${count(unconfirmed)} posted but unconfirmed (Slack didn't answer; check the channel)`].filter(Boolean).join(', ')}.`, ABUSE.remindMinutes, high > 0 ? 'critical' : 'warning');
     }
     if (abuseBehind) {

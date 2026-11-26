@@ -506,7 +506,7 @@ export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number 
     try { await bounded(runtime, tx => tx.execute(sql`UPDATE abuse_state SET cursors=${JSON.stringify(run.cursors)}::jsonb WHERE id='monitor'`)); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'cursor' }); }
   };
   // The alert outbox first: stale alerts marked, unqueued ones queued (their jobs post them, outside this run's time).
-  const alerts = { stale: 0, queued: 0 };
+  const alerts = { stale: 0, queued: 0, requeued: 0, failed: 0 };
   await stage('alerts', started + budget, async () => { Object.assign(alerts, await (await import('./abuse-alerts.js')).sweepAlerts(runtime)); });
   await stage('signIns', started + budget * .2, async () => { result.signIns = await foldSignIns(runtime, run); });
   await stage('payments', started + budget * .4, async () => { result.payments = await foldPayments(runtime, run); });

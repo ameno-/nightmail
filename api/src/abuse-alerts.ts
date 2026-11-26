@@ -145,6 +145,13 @@ const POST_TIMEOUT_MS = 10_000;
 const AFTER_TIMEOUT_MS = 5 * 60_000;
 /** The longest a 429's Retry-After is followed for one wait. */
 const RETRY_AFTER_MOST_S = 3600;
+/**
+ * How many times the sweep gives an alert a new job after its job failed for good (a run of database failures before
+ * the post, or a lease exhausted). At most once an hour, inside the alert's day: then it is failed, never forgotten.
+ */
+export const REQUEUES_MOST = 3;
+/** An alert's job is live while it is waiting or running; any other (failed, completed, or none) holds nothing. */
+const liveJob = (alert: SQL) => sql`EXISTS (SELECT FROM jobs j WHERE j.id=${jobId(alert)} AND j.status IN ('pending','running'))`;
 /** How long an alert may wait to be posted: past it, it is stale ('expired'), never posted late. */
 const FRESH = sql`interval '1 day'`;
 export const STALE_REASONS = ['cluster_gone', 'band_dropped', 'reviewed', 'expired'] as const;
@@ -153,18 +160,20 @@ const staleReason = sql`CASE WHEN c.id IS NULL THEN 'cluster_gone' WHEN NOT (c.b
   WHEN a.review IS NOT NULL THEN 'reviewed' WHEN a.created_at<=now()-${FRESH} THEN 'expired' END`;
 /**
  * The alerts ahead of one in line for a place at its level: still stored, unclaimed, never refused (a refused one steps
- * out of line until its retry, so one bad post holds nobody up), still needing a look, and stored before it, the ID
- * breaking a tie. One hourly run stores all its alerts at the same instant, so ties are the ordinary case: without the
+ * out of line until its retry, so one bad post holds nobody up), with a live job (one whose job failed for good holds
+ * no place until the sweep gives it a new one), still needing a look, and stored before it, the ID breaking a tie. One hourly run stores all its alerts at the same instant, so ties are the ordinary case: without the
  * ID, which of them posts now and which waits an hour would depend on the order their jobs happen to run in. Each level
  * has its own line and its own places, so a high alert never waits on a review one.
  */
 const inLine = (band: 'review' | 'high', id: string) => sql`abuse_alerts a LEFT JOIN abuse_clusters c ON c.id=a.cluster_id
-  WHERE a.band=${band} AND a.status='stored' AND a.claimed_at IS NULL AND a.attempts=0 AND a.id<>${id}
+  WHERE a.band=${band} AND a.status='stored' AND a.claimed_at IS NULL AND a.attempts=0 AND a.id<>${id} AND ${liveJob(sql`a.id`)}
     AND (a.created_at,a.id)<(SELECT created_at,id FROM abuse_alerts WHERE id=${id}) AND (${staleReason}) IS NULL`;
 /**
  * The hourly job's first stage, a few statements whatever the load: every stored alert that no longer needs a look is
- * marked stale with why, and every one that does gets its job if it has none (one stored before jobs posted them, or
- * whose job could not be queued with it). Returns how many it queued and marked.
+ * marked stale with why, and every one that does has a live job: one is queued for an alert that has none (stored
+ * before jobs posted them, or whose job could not be queued with it), and one whose job failed for good gets it back
+ * (REQUEUES_MOST times; after that it is failed, error JOB:<the job's last error>, which Health counts). Returns how
+ * many it marked stale, queued, queued again and failed.
  */
 export async function sweepAlerts(runtime: Hosted) {
   return bounded(runtime, async tx => {
@@ -173,7 +182,16 @@ export async function sweepAlerts(runtime: Hosted) {
       WHERE u.id=s.id AND s.reason IS NOT NULL RETURNING u.id`);
     const { rows: queued } = await tx.execute<{ id: string }>(sql`INSERT INTO jobs(id,type,workspace_id,payload)
       SELECT ${jobId(sql`a.id`)},${JOB},${PLATFORM},jsonb_build_object('alertId',a.id) FROM abuse_alerts a WHERE a.status='stored' ON CONFLICT (id) DO NOTHING RETURNING id`);
-    return { stale: stale.length, queued: queued.length };
+    // A job that failed for good (or finished without settling it) leaves its alert waiting with nothing to post it.
+    const { rows: [again] } = await tx.execute<{ requeued: number; failed: number }>(sql`WITH orphan AS (
+        SELECT a.id,a.requeues,j.last_error FROM abuse_alerts a JOIN jobs j ON j.id=${jobId(sql`a.id`)} WHERE a.status='stored' AND j.status NOT IN ('pending','running') FOR UPDATE OF a),
+      given_up AS (UPDATE abuse_alerts u SET status='failed',posting=false,error=left('JOB:'||coalesce(o.last_error,'FAILED'),40) FROM orphan o WHERE u.id=o.id AND o.requeues>=${REQUEUES_MOST} RETURNING u.id),
+      counted AS (UPDATE abuse_alerts u SET requeues=u.requeues+1 FROM orphan o WHERE u.id=o.id AND o.requeues<${REQUEUES_MOST} RETURNING u.id),
+      requeued AS (UPDATE jobs j SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL FROM counted c
+        WHERE j.id=${jobId(sql`c.id`)} AND j.status NOT IN ('pending','running') RETURNING j.id)
+      SELECT (SELECT count(*)::int FROM requeued) AS requeued,(SELECT count(*)::int FROM given_up) AS failed`);
+    if (again?.failed) log('warn', { code: 'ABUSE_ALERT_FAILED', reason: 'JOB_FAILED', alerts: again.failed });
+    return { stale: stale.length, queued: queued.length, requeued: again?.requeued ?? 0, failed: again?.failed ?? 0 };
   });
 }
 /**
@@ -191,10 +209,10 @@ export async function sweepAlerts(runtime: Hosted) {
  * - Unanswered (no answer in POST_TIMEOUT_MS): Slack may have taken it, so it is never treated as refused. It keeps its
  *   place and is tried once more after AFTER_TIMEOUT_MS; a second unanswered post marks it unconfirmed (posted, perhaps
  *   twice, never again; Health counts it so someone looks at the channel). A missed alert is worse than a doubled one.
- * - So one alert is posted at most twice: two unanswered posts, or one unanswered post and one accepted. Also twice if
- *   Slack accepted a post and the "sent" write after it was lost (a crash in between): Slack's incoming webhooks take
- *   no idempotency key. Never because of a redeploy, an overlapping run or a refused post. A retry finds a sent alert
- *   and posts nothing.
+ * - A post whose answer was never recorded (its worker stopped after sending: a crash, a lease exhausted) counts as
+ *   unanswered when the alert is next taken up, so it is the same rule: at most two posts, ever, whatever retries,
+ *   overlapping runs or re-queued jobs follow (Slack's incoming webhooks take no idempotency key). A retry finds a sent
+ *   alert and posts nothing.
  */
 const deliver: JobHandler = async (runtime, payload, job) => {
   const id = typeof payload.alertId === 'string' && /^aal_[0-9a-f]{24}$/.test(payload.alertId) ? payload.alertId : null;
@@ -203,14 +221,24 @@ const deliver: JobHandler = async (runtime, payload, job) => {
   type Decision = { post: unknown } | { wait: string } | null;
   const decision = await runtime.db.transaction(async (tx): Promise<Decision> => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended('abuse.alert', 0))`);
-    const { rows: [a] } = await tx.execute<{ status: string; band: 'review' | 'high'; payload: unknown; reason: string | null; posting: string | null }>(sql`SELECT a.status,a.band,a.payload,${staleReason} AS reason,
-      CASE WHEN a.claimed_at>now()-interval '2 minutes' THEN ${utc(sql`(a.claimed_at+interval '2 minutes')`)} END AS posting
+    // until: when its last post settles, if not yet (in flight: answer not recorded, under 2 minutes; unanswered: the
+    // pause before its one more try).
+    const { rows: [a] } = await tx.execute<{ status: string; band: 'review' | 'high'; payload: unknown; reason: string | null; until: string | null; posting: boolean; timeouts: number }>(sql`SELECT a.status,a.band,a.payload,a.posting,a.timeouts,${staleReason} AS reason,
+      CASE WHEN a.posting AND a.claimed_at>now()-interval '2 minutes' THEN ${utc(sql`(a.claimed_at+interval '2 minutes')`)}
+        WHEN NOT a.posting AND a.timeouts>0 AND a.claimed_at>now()-make_interval(secs=>${AFTER_TIMEOUT_MS / 1000}) THEN ${utc(sql`(a.claimed_at+make_interval(secs=>${AFTER_TIMEOUT_MS / 1000}))`)} END AS until
       FROM abuse_alerts a LEFT JOIN abuse_clusters c ON c.id=a.cluster_id WHERE a.id=${id} FOR UPDATE OF a`);
     if (!a || a.status !== 'stored') return null;
     if (a.reason) { await tx.execute(sql`UPDATE abuse_alerts SET status='stale',stale_reason=${a.reason} WHERE id=${id}`); return null; }
     if (!url) { await tx.execute(sql`UPDATE abuse_alerts SET status='failed',error='NO_WEBHOOK' WHERE id=${id}`); log('warn', { code: 'ABUSE_ALERT_FAILED', reason: 'NO_WEBHOOK' }); return null; }
-    // Its post is in flight (a run whose lease lapsed while it posted): wait for its answer, never post it beside it.
-    if (a.posting) return { wait: a.posting };
+    // Its post is in flight (a run whose lease lapsed while it posted), or just went unanswered: wait, never post beside it.
+    if (a.until) return { wait: a.until };
+    // A post whose answer was never recorded (its worker stopped after sending) counts as unanswered: the second such
+    // post is the last, so no crash, retry or re-queued job ever makes a third.
+    const unanswered = a.timeouts + (a.posting ? 1 : 0);
+    if (unanswered >= 2) {
+      await tx.execute(sql`UPDATE abuse_alerts SET status='unconfirmed',timeouts=${unanswered},posting=false,error='TIMEOUT',sent_at=now() WHERE id=${id}`);
+      log('warn', { code: 'ABUSE_ALERT_UNCONFIRMED' }); return null;
+    }
     // The places taken at its level this hour, and the alerts ahead of it in line for one (inLine), whatever order their jobs run in.
     const { rows: [line] } = await tx.execute<{ taken: number; oldest: string | null; ahead: number }>(sql`SELECT count(*)::int AS taken,${utc(sql`min(claimed_at)`)} AS oldest,
       (SELECT count(*)::int FROM ${inLine(a.band, id)}) AS ahead FROM abuse_alerts WHERE band=${a.band} AND claimed_at>now()-interval '1 hour' AND id<>${id}`);
@@ -218,7 +246,7 @@ const deliver: JobHandler = async (runtime, payload, job) => {
     if (free <= 0) return { wait: new Date(Date.parse(line!.oldest!) + 3_600_000 + 1000).toISOString() };
     // Its turn comes after theirs: they take the places left, and it waits for the next one.
     if ((line?.ahead ?? 0) >= free) return { wait: new Date(Date.now() + 30_000).toISOString() };
-    await tx.execute(sql`UPDATE abuse_alerts SET claimed_at=now() WHERE id=${id}`);
+    await tx.execute(sql`UPDATE abuse_alerts SET claimed_at=now(),posting=true,timeouts=${unanswered} WHERE id=${id}`);
     return { post: a.payload };
   });
   if (!decision) return;
@@ -228,7 +256,7 @@ const deliver: JobHandler = async (runtime, payload, job) => {
   catch (error) {
     if (!(error instanceof ApiError) && error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
       // Unanswered: it keeps its place, and gets one more try after a pause; the second unanswered post is the last.
-      const { rows: [after] } = await runtime.db.execute<{ status: string }>(sql`UPDATE abuse_alerts SET timeouts=timeouts+1,attempts=attempts+1,error='TIMEOUT',
+      const { rows: [after] } = await runtime.db.execute<{ status: string }>(sql`UPDATE abuse_alerts SET timeouts=timeouts+1,attempts=attempts+1,error='TIMEOUT',posting=false,
         status=CASE WHEN timeouts+1>=2 THEN 'unconfirmed' ELSE status END,sent_at=CASE WHEN timeouts+1>=2 THEN now() ELSE sent_at END
         WHERE id=${id} AND status='stored' RETURNING status`);
       log('warn', { code: after?.status === 'unconfirmed' ? 'ABUSE_ALERT_UNCONFIRMED' : 'ABUSE_ALERT_TIMEOUT' });
@@ -240,12 +268,12 @@ const deliver: JobHandler = async (runtime, payload, job) => {
     const refused = error instanceof SlackRefused ? error : null;
     const pause = refused?.status === 429 && refused.retryAfterSeconds !== undefined ? Math.min(Math.max(refused.retryAfterSeconds, 1), RETRY_AFTER_MOST_S) : null;
     const last = pause === null && job.attempts >= MAX_ATTEMPTS, code = refused ? `HTTP_${refused.status}` : error instanceof ApiError ? error.code : 'UNREACHABLE';
-    await runtime.db.execute(sql`UPDATE abuse_alerts SET claimed_at=NULL,attempts=attempts+1,error=${code.slice(0, 40)},status=CASE WHEN ${last} THEN 'failed' ELSE status END WHERE id=${id} AND status='stored'`);
+    await runtime.db.execute(sql`UPDATE abuse_alerts SET claimed_at=NULL,posting=false,attempts=attempts+1,error=${code.slice(0, 40)},status=CASE WHEN ${last} THEN 'failed' ELSE status END WHERE id=${id} AND status='stored'`);
     log('warn', { code: 'ABUSE_ALERT_FAILED', reason: code, last, ...(pause !== null && { retryAfter: pause }) });
     if (pause !== null) throw new JobDeferred(new Date(Date.now() + pause * 1000).toISOString(), undefined, true);
     throw error instanceof ApiError ? error : new ApiError(503, 'ABUSE_ALERT_FAILED', 'The alert could not be posted; it will be retried.', undefined, true);
   }
-  await runtime.db.execute(sql`UPDATE abuse_alerts SET status='sent',sent_at=now(),attempts=attempts+1,error=NULL WHERE id=${id} AND status='stored'`);
+  await runtime.db.execute(sql`UPDATE abuse_alerts SET status='sent',sent_at=now(),posting=false,attempts=attempts+1,error=NULL WHERE id=${id} AND status='stored'`);
 };
 export const abuseAlertJobs: Record<string, JobHandler> = { [JOB]: retryDatabaseFailures(deliver) };
 

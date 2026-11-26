@@ -310,7 +310,8 @@ With `DATABASE_DISK_GB` set: 75% of disk is a warning; 90% is critical. PlanetSc
 
 ### abuse-alerts-undelivered
 An abuse alert (review or high) that should have reached the operators' channel has not: still unposted an hour after it
-was stored, refused by Slack on its last try, expired unposted (a day went by while it still needed a look), or posted
+was stored, refused by Slack on its last try, its job failed for good even after the sweep gave it a new one three
+times (error `JOB:<code>`), expired unposted (a day went by while it still needed a look), or posted
 but unconfirmed (Slack didn't answer either of its two posts in time: it may be in the channel once, twice or not at
 all, so look). A warning; **critical while a high alert is unposted**. The alert is in Operator → Abuse either way.
 
