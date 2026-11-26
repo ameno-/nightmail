@@ -315,6 +315,10 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async staffMailSent(key: string, sent: { threadId: string; messageId: string }) { return (await this.platform()).staffMailSent(key, sent); }
   async staffMailFailed(key: string, failed: { code: string }) { return (await this.platform()).staffMailFailed(key, failed); }
   async staffMailReply(messageId: string, team: string | null) { return (await this.platform()).staffMailReply(messageId, team); }
+  async feedbackDue(limit: number) { return (await this.platform()).feedbackDue(limit); }
+  async feedbackRequest(conversationId: string, requestId: string) { return (await this.platform()).feedbackRequest(conversationId, requestId); }
+  async feedbackRelated(conversationId: string) { return (await this.platform()).feedbackRelated(conversationId); }
+  async feedbackTriage(conversationId: string, note: Parameters<SupportPlatformApi['feedbackTriage']>[1]) { return (await this.platform()).feedbackTriage(conversationId, note); }
   // A plain fetch to the entrypoint answers nothing: the methods above are the whole surface.
   override async fetch() { return new Response(null, { status: 404 }); }
 }

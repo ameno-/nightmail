@@ -468,13 +468,14 @@ function DraftActions({ m, c, actions, onEdit }: { m: SupportMessage; c: Support
 }
 
 function Message({ m, detail, canAct, actions, onEdit }: { m: SupportMessage; detail: SupportDetail; canAct: boolean; actions: Actions; onEdit: (m: SupportMessage, fresh: boolean) => void }) {
-  const c = detail.conversation, note = m.author === 'staff' && m.kind === 'note', isHeld = held(m)
+  // A note: a staff member's, or the triage agent's on an agent feedback report (author agent, api/src/feedback-triage.ts), shown as written.
+  const c = detail.conversation, note = m.kind === 'note' && (m.author === 'staff' || m.author === 'agent'), isHeld = held(m)
   // The support platform's own notices (a fixed reply, a pause notice) are a line, like an event.
   if (m.author === 'system') return <li className="sinbox-event"><Info size={14} aria-hidden="true" /><span className="sinbox-event__text">{m.text}</span><time dateTime={m.at} title={when(m.at)}>{shortDateTime(m.at)}</time></li>
-  const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer') : m.author === 'agent' ? 'Nightmail AI' : m.staff?.name ?? m.emailFrom ?? 'Staff'
+  const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer') : m.author === 'agent' ? note ? 'Triage agent' : 'Nightmail AI' : m.staff?.name ?? m.emailFrom ?? 'Staff'
   // A note that came by email (a reply to a staff email) names the address it came from, beside its author.
   const via = note ? m.emailFrom ? 'Note by email' : 'Internal note' : m.author === 'customer' ? (m.email ? 'Email' : channelLabels[c.channel]) : m.author === 'staff' ? `Reply by ${c.channel === 'email' ? 'email' : 'chat'}` : null
-  const badge = isHeld ? m.draft && (m.draft.outcome === 'sent' || m.draft.outcome === 'edited') ? { text: 'Held, then sent by staff', tone: 'neutral' as Tone } : { text: 'Held, not sent', tone: 'warning' as Tone } : m.author === 'agent' ? deliveryBadge[m.delivery ?? 'sent'] : m.author === 'staff' && !note ? deliveryBadge[m.delivery ?? ''] : undefined
+  const badge = isHeld ? m.draft && (m.draft.outcome === 'sent' || m.draft.outcome === 'edited') ? { text: 'Held, then sent by staff', tone: 'neutral' as Tone } : { text: 'Held, not sent', tone: 'warning' as Tone } : note ? undefined : m.author === 'agent' ? deliveryBadge[m.delivery ?? 'sent'] : m.author === 'staff' ? deliveryBadge[m.delivery ?? ''] : undefined
   return <li className="sinbox-message" data-author={m.author} data-note={note || undefined} data-held={isHeld || undefined} data-pending={m.id.startsWith('pending:') || undefined}>
     <div className="sinbox-message__meta">
       <span className="sinbox-message__author">{author}</span>
@@ -485,7 +486,7 @@ function Message({ m, detail, canAct, actions, onEdit }: { m: SupportMessage; de
       <time className="sinbox-message__time" dateTime={m.at} title={when(m.at)}>{shortDateTime(m.at)}</time>
     </div>
     {m.email ? <EmailBody conversationId={c.id} email={m.email} subject={c.subject} />
-      : m.author === 'agent' ? <div className="sinbox-text"><Markdown text={m.text} /></div> : <div className="sinbox-message__body">{m.text}</div>}
+      : m.author === 'agent' && !note ? <div className="sinbox-text"><Markdown text={m.text} /></div> : <div className="sinbox-message__body">{m.text}</div>}
     {m.files.length > 0 && !m.email && <Files conversationId={c.id} files={m.files} />}
     {m.tools.length > 0 && <ul className="sinbox-tools" aria-label="What the agent checked">{m.tools.map((tool, index) => <li key={index}>{tool.ok ? <Check size={12} aria-label="Done" /> : <X size={12} aria-label="Failed" />}{tool.label}</li>)}</ul>}
     {isHeld && !m.draft && <p className="sinbox-held">{m.heldReason ? freshOnly[m.heldReason] ?? heldWhy[m.heldReason] : 'Not sent.'}</p>}

