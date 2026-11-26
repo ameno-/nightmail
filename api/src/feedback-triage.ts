@@ -1,5 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, errors, json, log, notFound, response, type App, type DbExecutor } from './core.js';
 import { supportPlatformOnly } from './support-conversations.js';
 import { CONVERSATION_ID } from './support-platform.js';
@@ -27,7 +27,9 @@ import { requestTrace } from './support.js';
 // agent, kind note: like a staff note it is never delivered and changes nothing about who owes the next message); the
 // staff email about the report shows its summary as what was found (src/support-staff-mail.ts).
 
-export const TRIAGE_LIMITS = { batch: 5, attempts: 2, retryMinutes: 30, dueHours: 24, windowDays: 30, earlier: 20 } as const;
+/** perWorkspaceDay: reports of one workspace read in 24 hours, so one workspace filing all it may (50 an hour) can't take
+ *  the support platform's daily reading (support/src/limits.ts triagePerDay) from everyone else; the rest go without a note. */
+export const TRIAGE_LIMITS = { batch: 5, attempts: 2, retryMinutes: 30, dueHours: 24, windowDays: 30, earlier: 20, perWorkspaceDay: 10 } as const;
 export const CLASSIFICATIONS = ['bug', 'docs_gap', 'neither'] as const;
 export type Classification = (typeof CLASSIFICATIONS)[number];
 export type TriageNote = { summary: string; cause: string; classification: Classification; duplicates: string[];
@@ -108,12 +110,18 @@ export function registerFeedbackTriage(app: App) {
     responses: { 200: response(z.object({ data: z.array(Due) })), ...errors } }), async c => {
     await supportPlatformOnly(c);
     const { limit } = c.req.valid('json');
+    // Due, and within its workspace's day (perWorkspaceDay, counting what was claimed in the last 24 hours), oldest first;
+    // locked, and checked again once locked, so two sweeps never claim one report.
+    const open = (f: SQL) => sql`${f}.triage IS NULL AND ${f}.triage_attempts < ${TRIAGE_LIMITS.attempts}
+      AND (${f}.triage_claimed_at IS NULL OR ${f}.triage_claimed_at < now() - make_interval(mins => ${TRIAGE_LIMITS.retryMinutes}))`;
     const { rows } = await c.env.db.execute<{ conversation_id: string; ticket_id: string; created_at: string; operation: string | null; request_id: string | null; text: string | null }>(sql`WITH due AS (
-        SELECT f.conversation_id FROM ${reportFrom}
-        WHERE f.triage IS NULL AND f.created_at > now() - make_interval(hours => ${TRIAGE_LIMITS.dueHours}) AND f.triage_attempts < ${TRIAGE_LIMITS.attempts}
-          AND (f.triage_claimed_at IS NULL OR f.triage_claimed_at < now() - make_interval(mins => ${TRIAGE_LIMITS.retryMinutes}))
-          AND c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL
-        ORDER BY f.created_at, f.conversation_id LIMIT ${limit} FOR UPDATE OF f SKIP LOCKED)
+        SELECT g.conversation_id FROM support_feedback g WHERE ${open(sql`g`)} AND g.conversation_id IN (SELECT x.conversation_id FROM (
+            SELECT f.conversation_id, row_number() OVER (PARTITION BY f.workspace_id ORDER BY f.created_at, f.conversation_id)
+              + (SELECT count(*) FROM support_feedback o WHERE o.workspace_id = f.workspace_id AND o.triage_claimed_at > now() - interval '24 hours') AS k
+            FROM ${reportFrom}
+            WHERE ${open(sql`f`)} AND f.created_at > now() - make_interval(hours => ${TRIAGE_LIMITS.dueHours}) AND c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL) x
+          WHERE x.k <= ${TRIAGE_LIMITS.perWorkspaceDay})
+        ORDER BY g.created_at, g.conversation_id LIMIT ${limit} FOR UPDATE OF g SKIP LOCKED)
       UPDATE support_feedback f SET triage_claimed_at = now(), triage_attempts = f.triage_attempts + 1 FROM due WHERE f.conversation_id = due.conversation_id
       RETURNING f.conversation_id, (SELECT ticket_id FROM support_conversations WHERE id = f.conversation_id) AS ticket_id, f.created_at::text AS created_at, f.operation, f.request_id,
         (SELECT m.text FROM support_messages m WHERE m.conversation_id = f.conversation_id AND m.author = 'customer' ORDER BY m.seq LIMIT 1) AS text`);

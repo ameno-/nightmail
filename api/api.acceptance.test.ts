@@ -10676,6 +10676,19 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.ok(acmeMail.html.includes('nothing says the address is held &lt;b&gt;for a while&lt;/b&gt;.') && !acmeMail.html.includes('<b>for a while'), 'Escaped in the HTML part.');
           assert.ok(!betaMail.text.includes(summary), 'A report without a note has no summary line.');
           for (const mail of mails) await sent(mail);
+
+          // One workspace's day: at most perWorkspaceDay of its reports are handed out in 24 hours, so a burst from one
+          // workspace can't take the support platform's daily reading from everyone else.
+          const { TRIAGE_LIMITS } = await import('./src/feedback-triage.js'), burst: string[] = [];
+          const claimedToday = async () => (await db.query("SELECT count(*)::int AS n FROM support_feedback WHERE workspace_id = $1 AND triage_claimed_at > now() - interval '24 hours'", [beta])).rows[0].n as number, before = await claimedToday();
+          for (let i = 0; i < TRIAGE_LIMITS.perWorkspaceDay + 2; i++) {
+            const id = conversation(); burst.push(id);
+            await db.query("INSERT INTO support_conversations(id, channel, verification, mode, workspace_id, status, ticket_id, ticket_type, ticket_at) VALUES ($1, 'agent_feedback', 'credential', 'unverified', $2, 'ticketed', $3, 'feedback', now())", [id, beta, ticketId()]);
+            await db.query("INSERT INTO support_feedback(conversation_id, workspace_id, credential, credential_id, created_at) VALUES ($1, $2, 'apiKey', 'key_triage_burst', now() - interval '1 minute')", [id, beta]);
+          }
+          for (let i = 0; i < 10; i++) if (!ok(reply(await platform.feedbackDue(5))).data.length) break;
+          assert.equal(await claimedToday(), Math.max(before, TRIAGE_LIMITS.perWorkspaceDay));
+          assert.equal((await db.query('SELECT count(*)::int AS n FROM support_feedback WHERE conversation_id = ANY($1) AND triage_claimed_at IS NULL', [burst])).rows[0].n, burst.length - Math.max(0, TRIAGE_LIMITS.perWorkspaceDay - before), 'The rest of its day goes without a note.');
         });
       } finally { globalThis.fetch = previous; }
     });
