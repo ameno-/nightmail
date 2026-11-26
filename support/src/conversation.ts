@@ -1286,7 +1286,16 @@ export class SupportConversation extends DurableObject<Env> {
      * pause_campaign) and a proposal asking the team to pause the workspace's sending (propose_to_staff pause_sending) both
      * stop sending in the chat's one workspace. Whichever comes second in a turn is refused before it reaches Nightmail.
      */
-    let pausing: 'card' | 'staff' | null = null;
+    const pausing = { card: 0, staff: 0 };
+    /**
+     * Claims one pause path for the turn before anything is awaited, so two calls in one step can't both pass the check;
+     * answers how to give it back if the call fails, so a refused card doesn't block asking the team.
+     */
+    const claimPause = (mine: 'card' | 'staff') => {
+      if (pausing[mine === 'card' ? 'staff' : 'card']) throw new ToolFailure(PAUSE_TWICE[mine]);
+      pausing[mine]++;
+      return () => { pausing[mine]--; };
+    };
     const PAUSE_TWICE = {
       card: 'Refused: you already asked the team to pause this workspace’s sending in this answer, so don’t also offer a card to pause a campaign. Tell the customer you asked the team.',
       staff: 'Refused: you already offered the customer a card to pause their campaign in this answer, so don’t also ask the team to pause the workspace’s sending. Let them confirm the card first; ask the team in a later answer only if it isn’t enough.',
@@ -1391,35 +1400,36 @@ export class SupportConversation extends DurableObject<Env> {
       // person's there, writes what they confirm, and runs it only on their own signed-in Confirm. Nothing here, and
       // nothing the customer types, confirms it. The model hears only the kind's fixed title, the status and the ID.
       propose: async (proposal: ActionProposal) => {
-        if (proposal.kind === 'pause_campaign' && pausing === 'staff') throw new ToolFailure(PAUSE_TWICE.card);
-        const workspace = await mayChange();
-        if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);
-        const reply = await this.stamped<SupportAction>('POST', `/v1/support/actions?workspaceId=${encodeURIComponent(workspace)}`, proposal);
-        if (reply.status !== 201 && reply.status !== 200) return refusedChange(reply, 'Check the IDs came from an earlier tool result for this customer.');
-        const action = reply.body;
-        if (!ACTION_ID.test(String(action?.id)) || action.kind !== proposal.kind || action.status !== 'proposed' || typeof action.summary !== 'string') {
-          log('warn', { event: 'support', code: 'ACTION_PROPOSE_UNEXPECTED', status: reply.status });
-          throw new ToolFailure('Couldn’t prepare that change just now. Tell the customer which dashboard action does it instead.');
-        }
-        this.sql.exec('INSERT INTO _support_actions (id, kind, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING', action.id, action.kind, Date.now());
-        if (action.kind === 'pause_campaign') pausing = 'card';
-        log('info', { event: 'support', code: 'ACTION_PROPOSED', kind: action.kind, created: reply.status === 201 });
-        // The card shows Nightmail's sentence (and reads it again from Nightmail); the model never gets it.
-        this.broadcast({ type: 'action.request', actionId: action.id, kind: action.kind, summary: action.summary.slice(0, 1000) });
-        return `${reply.status === 200 ? 'Already proposed, still waiting for the customer' : 'Proposed'}: ${actionTitle(action.kind)} (${action.id}), status proposed. The customer now sees a card with ${productName}’s own description of it and a button to confirm it. End your answer by saying what you proposed and that it runs once they confirm it on the card. Nothing has changed yet, and a typed “yes” changes nothing: never say it’s done, and never write a link for it. You’ll get a note with what came of it once they decide.`;
+        const giveBack = proposal.kind === 'pause_campaign' ? claimPause('card') : null;
+        try {
+          const workspace = await mayChange();
+          if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);
+          const reply = await this.stamped<SupportAction>('POST', `/v1/support/actions?workspaceId=${encodeURIComponent(workspace)}`, proposal);
+          if (reply.status !== 201 && reply.status !== 200) return refusedChange(reply, 'Check the IDs came from an earlier tool result for this customer.');
+          const action = reply.body;
+          if (!ACTION_ID.test(String(action?.id)) || action.kind !== proposal.kind || action.status !== 'proposed' || typeof action.summary !== 'string') {
+            log('warn', { event: 'support', code: 'ACTION_PROPOSE_UNEXPECTED', status: reply.status });
+            throw new ToolFailure('Couldn’t prepare that change just now. Tell the customer which dashboard action does it instead.');
+          }
+          this.sql.exec('INSERT INTO _support_actions (id, kind, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING', action.id, action.kind, Date.now());
+          log('info', { event: 'support', code: 'ACTION_PROPOSED', kind: action.kind, created: reply.status === 201 });
+          // The card shows Nightmail's sentence (and reads it again from Nightmail); the model never gets it.
+          this.broadcast({ type: 'action.request', actionId: action.id, kind: action.kind, summary: action.summary.slice(0, 1000) });
+          return `${reply.status === 200 ? 'Already proposed, still waiting for the customer' : 'Proposed'}: ${actionTitle(action.kind)} (${action.id}), status proposed. The customer now sees a card with ${productName}’s own description of it and a button to confirm it. End your answer by saying what you proposed and that it runs once they confirm it on the card. Nothing has changed yet, and a typed “yes” changes nothing: never say it’s done, and never write a link for it. You’ll get a note with what came of it once they decide.`;
+        } catch (error) { giveBack?.(); throw error; }
       },
       // Safe actions (a DNS re-check, a forward confirmation resent) and proposals to staff: no confirmation here, for the chat's
       // own workspace, owners and admins only. Nightmail checks the target is the person's, takes the target's turn, records
       // it, and runs nothing risky: a proposal waits for an operator's approval.
       act: async (path: string, body: Record<string, unknown> | undefined, notFound: string) => {
-        const staffPause = path === '/v1/support/approvals' && body?.kind === 'pause_sending';
-        if (staffPause && pausing === 'card') throw new ToolFailure(PAUSE_TWICE.staff);
-        const workspace = await mayChange();
-        if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);
-        const reply = await this.stamped('POST', `${path}?workspaceId=${encodeURIComponent(workspace)}`, body);
-        if (reply.status !== 200 && reply.status !== 201) return refusedChange(reply, notFound);
-        if (staffPause) pausing = 'staff';
-        return reply.body;
+        const giveBack = path === '/v1/support/approvals' && body?.kind === 'pause_sending' ? claimPause('staff') : null;
+        try {
+          const workspace = await mayChange();
+          if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);
+          const reply = await this.stamped('POST', `${path}?workspaceId=${encodeURIComponent(workspace)}`, body);
+          if (reply.status !== 200 && reply.status !== 201) return refusedChange(reply, notFound);
+          return reply.body;
+        } catch (error) { giveBack?.(); throw error; }
       },
       // Public text bundled with this Worker: no stamp, so a general email turn may search it too.
       searchDocs: (query: string) => searchDocs(query),
