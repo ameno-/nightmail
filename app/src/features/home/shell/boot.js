@@ -6,9 +6,9 @@
 // data-preload, data-entry) and the page's: data-shell, the first screen's id (home-shell); data-wait, the first
 // picture (.fac-poster), or none to wait for the reader; data-keep, what the app may show over it in the meantime
 // (.boot-loader, .fac-page); data-press, the buttons whose press is held (the homepage's Get started, button.fac-cta,
-// shown pressed at once). The app's stylesheet goes in before the page's own inlined one (style[data-shell-css]) where
-// there is one, so it can't restyle the painted page while the app loads. Where theme.js turned the first screen off
-// (html[data-shell=off]: an address it doesn't show), the app starts at once.
+// shown pressed at once). The app's stylesheet goes in before the page's own CSS ([data-shell-css]: inlined, or a
+// stylesheet painted pages share) where there is one, so it can't restyle the painted page while the app loads. Where
+// theme.js turned the first screen off (html[data-shell=off]: an address it doesn't show), the app starts at once.
 ;(() => {
   const me = document.currentScript, set = me.dataset, root = document.getElementById('root')
   const shell = document.getElementById(set.shell || 'home-shell'), keep = set.keep || '.boot-loader, .fac-page'
@@ -18,7 +18,7 @@
     if (started) return
     started = true
     // The stylesheet and the modules download side by side; the entry runs once the stylesheet is in.
-    const css = sheet = add('link', { rel: 'stylesheet', href: set.css, crossOrigin: '' }, document.querySelector('style[data-shell-css]'))
+    const css = sheet = add('link', { rel: 'stylesheet', href: set.css, crossOrigin: '' }, document.querySelector('[data-shell-css]'))
     for (const href of (set.preload || '').split(' ').filter(Boolean)) add('link', { rel: 'modulepreload', href, crossOrigin: '' })
     const entry = () => add('script', { type: 'module', src: set.entry, crossOrigin: '' })
     css.addEventListener('load', entry, { once: true }); css.addEventListener('error', entry, { once: true })
@@ -30,14 +30,37 @@
   if (!shell || !root || document.documentElement.dataset.shell === 'off') {
     if (shell) shell.remove()
     start()
-    const drop = () => document.querySelectorAll('style[data-shell-css]').forEach(style => style.remove())
+    const drop = () => document.querySelectorAll('[data-shell-css]').forEach(styles => styles.remove())
     sheet.addEventListener('load', drop, { once: true }); sheet.addEventListener('error', drop, { once: true })
     return
   }
 
+  // A scrolling box that keeps an item in view (data-shell-reveal: the reference pages' contents, the open page) scrolls to
+  // it as the app's page does from its first frame (features/docs/index.tsx, DocsView): a third of the way down.
+  for (const box of shell.querySelectorAll('[data-shell-reveal]')) {
+    const item = box.querySelector(box.dataset.shellReveal)
+    if (!item) continue
+    const outer = box.getBoundingClientRect(), inner = item.getBoundingClientRect()
+    if (inner.top < outer.top || inner.bottom > outer.bottom - 24) box.scrollTop += inner.top - outer.top - outer.height / 3
+  }
+
+  // What works on the painted page itself, before the app is up: a pick in a page picker (data-shell-navigate: the reference
+  // pages' phone picker, whose options are addresses) goes to that page, and a copy button (data-shell-copy names the
+  // element whose text it copies) copies at once, as the app's do, and shows it has (data-copied, the app's mark).
+  shell.addEventListener('change', event => {
+    const picker = event.target instanceof Element && event.target.closest('select[data-shell-navigate]')
+    if (picker && picker.value) location.assign(picker.value)
+  })
   shell.addEventListener('click', event => {
     // Only a press a person made is held for the app: a click a script dispatched is not.
     if (!event.isTrusted) return
+    const copy = event.target instanceof Element && event.target.closest('button[data-shell-copy]')
+    if (copy) {
+      const text = document.querySelector(copy.dataset.shellCopy)?.textContent
+      if (text != null && navigator.clipboard) navigator.clipboard.writeText(text).then(() => { copy.dataset.copied = ''; setTimeout(() => { delete copy.dataset.copied }, 1800) }, () => {})
+      start()
+      return
+    }
     const button = event.target instanceof Element && event.target.closest(set.press || 'button.fac-cta')
     if (!button) return
     window.__nightmailShellPress = button

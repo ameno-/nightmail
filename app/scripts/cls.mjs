@@ -54,7 +54,7 @@
 // no request is in flight, fonts are loaded and the page has rendered and gone idle twice in a row; there are no
 // fixed sleeps, and polling pages settle between polls.
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -299,6 +299,14 @@ const pages = ids => [
   ['Docs · signed out', '/docs', { user: null }],
   ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
   ['Docs · signed out operation', '/docs/api/sendEmail', { user: null }],
+  // A reference page is painted from its HTML for a visitor (app/site-pages.ts): one far down the contents (kept in view),
+  // and one opened at its example.
+  ['Docs · signed out operation far down', '/docs/api/receiveSesSnsEvent', { user: null }],
+  ['Docs · signed out operation at its example', '/docs/api/createInboxAppPassword#docs-example-title', { user: null }],
+  // What a reader does before the app takes over is kept (lib/shell-takeover.ts, home/shell/boot.js): the contents they
+  // scrolled stay where they left them, and a pick in the phone's page picker goes to that page.
+  ['Docs · signed out operation, contents scrolled first', '/docs/api/sendEmail', { user: null, firstTouch: 'contents' }],
+  ['Docs · signed out operation, picked on a phone', '/docs/api/sendEmail', { user: null, firstTouch: 'pick', phoneOnly: true }],
   // No connection yet: Get started is up at once, whole, while onboarding starts Hosted mail.
   ['Onboarding', '/onboarding', { user: 'ona' }],
   // Get started on the built-in domain, ready (onboarding/get-started.tsx): the Agent tab, and By hand's key and send example.
@@ -683,6 +691,10 @@ const phonePages = new Set([
   'Docs · MCP guide',
   'Docs · section',
   'Docs · signed out',
+  'Docs · signed out operation',
+  'Docs · signed out operation far down',
+  'Docs · signed out operation, picked on a phone',
+  'Docs · operation',
   'Signed out',
   'Support chat',
   'Overview · sending limits dialog',
@@ -909,7 +921,10 @@ async function masking(page, hover, shell) {
 }
 
 async function measure(browser, job, fx) {
-  const origin = fx.origins[job.index % fx.origins.length];
+  // The docs go to the server at the address their reference pages are painted for (paintedPort, below), so a visitor's
+  // load is the painted page's.
+  const docs = [job.path, job.from].some(path => path?.startsWith('/docs'));
+  const origin = docs && paintedPort ? fx.origins[0] : fx.origins[job.index % fx.origins.length];
   const context = await browser.newContext({ ...devices[job.device], colorScheme: job.scheme, ...job.still && { reducedMotion: 'reduce' } });
   const result = { page: job.name, path: job.path, scheme: job.scheme, device: job.device, mode: job.mode, cls: null, entries: [], longTask: null, error: null };
   let page, net;
@@ -979,8 +994,32 @@ async function measure(browser, job, fx) {
     // (app/painted-page.ts, lib/shell-takeover.ts): wake it, as a reader would, so the painted page and the takeover are
     // both measured and an in-app click lands in the app.
     if (await page.evaluate(() => !!document.querySelector('#price-shell, #page-shell'))) {
+      // A legal or reference page painted for visitors says what the app's says once it takes over, word for word: the
+      // frame, menus and contents too, not only the document (app/site-pages.ts checks that much as it builds).
+      const words = () => page.evaluate(() => { const el = document.getElementById('page-shell') ?? document.querySelector('#root > *'); return el?.innerText.replace(/\s+/g, ' ').trim() ?? '' });
+      // A pick in the painted phone picker goes to the page picked, before the app is up.
+      if (job.firstTouch === 'pick') {
+        const target = await page.evaluate(() => { const picker = document.querySelector('#page-shell select'); return [...picker?.options ?? []].find(option => !option.disabled && option.value !== picker.value && option.value.startsWith('/docs/api/'))?.value ?? null; });
+        if (!target) problems.push('the painted page has no page picker to pick in');
+        else {
+          await page.selectOption('#page-shell select', target);
+          await page.waitForURL(url => url.pathname === target, { timeout: 15_000 }).catch(() => problems.push(`a pick in the painted page picker didn't go to ${target}`));
+          await settle(page, net);
+        }
+      }
+      const painted = await page.evaluate(() => !!document.getElementById('page-shell')) ? await words() : null;
+      // The contents the reader scrolled before the app is up stay where they left them.
+      const contents = job.firstTouch === 'contents' ? await page.evaluate(() => { const box = document.querySelector('#page-shell .ui-subnav__scroll'); box.scrollTop += 400; return box.scrollTop; }) : null;
       await page.keyboard.press('Shift');
       await page.waitForFunction(() => !document.querySelector('#price-shell, #page-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the painted page'));
+      if (contents !== null) {
+        const now = await page.evaluate(() => document.querySelector('#root .ui-subnav__scroll')?.scrollTop ?? null);
+        if (now === null || Math.abs(now - contents) > 1) problems.push(`the contents scrolled to ${contents} before the app took over are at ${now} after`);
+      }
+      if (painted !== null) {
+        const app = await words();
+        if (app !== painted) { let at = 0; while (app[at] === painted[at]) at++; problems.push(`the painted page's words differ from the app's after it takes over, at character ${at}: “…${painted.slice(Math.max(0, at - 40), at + 60)}…” painted, “…${app.slice(Math.max(0, at - 40), at + 60)}…” in the app`); }
+      }
       await settle(page, net);
     }
     if (job.support) {
@@ -1358,10 +1397,18 @@ os.execv(chrome, [chrome, *sys.argv[1:]])
 `, { mode: 0o700 });
   chrome = launcher;
 }
+// The address the build's reference pages are painted for (app/site-pages.ts, VITE_PUBLIC_URL: package.json's cls script and
+// CI's build name one on this machine), which the first server takes, or null where the build paints none.
+const paintedPort = (() => {
+  try {
+    const origin = /<script src="\/theme\.js"[^>]* data-origin="(http:\/\/127\.0\.0\.1:(\d+))"/.exec(readFileSync(join(repo, television ? 'app/dist-tv' : 'app/dist', 'docs/api/sendEmail.html'), 'utf8'));
+    return origin ? Number(origin[2]) : null;
+  } catch { return null; }
+})();
 const browserPromise = chromium.launch({ ...chrome ? { executablePath: chrome } : { channel: 'chrome' }, args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] })
   .finally(() => { if (launcherDir) rmSync(launcherDir, { recursive: true, force: true }); });
 browserPromise.catch(() => {});
-const fx = await start(repo, { dist: television ? 'app/dist-tv' : 'app/dist', servers: Math.min(2, Math.ceil(workers / 8)), delay: apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, throttle, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
+const fx = await start(repo, { dist: television ? 'app/dist-tv' : 'app/dist', port: paintedPort, servers: Math.min(2, Math.ceil(workers / 8)), delay: apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, throttle, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
   await browserPromise.then(b => b.close(), () => {});
   throw error;
 });
@@ -1372,12 +1419,12 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [pass, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, disclose, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start, wide }] of television ? televisionPages : pages(ids)) {
+  for (const [pass, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, disclose, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start, wide, firstTouch }] of television ? televisionPages : pages(ids)) {
     if (only && !only.test(name) || pass === 'phone' && !television && !phonePages.has(name) || phoneOnly && pass !== 'phone') continue;
     // `wide` pages take the desktop passes at 3440 × 1440.
     const device = wide && pass === 'desktop' ? 'wide' : pass;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, disclose, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, disclose, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, firstTouch, mode: 'load', slug: slug + '-load' };
     jobs.push(load);
     if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, step, start, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }

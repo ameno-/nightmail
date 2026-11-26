@@ -190,6 +190,14 @@ With late fonts the fallbacks keep most pages still, but no fallback wraps every
 
 **When CLS fails only sometimes**, look for something whose size depends on timing: a font swap (a `ch` width, text measured before the font loaded, a fallback without local metrics), an image without dimensions, or content that arrives after its placeholder with a different size. Make the gate reproduce it every run, then fix the page. Never raise the limit.
 
+
+### CLS: painted pages
+
+The price, legal and reference pages are painted from their own HTML before the app's code, and the app takes over at the reader's first key (`app/painted-page.ts`). The gate wakes each one with a key, so the painted page and the takeover are both measured.
+
+- **Fails when** a legal or reference page's words (`innerText`, the frame and the contents included) differ from the app's once it has taken over: "the painted page's words differ from the app's after it takes over, at character N". **Fix:** the painted page is drawn by the app's own components (`features/legal/prerender.tsx`, `features/docs/prerender.tsx`), so a difference is state the app sets after its first frame or data it reads that the build doesn't. Draw it from the first frame, or give the build the same data.
+- **The reference pages are painted for one address** (their examples name it; `public/theme.js` shows them only there, `data-origin`). The gate's build is made for `http://127.0.0.1:47173` (`VITE_PUBLIC_URL` in `.github/actions/cls-build` and `bun run cls`), and the fixture's first server takes that port; `cls.mjs` reads the address from the build and sends the docs pages there. A build without `VITE_PUBLIC_URL` paints no reference page, and the gate measures the docs as before.
+
 ## Preview stack (`preview`)
 
 `.github/scripts/preview.sh` runs what dev runs, before merge, with no Cloudflare or AWS account (about 15 s after installing and building the dashboard):
