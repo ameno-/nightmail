@@ -45,6 +45,8 @@ const UPDATE_EVERY = 30, FEEDBACK_WINDOW = 60, FEEDBACK_SETTLE = 5, FEEDBACK_WAI
 export const STAFF_MAIL_LIMITS = { perHour: 20, batch: 20, attempts: 3 } as const;
 /** The longest note a reply to a staff email becomes, in characters: its own words, without the quoted email. */
 export const STAFF_NOTE_MAX = 4000;
+/** Notes by email a conversation takes an hour, at most. */
+export const STAFF_NOTES_PER_HOUR = 20;
 
 type Words = { text: string; at: string };
 type Brief = { title: string; summary: string; ask: string; recommendation: string; tried?: { tool: string; finding: string }[] };
@@ -347,7 +349,9 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
 // ---------- replies to staff emails ----------
 
 /** Why a reply to a staff email became no note. */
-export type StaffReplyIgnored = 'unverified' | 'not_staff' | 'no_conversation' | 'empty';
+/** automated: an auto-reply (an out-of-office, a bounce) is no one's note; limited: the conversation already took
+ *  STAFF_NOTES_PER_HOUR notes by email in the last hour. */
+export type StaffReplyIgnored = 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited';
 export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: StaffReplyIgnored | null };
 /** A note's own ID, the same for one email in one conversation, so a retried reply is noted once. */
 const noteId = (conversationId: string, messageId: string) => `msg_${Array.from(createHash('sha256').update(`staff-reply:${conversationId}:${messageId}`).digest().subarray(0, 16), b => BASE32[b & 31]).join('')}`;
@@ -367,13 +371,14 @@ export async function staffReply(db: Database, config: Pick<Config, 'support'>, 
   const addressIds = config.support?.addressIds ?? [];
   if (!addressIds.length) return { reply: false };
   // The staff thread ingest filed it in (by its own In-Reply-To and References), at a support address. Nothing else names it.
-  const { rows: [found] } = await db.execute<{ key: string; text: string | null; html: string | null }>(sql`SELECT t.key, m.text, CASE WHEN m.text IS NULL THEN left(m.html, 200000) END AS html
+  const { rows: [found] } = await db.execute<{ key: string; text: string | null; html: string | null; automated: boolean }>(sql`SELECT t.key, m.text, CASE WHEN m.text IS NULL THEN left(m.html, 200000) END AS html, coalesce(m.automated, false) AS automated
     FROM mail_messages m JOIN support_staff_threads t ON t.thread_id = m.thread_id
     WHERE m.id = ${messageId} AND m.direction = 'inbound' AND EXISTS (SELECT FROM mailbox_messages mm WHERE mm.message_id = m.id AND mm.workspace_id = m.workspace_id
       AND mm.direction = 'inbound' AND mm.mailbox_id = ANY(${sql.param(addressIds)}::text[]))
     LIMIT 1`);
   if (!found) return { reply: false };
   const ignored = (why: StaffReplyIgnored): StaffReply => { log('warn', { code: 'SUPPORT_STAFF_REPLY_IGNORED', reason: why }); return { reply: true, notes: 0, ignored: why }; };
+  if (found.automated) return ignored('automated');
   // The sender: verified as a customer's email would be, and the team address or an operator's own.
   const evidence = await emailEvidence(db, addressIds, messageId);
   if (!evidence || evidence.verification !== 'dmarc' || evidence.evidence.selfSent) return ignored('unverified');
@@ -384,18 +389,21 @@ export async function staffReply(db: Database, config: Pick<Config, 'support'>, 
   if (!text) return ignored('empty');
   const { rows: conversations } = await db.execute<{ id: string }>(sql`SELECT id FROM support_conversations WHERE staff_thread = ${found.key} ORDER BY created_at, id LIMIT 20`);
   if (!conversations.length) return ignored('no_conversation');
-  let notes = 0;
+  let notes = 0, limited = 0;
   for (const { id } of conversations) {
     const note = noteId(id, messageId);
-    notes += await db.transaction(async tx => {
+    const made = await db.transaction(async (tx): Promise<0 | 1 | 'limited'> => {
       // The conversation's row lock numbers its messages; the note's own ID makes a retried reply a no-op.
       await tx.execute(sql`SELECT 1 FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
       if ((await tx.execute(sql`SELECT 1 FROM support_messages WHERE id = ${note}`)).rows.length) return 0;
+      if ((await tx.execute(sql`SELECT 1 FROM support_messages WHERE conversation_id = ${id} AND email_from IS NOT NULL AND created_at > now() - interval '1 hour' LIMIT ${STAFF_NOTES_PER_HOUR}`)).rows.length >= STAFF_NOTES_PER_HOUR) return 'limited';
       await tx.execute(sql`WITH c AS (UPDATE support_conversations SET messages = messages + 1 WHERE id = ${id} RETURNING messages)
         INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id, email_from) SELECT ${note}, ${id}, c.messages, 'staff', 'note', ${text}, ${operator?.user_id ?? null}, ${evidence.from} FROM c`);
       return 1;
     });
+    if (made === 'limited') limited++; else notes += made;
   }
+  if (!notes && limited) return ignored('limited');
   log('info', { code: 'SUPPORT_STAFF_REPLY_NOTED', notes, by: operator ? 'operator' : 'team' });
   return { reply: true, notes, ignored: null };
 }
@@ -458,7 +466,7 @@ export function registerSupportStaffMail(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/support/staff-mail/replies', operationId: 'operatorSupportStaffMailReply',
     description: 'Before the support platform treats an email to a support address as a customer\u2019s (the binding only): whether it replies to a staff email, and if so the internal note it became, or why it became none. reply false: handle it as any support email. reply true: never a conversation, never answered.',
     request: { body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/), team: z.string().trim().max(320).nullable().describe('The team address the support platform sends staff email to (TICKET_TO).') }).strict()) },
-    responses: { 200: response(z.object({ reply: z.boolean(), notes: z.number().int().optional(), ignored: z.enum(['unverified', 'not_staff', 'no_conversation', 'empty']).nullable().optional() })), ...errors } }), async c => {
+    responses: { 200: response(z.object({ reply: z.boolean(), notes: z.number().int().optional(), ignored: z.enum(['unverified', 'not_staff', 'no_conversation', 'empty', 'automated', 'limited']).nullable().optional() })), ...errors } }), async c => {
     await supportPlatformOnly(c);
     const body = c.req.valid('json');
     return c.json(await staffReply(c.env.db, c.env.config, body.messageId, body.team), 200);

@@ -222,7 +222,7 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
      * handle it as any support email), and if so the note it became on its conversation, or why none (ignored).
      */
     staffMailReply: (messageId: string, team: string | null) =>
-      call<{ reply: boolean; notes?: number; ignored?: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | null }>('POST', '/v1/operator/support/staff-mail/replies', { messageId, team }),
+      call<{ reply: boolean; notes?: number; ignored?: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null }>('POST', '/v1/operator/support/staff-mail/replies', { messageId, team }),
     /**
      * A /v1/support request for one registered conversation: a GET, or a write (POST /v1/support/scope or notes). The
      * conversation rides on the runtime, never in the request; Nightmail derives the customer from its row and answers

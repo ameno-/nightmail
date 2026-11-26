@@ -94,7 +94,7 @@ export interface SupportPlatform {
   staffMailReply(messageId: string, team: string | null): Promise<PlatformReply<StaffReply>>;
 }
 /** What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply). */
-export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | null };
+export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null };
 /** A staff email to send from the support address to the team: a new thread, or a reply in threadId to replyToMessageId. */
 export type StaffEmail = { key: string; threadId: string | null; replyToMessageId: string | null; subject: string; text: string; html: string };
 /** A platform reply's body, or (any other status than `ok`) a NightmailError the work queue can classify. */
