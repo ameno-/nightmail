@@ -8,7 +8,7 @@ import { acceptIntake, acceptSupport, blockUnconfigured, holdAtEdge, intakeAddre
 import { readiness } from './replay.js';
 import { log, logError } from './log.js';
 import { FAVICON_LINKS, favicon } from './favicon.js';
-import { addresses, productName } from '../../api/src/brand.js';
+import { productName } from '../../api/src/brand.js';
 export { SupportConversation } from './conversation.js';
 export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
 export { SupportTriage } from './triage.js';
@@ -85,7 +85,7 @@ async function startChat(request: Request, env: Env): Promise<Response> {
   if (env.CHAT_START && !(await env.CHAT_START.limit({ key: `user:${handoff.userId}` })).success) return fail(429, 'RATE_LIMITED', 'Too many conversations started. Try again in a minute.', { ...headers, 'retry-after': '60' }, { retryAfter: 60 });
   const now = Date.now(), dayAgo = now - 86_400_000;
   const today = await env.DB.prepare('SELECT count(*) AS n FROM conversations WHERE user_id = ? AND created_at > ?').bind(handoff.userId, dayAgo).first<{ n: number }>();
-  if ((today?.n ?? 0) >= CONVERSATIONS_PER_DAY) return fail(429, 'RATE_LIMITED', `You can start ${CONVERSATIONS_PER_DAY} support conversations a day. Continue an earlier one, or email ${addresses.support}.`, { ...headers, 'retry-after': '3600' }, { retryAfter: 3600 });
+  if ((today?.n ?? 0) >= CONVERSATIONS_PER_DAY) return fail(429, 'RATE_LIMITED', `You can start ${CONVERSATIONS_PER_DAY} support conversations a day. Continue an earlier one.`, { ...headers, 'retry-after': '3600' }, { retryAfter: 3600 });
   const conversationId = newId('conv');
   // The handoff's jti opens one conversation; the unique key makes a concurrent replay lose.
   const claimed = await env.DB.batch([
@@ -99,7 +99,7 @@ async function startChat(request: Request, env: Env): Promise<Response> {
   if (!opened.ok) {
     await env.DB.prepare("UPDATE conversations SET status = 'closed', closed_at = ? WHERE id = ?").bind(Date.now(), conversationId).run();
     return opened.code === 'HANDOFF_USED' ? fail(409, 'HANDOFF_USED', 'This handoff already opened a conversation. Get a fresh one.', headers)
-      : opened.code === 'CONVERSATION_LIMIT' ? fail(429, 'RATE_LIMITED', `You have too many open support conversations. Continue an earlier one, or email ${addresses.support}.`, { ...headers, 'retry-after': '3600' }, { retryAfter: 3600 })
+      : opened.code === 'CONVERSATION_LIMIT' ? fail(429, 'RATE_LIMITED', `You have too many open support conversations. Continue an earlier one.`, { ...headers, 'retry-after': '3600' }, { retryAfter: 3600 })
       : fail(503, 'SUPPORT_UNAVAILABLE', 'Support could not open your account just now. Try again in a minute.', headers);
   }
   const chat = await chatToken(env.SUPPORT_ROOT_SECRET, conversationId, handoff.userId);
@@ -280,7 +280,7 @@ function confirm(env: Env): Response {
 /** Support chat lives in the dashboard's Help panel; direct visits to / or /chat (such as a handoff URL) land here instead of 404. */
 function supportPage(env: Env): Response {
   const dashboard = new URL(env.NIGHTMAIL_ORIGIN).origin;
-  return page(`${productName} Support`, `<h1>${productName} Support</h1><p>Support chat lives in the <a href="${dashboard}">${productName} dashboard</a>. Sign in and open Help, or email <a href="mailto:${addresses.support}">${addresses.support}</a> with your support reference.</p>`);
+  return page(`${productName} Support`, `<h1>${productName} Support</h1><p>Support chat lives in the <a href="${dashboard}">${productName} dashboard</a>. Sign in and open Help.</p>`);
 }
 
 // Route templates for the request line, never the raw path: paths carry conversation and ticket IDs and confirm tokens,
