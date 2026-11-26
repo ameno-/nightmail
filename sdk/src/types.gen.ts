@@ -223,6 +223,10 @@ export type ConnectionSummary = {
          * Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends.
          */
         used: number;
+        /**
+         * Present when, though it sends to members only, a reply (replyToInboundThread) may go once to the sender of the message it answers, if that sender passed authentication.
+         */
+        repliesToSenders?: true;
     } | null;
     /**
      * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.

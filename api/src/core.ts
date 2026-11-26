@@ -124,6 +124,8 @@ export interface Config {
   /** Hosted only: the parent domain of every workspace's built-in domain (src/builtin-domain.ts), and who those send to. */
   builtinDomain?: string;
   builtinScope: 'anyone' | 'members';
+  /** NIGHTMAIL_BUILTIN_REPLIES: a reply from a built-in domain may go once to a verified sender (builtin-domain.ts builtinReplyException); null: off. */
+  builtinReplies?: { perDay: number; perRecipientPerDay: number } | null;
   /** Hosted only: the platform workspace's list of waitlist joins and sign-ups (src/signups.ts signupsList). */
   signupsListId?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */

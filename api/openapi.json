@@ -573,6 +573,13 @@
               "used": {
                 "type": "integer",
                 "description": "Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends."
+              },
+              "repliesToSenders": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ],
+                "description": "Present when, though it sends to members only, a reply (replyToInboundThread) may go once to the sender of the message it answers, if that sender passed authentication."
               }
             },
             "required": [

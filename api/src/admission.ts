@@ -83,6 +83,8 @@ export type AdmissionRequest = {
   /** A scheduled single send (UTC instant): admitted now without charges, and as a send again at its time. */
   scheduledAt?: string;
   incoming?: number; autoPause?: boolean;
+  /** Replaces the installation's built-in policy for this one decision: only a reply builtinReplyException allowed. */
+  builtin?: ReturnType<typeof builtinPolicy>;
 };
 /** The send_admission(...) call. `actor` is a jsonb {id, domains}; `assets` the attachment IDs the sender may use. */
 export async function admission(runtime: Runtime, workspaceId: SQL | string, actor: SQL, request: AdmissionRequest, extra?: SQL, assets: SQL = sql`'[]'::jsonb`) {

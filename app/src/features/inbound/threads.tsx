@@ -286,7 +286,9 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
           <RecipientList label="From" values={[senderOf(senderAddress).address.toLowerCase()]} people={new Map([[senderOf(senderAddress).address.toLowerCase(), senderOf(senderAddress)]])} />
           {resolved.to.length ? <RecipientList label="To" values={resolved.to} people={people} /> : <p className="mailbox-composer__to">This reply has no recipients outside your own addresses.</p>}
           {resolved.cc.length > 0 && <RecipientList label="Cc" values={resolved.cc} people={people} />}
-          {membersOnly && <p className="mailbox-composer__to inbound-recipients__warning">{builtin!.name} is your built-in domain: for now it replies only to members of this workspace. To answer anyone else, <Link to="/domains">add a domain of your own</Link>.</p>}
+          {membersOnly && <p className="mailbox-composer__to inbound-recipients__warning">{builtin!.repliesToSenders
+            ? <>{builtin!.name} is your built-in domain: for now it replies to members of this workspace, and once to a sender who wrote to it and passed authentication. To answer anyone else, <Link to="/domains">add a domain of your own</Link>.</>
+            : <>{builtin!.name} is your built-in domain: for now it replies only to members of this workspace. To answer anyone else, <Link to="/domains">add a domain of your own</Link>.</>}</p>}
           {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to a different address than the one it came from (<bdi><PrivateAddress value={target.from.address} /></bdi>).</p>}
         </>}
     </div>
