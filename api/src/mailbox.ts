@@ -198,7 +198,9 @@ async function subdomainViews(runtime: Runtime, domain: typeof domains.$inferSel
 async function receivingParent(c: Ctx, domainId: string) {
   const domain = await operationDomain(c, domainId);
   const [parent] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, domain.workspaceId), eq(mailboxDomains.domainId, domain.id), isNull(mailboxDomains.parentId)));
-  if (!parent || (!c.env.config.multiTenant && !['provisioning', 'waiting_for_mx', 'active'].includes(parent.status))) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Enable receiving for ${domain.name} before adding subdomains.`);
+  if (!parent || (!c.env.config.multiTenant && !['provisioning', 'waiting_for_mx', 'active'].includes(parent.status))) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant
+    ? `${domain.name} doesn\u2019t receive mail yet. Add a receiving host with POST /v1/inbound/domains/${domain.id}/hosts and {"name":"<subdomain>"} (or turn receiving on with POST /v1/inbound/domains/${domain.id}/enable), then add subdomains.`
+    : `Enable receiving for ${domain.name} first: POST /v1/inbound/domains/${domain.id}/enable, then add subdomains.`);
   return { domain, parent };
 }
 async function subdomainRow(c: Ctx, parent: typeof mailboxDomains.$inferSelect, subdomainId: string) {
