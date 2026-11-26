@@ -108,6 +108,11 @@ To send people to your own unsubscribe or preference page, set the campaign's or
 Every opt-out marks the contact \`unsubscribed\`, stops later campaigns to them and sends a
 \`contact.subscription_changed\` webhook event.
 
+A campaign about one kind of mail can name a topic (\`topicId\`, from listTopics): it then skips the people
+who opted out of that topic, and its unsubscribe opts people out of that topic alone (their other
+marketing goes on). The footer link opens a preference page with every topic and Unsubscribe from all.
+Unsubscribed from all always wins over a topic. Not on a required notice.
+
 ## Required notices
 
 A required notice (\`requiredNotice: true\`, where the workspace has them) has no Unsubscribe link:
