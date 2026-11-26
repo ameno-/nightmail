@@ -22,9 +22,10 @@ export const DOCS: Doc[] = [
 
 /** A vendor's pricing page needs this much of its own to be worth an address: a page with less is a template with a name
  *  in it, and the build refuses it (docProblems). */
-/** The search phrase as a question a title may ask ("Cheapest email API? 15 priced …": docs/cheapest.ts), which states
- *  nothing about Nightmail; the superlatives check reads the page without it. */
-const QUESTION = /^(?:cheapest|best) email API\? /i
+/** The one search phrase a title may ask as a question, on the one page that answers it: /cheapest-email-api's "Cheapest
+ *  email API? 15 priced …" (docs/cheapest.ts), which states nothing about Nightmail. Exactly that, case-sensitive, and only
+ *  there; nothing about "best" is exempt. */
+const QUESTION = { path: '/cheapest-email-api', title: /^Cheapest email API\? / }
 
 export const ENOUGH = { pricePoints: 4, citedFacts: 1, sizes: 3 }
 
@@ -44,7 +45,7 @@ export function docProblems(): string[] {
     if (doc.searchTitle.length > 60) problems.push(`${doc.path}'s title is over 60 characters: ${doc.searchTitle}`)
     if (doc.description.length < 140 || doc.description.length > 160) problems.push(`${doc.path}'s description isn't 140 to 160 characters (${doc.description.length}): ${doc.description}`)
     if (!doc.cited.length) problems.push(`${doc.path}'s table cites no source.`)
-    if (/\b(?:cheapest|best) (?:email|transactional|api|provider|service|option|choice|alternative|way to send)|Nightmail[^.]*\b(?:cheapest|best)\b/i.test([doc.searchTitle, doc.description, JSON.stringify([doc.h1, doc.answer, doc.cardWords, doc.sections, doc.copy, doc.llms])].join(' ').replace(QUESTION, '')))
+    if (/\b(?:cheapest|best) (?:email|transactional|api|provider|service|option|choice|alternative|way to send)|Nightmail[^.]*\b(?:cheapest|best)\b/i.test([doc.path === QUESTION.path ? doc.searchTitle.replace(QUESTION.title, '') : doc.searchTitle, doc.description, JSON.stringify([doc.h1, doc.answer, doc.cardWords, doc.sections, doc.copy, doc.llms])].join(' ')))
       problems.push(`${doc.path} says "cheapest" or "best": no page states either of Nightmail (Ryan, A294).`)
     if (/\bAmazon SES\b|\bBento\b/.test(JSON.stringify(doc))) problems.push(`${doc.path} names Amazon SES or Bento: pages compare only providers Nightmail costs less than (Ryan, A294).`)
   }
