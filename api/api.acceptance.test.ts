@@ -10625,7 +10625,15 @@ describe('Hosted MCP OAuth and tools', () => {
               [await inbound(opsAddress, 'Ingest did not vouch for it.', { authorVerified: false }), 'unverified'],
               [await inbound(team, `On Tue, Nightmail support <${support}> wrote:\n> Only the quoted email.`), 'empty'],
             ] as const) assert.deepEqual(await judged(id), { reply: true, notes: 0, ignored: why }, why);
+            // An auto-reply (an out-of-office) from a staff address is no one's note.
+            const away = await inbound(opsAddress, 'I am out of the office until Monday.');
+            await db.query('UPDATE mail_messages SET automated = true WHERE id = $1', [away]);
+            assert.deepEqual(await judged(away), { reply: true, notes: 0, ignored: 'automated' });
             assert.equal((await notes(alpha)).length, 2, 'Nothing new.');
+            // At most STAFF_NOTES_PER_HOUR notes by email a conversation takes in an hour.
+            const { STAFF_NOTES_PER_HOUR } = await import('./src/support-staff-mail.js');
+            await db.query("INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, email_from) SELECT 'msg_' || translate(substr(md5(random()::text || g), 1, 16), '0189', 'wxyz'), $1, 1000 + g, 'staff', 'note', 'Earlier.', $2 FROM generate_series(1, $3::int) g", [beta, team, STAFF_NOTES_PER_HOUR]);
+            assert.deepEqual(await judged(await inbound(team, 'One note too many.', { thread: threads[beta]!.thread })), { reply: true, notes: 0, ignored: 'limited' });
             // A staff thread with no conversation (mail nobody answered): nothing to note on.
             const loose = unique('thread');
             await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [loose, home]);
