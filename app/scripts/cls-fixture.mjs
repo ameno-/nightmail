@@ -977,7 +977,7 @@ export async function seed(fx) {
     sampled: 3200, exact: true, counts: { flagged: 21, deadDomains: 4, unengaged: 0, unengagedBase: 0, neverMailed: 140, softFailing: 2, proven: 3010, byReason: { invalid: 0, disposable: 12, typo_domain: 5, role: 4, dead: 0, no_mail_domain: 0 } },
     lastSend: null, recentBlocklist: 0, values: { FLAGGED_SOURCE: 21 / 3200, DEAD_DOMAINS: 4 / 3200, NEVER_MAILED: 140 / 3200, RECENT_BLOCKLIST: 0 }, band: 'low', factors: [], previous: { flaggedSource: 64 / 3200, band: 'elevated', factors: [{ code: 'FLAGGED_SOURCE', level: 'elevated' }] },
     review: { verdict: 'ready', required: null, reasons: [] } })]);
-  const { conversation: supportConversation, email: supportEmail, action: supportAction } = await supportInbox(db, hook.webhook?.id ?? hook.id);
+  const { conversation: supportConversation, email: supportEmail, action: supportAction, feedback: supportFeedback } = await supportInbox(db, hook.webhook?.id ?? hook.id);
 
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
@@ -1130,6 +1130,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, imageEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, continueConversation, continueMessage, linkConversation, linkMessage, answerConversation, answerMessage, outConversation, outMessage,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, supportFeedback, continueConversation, continueMessage, linkConversation, linkMessage, answerConversation, answerMessage, outConversation, outMessage,
   };
 }
