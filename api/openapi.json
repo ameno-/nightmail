@@ -20,7 +20,7 @@
       },
       {
         "title": "Receive (optional)",
-        "text": "Publish the receiving MX record from the domain page. Hosted Nightmail receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Nightmail, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
+        "text": "Publish the receiving MX record from the domain page. Hosted Nightmail receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Nightmail, or when you choose it. Create an inbox with POST /v1/inboxes and read mail with GET /v1/inboxes/{id}/messages (or subscribe to message.received with POST /v1/inbound/webhooks)."
       },
       {
         "title": "Reply",
@@ -23852,12 +23852,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { createAgentSetupToken } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await createAgentSetupToken({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { createAgentSetupToken } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await createAgentSetupToken({\n  client,\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/agent/setup-tokens' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/agent/setup-tokens\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -24011,12 +24011,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { getAgentSetupToken } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await getAgentSetupToken({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { getAgentSetupToken } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await getAgentSetupToken({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/agent/setup-tokens/resource_123' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/agent/setup-tokens/resource_123\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -24691,12 +24691,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { lookUpAgentDevice } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await lookUpAgentDevice({\n  client,\n  body: {\n    \"userCode\": \"BCDF-GHJK\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { lookUpAgentDevice } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await lookUpAgentDevice({\n  client,\n  body: {\n    \"userCode\": \"BCDF-GHJK\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/agent/device/lookup' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"userCode\": \"BCDF-GHJK\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/agent/device/lookup\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"userCode\": \"BCDF-GHJK\"\n}'"
           }
         ]
       }
@@ -24838,12 +24838,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { listWaitingAgentDevices } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await listWaitingAgentDevices({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { listWaitingAgentDevices } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await listWaitingAgentDevices({\n  client,\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/agent/device/waiting' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/agent/device/waiting\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -25018,12 +25018,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { approveAgentDevice } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await approveAgentDevice({\n  client,\n  body: {\n    \"userCode\": \"BCDF-GHJK\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { approveAgentDevice } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await approveAgentDevice({\n  client,\n  body: {\n    \"userCode\": \"BCDF-GHJK\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/agent/device/approve' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"userCode\": \"BCDF-GHJK\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/agent/device/approve\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"userCode\": \"BCDF-GHJK\"\n}'"
           }
         ]
       }
@@ -25198,12 +25198,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { denyAgentDevice } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await denyAgentDevice({\n  client,\n  body: {\n    \"userCode\": \"BCDF-GHJK\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { denyAgentDevice } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await denyAgentDevice({\n  client,\n  body: {\n    \"userCode\": \"BCDF-GHJK\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/agent/device/deny' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"userCode\": \"BCDF-GHJK\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/agent/device/deny\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"userCode\": \"BCDF-GHJK\"\n}'"
           }
         ]
       }
@@ -42395,12 +42395,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendDomainTestEmail } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await sendDomainTestEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendDomainTestEmail } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await sendDomainTestEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/test-send' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/domains/resource_123/test-send\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       }
@@ -42565,12 +42565,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { getDomainDnsSetup } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await getDomainDnsSetup({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { getDomainDnsSetup } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await getDomainDnsSetup({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/dns-setup' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/domains/resource_123/dns-setup\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -42742,12 +42742,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { completeDomainDnsSetup } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await completeDomainDnsSetup({\n  client,\n  path: {\n    \"id\": \"resource_123\",\n    \"token\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { completeDomainDnsSetup } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await completeDomainDnsSetup({\n  client,\n  path: {\n    \"id\": \"resource_123\",\n    \"token\": \"example\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/dns-setup/return/example' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/domains/resource_123/dns-setup/return/example\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -46209,12 +46209,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { releaseSenderStanding } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await releaseSenderStanding({\n  client,\n  body: {\n    \"checklist\": {\n      \"bouncedRemoved\": true,\n      \"listSourceConfirmed\": true\n    }\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { releaseSenderStanding } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await releaseSenderStanding({\n  client,\n  body: {\n    \"checklist\": {\n      \"bouncedRemoved\": true,\n      \"listSourceConfirmed\": true\n    }\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/sender-score/release' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"checklist\": {\n    \"bouncedRemoved\": true,\n    \"listSourceConfirmed\": true\n  }\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/sender-score/release\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"checklist\": {\n    \"bouncedRemoved\": true,\n    \"listSourceConfirmed\": true\n  }\n}'"
           }
         ]
       }
@@ -75817,46 +75817,28 @@
       "name": "Domains"
     },
     {
-      "name": "Inbound addresses"
-    },
-    {
-      "name": "Inbound threads"
-    },
-    {
-      "name": "Inbound webhooks"
-    },
-    {
-      "name": "Inbound events"
+      "name": "Agent inboxes"
     },
     {
       "name": "Inbound domains"
     },
     {
+      "name": "Inbound threads"
+    },
+    {
+      "name": "Inbound events"
+    },
+    {
+      "name": "Inbound webhooks"
+    },
+    {
       "name": "Webhooks"
-    },
-    {
-      "name": "Events"
-    },
-    {
-      "name": "Metrics"
     },
     {
       "name": "Attachments"
     },
     {
-      "name": "Templates"
-    },
-    {
-      "name": "Campaigns"
-    },
-    {
-      "name": "Newsletters"
-    },
-    {
-      "name": "Audience"
-    },
-    {
-      "name": "Consent"
+      "name": "Metrics"
     },
     {
       "name": "ApiKeys"
@@ -75865,16 +75847,19 @@
       "name": "Settings"
     },
     {
-      "name": "Regions"
+      "name": "Campaigns"
     },
     {
-      "name": "Workspaces"
+      "name": "Templates"
     },
     {
-      "name": "Feedback"
+      "name": "Audience"
     },
     {
-      "name": "Auth"
+      "name": "Consent"
+    },
+    {
+      "name": "Newsletters"
     },
     {
       "name": "Routing"
@@ -75886,10 +75871,25 @@
       "name": "Endpoints"
     },
     {
-      "name": "Agent inboxes"
+      "name": "Billing"
     },
     {
-      "name": "Billing"
+      "name": "Feedback"
+    },
+    {
+      "name": "Inbound addresses"
+    },
+    {
+      "name": "Regions"
+    },
+    {
+      "name": "Workspaces"
+    },
+    {
+      "name": "Auth"
+    },
+    {
+      "name": "Events"
     }
   ]
 }

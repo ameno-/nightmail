@@ -85,7 +85,7 @@ function sdkSample(document: Json, path: string, method: string, pathItem: Json,
     if (operation.operationId === 'sendEmailBatch') options.body.emails = options.body.emails.map(completeEmail);
   }
   const renderedOptions = Object.entries(options).map(([key, value]) => `  ${key}: ${JSON.stringify(value, null, 2).replaceAll('\n', '\n  ')},`).join('\n');
-  if (operation.tags?.includes('Workspaces')) return `import { createClient } from '${sdkPackage}/client';\nimport { ${operation.operationId} } from '${sdkPackage}';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
+  if (isDashboardSessionOnly(operation)) return `import { createClient } from '${sdkPackage}/client';\nimport { ${operation.operationId} } from '${sdkPackage}';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
   return `import { createClient } from '${sdkPackage}/client';\nimport { ${operation.operationId} } from '${sdkPackage}';\n\nconst client = createClient({\n  baseUrl: '${publicOrigin}',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.${apiKeyEnv}\n    : undefined,\n});\n\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\n\nconsole.log(result.data);`;
 }
 
@@ -100,7 +100,7 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
   if (operation.operationId === 'sendEmail') body = completeEmail(body);
   if (operation.operationId === 'sendEmailBatch') body.emails = body.emails.map(completeEmail);
   const lines = [`curl --request ${method.toUpperCase()} \\`, `  --url '${publicOrigin}${target}' \\`, `  --header "Authorization: Bearer $${apiKeyEnv}"`];
-  if (operation.tags?.includes('Workspaces')) {
+  if (isDashboardSessionOnly(operation)) {
     lines[1] = `  --url "\${NIGHTMAIL_ORIGIN}${target}" \\`;
     lines[2] = `  --header "Origin: $NIGHTMAIL_ORIGIN" \\\n  --cookie "$NIGHTMAIL_COOKIE_JAR"`;
   }
@@ -119,14 +119,50 @@ export const quickstart: { title: string; text: string; code?: string }[] = [
   { title: 'Add and verify your domain', text: 'In the dashboard, open Domains and add it, or call POST /v1/domains with {"name":"acme.com"}. Publish the DNS records it returns at your DNS provider. Sending works once GET /v1/domains/{id} reports sending: "verified", usually within minutes of the records resolving. A domain whose records are still unproven after 72 hours is released.' },
   { title: 'Create an API key', text: `In the dashboard, open API keys in the sidebar and choose Create key. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as ${apiKeyEnv} on your server and never ship it to a browser.` },
   { title: 'Send', text: '202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator sends use your daily sending limit like any other send, but never count towards your sender score.', code: quickstartCurl },
-  { title: 'Receive (optional)', text: `Publish the receiving MX record from the domain page. Hosted ${productName} receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to ${productName}, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks.` },
+  { title: 'Receive (optional)', text: `Publish the receiving MX record from the domain page. Hosted ${productName} receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to ${productName}, or when you choose it. Create an inbox with POST /v1/inboxes and read mail with GET /v1/inboxes/{id}/messages (or subscribe to message.received with POST /v1/inbound/webhooks).` },
   { title: 'Reply', text: 'POST /v1/inbound/threads/{threadId}/reply answers the newest message from its receiving address and sets In-Reply-To and References.' },
 ];
 // Guides beyond the first five minutes, for /docs.md and /llms.txt; the dashboard shows the same text as a Docs guide.
 export const guides: { id: string; title: string; text: string; code?: string; language?: string }[] = [agentSetupGuide, builtinDomainGuide, webhookSignatureGuide];
-// Getting started first; account and installation plumbing last.
-const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', 'Inbound webhooks', 'Inbound events', 'Inbound domains', 'Webhooks', 'Events', 'Metrics', 'Attachments', 'Templates', 'Campaigns', 'Newsletters', 'Audience', 'Consent', 'ApiKeys', 'Settings', 'Regions', 'Workspaces', 'Feedback', 'Auth'];
+// Core sending and receiving first; campaigns and rules next; dashboard, self-hosted, webhooks and deprecated last.
+const CORE_TAGS = ['Emails', 'Domains', 'Agent inboxes', 'Inbound domains', 'Inbound threads', 'Inbound events', 'Inbound webhooks', 'Webhooks', 'Attachments', 'Metrics', 'ApiKeys', 'Settings'] as const;
+const ADVANCED_TAGS = ['Campaigns', 'Templates', 'Audience', 'Consent', 'Newsletters', 'Routing', 'Rules', 'Endpoints', 'Billing', 'Feedback'] as const;
+const PLUMBING_TAGS = ['Inbound addresses', 'Regions', 'Workspaces', 'Auth', 'Events'] as const;
+const tagOrder: readonly string[] = [...CORE_TAGS, ...ADVANCED_TAGS, ...PLUMBING_TAGS];
 const tagRank = (tag: string) => { const index = tagOrder.indexOf(tag); return index === -1 ? tagOrder.length : index; };
+const TAG_TIERS: readonly { heading: string; note: string; tags: ReadonlySet<string> }[] = [
+  { heading: 'Core API', note: 'Sending, domains, inboxes, receiving, webhooks, attachments, metrics and credentials.', tags: new Set(CORE_TAGS) },
+  { heading: 'Campaigns, audience & automation', note: 'Bulk campaigns, templates, contacts/lists/segments, newsletters, routing, rules, endpoints and billing.', tags: new Set(ADVANCED_TAGS) },
+  { heading: 'Dashboard, self-hosted, webhooks & deprecated', note: 'Mostly dashboard-session administration, Amazon SNS receivers, self-hosted SES region setup and deprecated /v1/inbound/addresses aliases.', tags: new Set(PLUMBING_TAGS) },
+];
+const START_HERE_OPS = [
+  { id: 'createDomain', role: 'Add a domain and get its DNS records' },
+  { id: 'getDomain', role: 'Check domain verification status' },
+  { id: 'verifyDomain', role: 'Trigger a fresh DNS verification check' },
+  { id: 'sendEmail', role: 'Queue an email (202 = queued)' },
+  { id: 'getEmail', role: 'Check delivery status of a sent email' },
+  { id: 'enableInboundDomain', role: 'Turn on receiving for a verified domain' },
+  { id: 'createInbox', role: 'Create a receiving inbox/address' },
+  { id: 'listInboxMessages', role: 'Read messages received by an inbox' },
+  { id: 'getInboxMessage', role: 'Read one received message and its extracted codes/links' },
+] as const;
+const SNS_WEBHOOK_OPS = new Set(['receiveSesSnsEvent', 'receiveCloudFormationSnsEvent']);
+const SELF_HOSTED_OPS = new Set(['configureRegion', 'provisionRegion', 'configureRegionAutoValidation']);
+const DASHBOARD_BEARER_OPS = new Set(['bindMcpConnection', 'listAgents', 'revokeAgent']);
+function isDashboardSessionOnly(operation: Json): boolean {
+  const sec: Json[] = operation.security ?? [];
+  const hasSession = sec.some(s => 'dashboardSession' in s || 'secureDashboardSession' in s);
+  const hasBearer = sec.some(s => 'bearerAuth' in s);
+  return (hasSession && !hasBearer) || Boolean(operation.tags?.includes('Workspaces'));
+}
+function operationMarker(operation: Json): string {
+  const labels: string[] = [];
+  if (operation.deprecated) labels.push('deprecated');
+  if (SNS_WEBHOOK_OPS.has(operation.operationId)) labels.push('SNS webhook');
+  else if (isDashboardSessionOnly(operation) || DASHBOARD_BEARER_OPS.has(operation.operationId)) labels.push('dashboard-only');
+  if (SELF_HOSTED_OPS.has(operation.operationId)) labels.push('self-hosted');
+  return labels.length ? ` [${labels.join(', ')}]` : '';
+}
 
 export function createOpenApiDocument(app: App) {
   const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: `${productName} API`, version: '0.1.0', description: 'Send, receive and reply to email on your own domains. 202 means queued, not delivered.' } }) as Json;
@@ -203,6 +239,27 @@ function guidesMarkdown() {
 export const tagSlug = (tag: string) => tag.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const intro = (document: Json) => `# ${productName} API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`${sdkPackage}\`\n\n`;
 
+function startHereMarkdown(entries: ReturnType<typeof operationEntries>, link: (id: string, method: string, path: string, role: string) => string) {
+  const byId = new Map(entries.map(entry => [entry.operation.operationId as string, entry]));
+  const rows = START_HERE_OPS.flatMap(({ id, role }) => {
+    const entry = byId.get(id);
+    return entry ? [link(id, entry.method.toUpperCase(), entry.path, role)] : [];
+  });
+  return `## Start here (core operations)\n\nMost integrations only need these ${rows.length} operations to verify a domain, send mail and receive replies:\n\n${rows.join('\n')}\n\n`;
+}
+
+function tieredGroups(groups: ReturnType<typeof grouped>) {
+  const assigned = new Set<string>();
+  const tiers = TAG_TIERS.map(tier => {
+    const matched = groups.filter(({ tag }) => tier.tags.has(tag));
+    for (const { tag } of matched) assigned.add(tag);
+    return { ...tier, groups: matched };
+  }).filter(tier => tier.groups.length);
+  const other = groups.filter(({ tag }) => !assigned.has(tag));
+  if (other.length) tiers.push({ heading: 'Other', note: '', tags: new Set(other.map(g => g.tag)), groups: other });
+  return tiers;
+}
+
 export function createMarkdownDocs(document: Json, operationId?: string): string | null {
   const entries = operationEntries(document);
   if (operationId) {
@@ -211,8 +268,9 @@ export function createMarkdownDocs(document: Json, operationId?: string): string
     const tag = entry.operation.tags?.[0] ?? 'API';
     return `${intro(document)}[API index](/docs.md) · [${tag} reference](/docs/tags/${tagSlug(tag)}.md)\n\n${operationMarkdown(document, entry)}`;
   }
-  const index = grouped(document, entries).map(({ tag, entries }) => `## ${tag}\n\nFull reference: [${tag}](/docs/tags/${tagSlug(tag)}.md)\n\n${entries.map(entry => `- [${title(entry.operation.operationId)}](/docs/operations/${entry.operation.operationId}.md) — \`${entry.method.toUpperCase()} ${entry.path}\``).join('\n')}`).join('\n\n');
-  return `${intro(document)}${quickstartMarkdown()}## API reference by tag\n\nEach tag below links to its complete reference (every operation with parameters, request body, SDK and cURL examples, and responses). Each operation also has its own page.\n\n${index}\n`;
+  const startHere = startHereMarkdown(entries, (id, method, path, role) => `- [${title(id)}](/docs/operations/${id}.md) — \`${method} ${path}\` — ${role}`);
+  const index = tieredGroups(grouped(document, entries)).map(tier => `### ${tier.heading}\n\n${tier.note ? `${tier.note}\n\n` : ''}${tier.groups.map(({ tag, entries }) => `#### ${tag}\n\nFull reference: [${tag}](/docs/tags/${tagSlug(tag)}.md)\n\n${entries.map(entry => `- [${title(entry.operation.operationId)}](/docs/operations/${entry.operation.operationId}.md) — \`${entry.method.toUpperCase()} ${entry.path}\`${operationMarker(entry.operation)}`).join('\n')}`).join('\n\n')}`).join('\n\n');
+  return `${intro(document)}${quickstartMarkdown()}${startHere}## API reference by tag\n\nEach tag below links to its complete reference (every operation with parameters, request body, SDK and cURL examples, and responses). Each operation also has its own page. Operations marked \`[dashboard-only]\`, \`[SNS webhook]\`, \`[self-hosted]\` or \`[deprecated]\` are not needed for ordinary API-key integrations.\n\n${index}\n`;
 }
 
 export function createTagMarkdownDocs(document: Json, slug: string): string | null {
@@ -222,6 +280,9 @@ export function createTagMarkdownDocs(document: Json, slug: string): string | nu
 }
 
 export function createLlmsText(document: Json): string {
-  const groups = grouped(document, operationEntries(document));
-  return `# ${productName}\n\n> ${productName} is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}## Canonical documentation\n\n- Markdown API reference index: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/${sdkPackage}\n- MCP endpoint: /mcp\n\n## Markdown API reference by tag\n\n${groups.map(({ tag }) => `- ${tag}: /docs/tags/${tagSlug(tag)}.md`).join('\n')}\n\n## Focused operation documentation\n\n${groups.flatMap(group => group.entries).map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
+  const entries = operationEntries(document);
+  const groups = grouped(document, entries);
+  const startHere = startHereMarkdown(entries, (id, method, path, role) => `- ${title(id)} (${method} ${path}): /docs/operations/${id}.md — ${role}`);
+  const byTier = tieredGroups(groups).map(tier => `### ${tier.heading}\n\n${tier.groups.map(({ tag }) => `- ${tag}: /docs/tags/${tagSlug(tag)}.md`).join('\n')}`).join('\n\n');
+  return `# ${productName}\n\n> ${productName} is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}${startHere}## Canonical documentation\n\n- Markdown API reference index: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/${sdkPackage}\n- MCP endpoint: /mcp\n\n## Markdown API reference by tag\n\n${byTier}\n\n## Focused operation documentation\n\n${groups.flatMap(group => group.entries).map(entry => `- ${title(entry.operation.operationId)}${operationMarker(entry.operation)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
 }
