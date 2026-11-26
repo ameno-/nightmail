@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { log, type DbExecutor, type Runtime } from './core.js';
 import { placementRoot } from './domain-registry.js';
 
-// When the domains Nightmail sends from and links on were registered (domain_registrations, migration 545), from each
+// When the domains Nightmail sends from and links on were registered (domain_registrations, migration 546), from each
 // registry's public RDAP record, so the send review can tell a domain new to the internet from one only new here
 // (src/standing-model.ts judgeReadiness). Looked up by the hourly pass only, never while a request waits: the registrable
 // domains of every claimed domain and of the link domains, missing ones first, a known date again after REFRESH.known

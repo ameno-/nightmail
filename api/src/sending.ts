@@ -690,7 +690,9 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
   const links = await linkReview(runtime, db, a.workspaceId, row.draft.from), linkHost = links.origin ? new URL(links.origin).hostname.toLowerCase() : null;
   // Clean: within the ramp check's bounce and complaint lines, no reply named a blocklist in the days it went out, and the
   // delivery history has counted it (src/delivery-history.ts), so a send not counted yet is never taken for clean.
-  const clean = sql`bounced<=accepted*${c.bounceRate}::float8 AND (complained<${c.complaints}::int OR complained<=accepted*${c.complaintRate}::float8) AND NOT blocked AND counted`;
+  // Without the private ramp lines (NIGHTMAIL_RAMP) the review is today's: clean is the bounce and complaint lines alone.
+  const tuned = !!runtime.config.rampLines;
+  const clean = sql`bounced<=accepted*${c.bounceRate}::float8 AND (complained<${c.complaints}::int OR complained<=accepted*${c.complaintRate}::float8)${tuned ? sql` AND NOT blocked AND counted` : sql``}`;
   const [f] = (await db.execute<{ first_seen: string | null; dmarc: string | null; mail_from: string | null; ws_largest: number; dom_largest: number; dom_clean: number;
     dom_accepted: number; dom_bounced: number; dom_complained: number; ws_accepted: number | null; ws_bounced: number | null; ws_complained: number | null; usual_day: number | null; first_sent: string | null;
     blocked_day: string | null; last_clean_done: string | null; uncounted: boolean;
@@ -742,7 +744,7 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
   const judged = judgeReadiness({ recipients: n, matched: audience.matched, risky: audience.risky, neverMailed: audience.neverMailed, domainAgeDays: ageDays,
     dmarc: dmarc === null ? null : !['missing', 'invalid'].includes(dmarc), largestSend: f!.dom_largest, largestCleanSend: f!.dom_clean,
     accepted: wsAccepted, bounced: Number(f!.ws_bounced ?? 0), complained: Number(f!.ws_complained ?? 0), enforced: live,
-    registeredDays: reg?.days ?? null, linkRegisteredDays: link?.registeredDays ?? null, usualDay, lines: rampLines(runtime.config.rampLines),
+    registeredDays: reg?.days ?? null, linkRegisteredDays: link?.registeredDays ?? null, usualDay, lines: tuned ? rampLines(runtime.config.rampLines) : undefined,
     blocklisted: !!f!.blocked_day && !(f!.last_clean_done && f!.last_clean_done.slice(0, 10) > f!.blocked_day), blocklistUncounted: !!f!.uncounted });
   const batches = judged.plan, first = batches[0] ?? 0, fmt = (v: number) => v.toLocaleString('en-US'), share = (v: number, of: number) => `${(100 * v / of).toFixed(of && v / of < 0.1 ? 1 : 0)}%`;
   const rampAt = live ? rampStart(await rampHistory(db, a.workspaceId)) : RAMP.steps.length;
