@@ -51496,7 +51496,7 @@
           }
         ],
         "summary": "Create an inbox connection",
-        "description": "Generate client config with a key limited to selected inboxes. Key shown once.",
+        "description": "Key shown once. Generate client config with a key limited to selected inboxes.",
         "requestBody": {
           "required": true,
           "content": {

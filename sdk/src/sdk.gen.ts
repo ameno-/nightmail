@@ -3600,7 +3600,7 @@ export const testEndpoint = <ThrowOnError extends boolean = false>(options: Opti
 /**
  * Create an inbox connection
  *
- * Generate client config with a key limited to selected inboxes. Key shown once.
+ * Key shown once. Generate client config with a key limited to selected inboxes.
  */
 export const createInboxConnection = <ThrowOnError extends boolean = false>(options: Options<CreateInboxConnectionData, ThrowOnError>): RequestResult<CreateInboxConnectionResponses, CreateInboxConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateInboxConnectionResponses, CreateInboxConnectionErrors, ThrowOnError>({
     security: [
