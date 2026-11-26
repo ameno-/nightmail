@@ -41,6 +41,9 @@
     "NIGHTMAIL_LINK_SAAS_ZONE_ID": "7b0d7306312182f66e12368f93efbb96",
     "NIGHTMAIL_LINK_SAAS_TARGET": "cname.nightmailedge.com",
     "NIGHTMAIL_LINK_HOST_WORKSPACES": "ws_90b0696c835f49fbaa9396fb726e9fe2",
+    // How fast the link domain warms up (src/link-domains.ts): recipients a day on its first day, at full volume, the day it
+    // reaches full volume, and the most one workspace may use of a day, in percent.
+    "NIGHTMAIL_LINK_WARMUP": "2000:100000:36:25",
     // Mail apps connect to imap.nightmail.dev and smtp.nightmail.dev (the gateway certificate names both). Shown only
     // while the deploy binds MAILGW_API_TOKEN (bane:mailGatewayEnabled in infra/pulumi/Pulumi.production.yaml).
     "MAILGW_PUBLIC_DOMAIN": "nightmail.dev",
@@ -75,6 +78,9 @@
     // Built-in domains send only to workspace members' own verified sign-in addresses for now: nightmail.email is a new
     // domain, and mail from a domain that young is what blocklists act on first.
     "NIGHTMAIL_BUILTIN_SEND_SCOPE": "members",
+    // Meanwhile a reply may go once to someone outside the workspace who wrote to it and passed authentication
+    // (src/builtin-domain.ts): at most this many a workspace a day, and to one person a day from all workspaces together.
+    "NIGHTMAIL_BUILTIN_REPLIES": "5,2",
     // Abuse monitoring (src/abuse.ts) records from this instant on, monitor-only (NIGHTMAIL_ABUSE_ENFORCE stays unset).
     "NIGHTMAIL_ABUSE_MONITORING": "2026-11-21T15:30:00Z",
     "ACCOUNT_CLIENT_ID": "bane-production",
