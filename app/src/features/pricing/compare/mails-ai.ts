@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, readOn, type Entry, type Offer } from '../prices.ts'
+import { fact, readOn, type Entry, type Offer } from '../prices.ts'
 
 // Nightmail vs Mails.ai (/compare/mails-ai): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mails.ai's own pages on CHECKED.
@@ -37,5 +37,4 @@ export const mailsAi: Entry = {
   ],
   // Mails.ai's readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'domain', 'free', 'campaign', 'send', 'route'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} agent inboxes, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

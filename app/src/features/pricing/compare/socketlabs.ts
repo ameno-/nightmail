@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs SocketLabs (/compare/socketlabs): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // SocketLabs' own pricing page on CHECKED: Core and the Pro sizes its slider sells, each with its overage per email.
@@ -46,5 +46,4 @@ export const socketLabs: Entry = {
   ],
   // SocketLabs' readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'agent', 'campaign', 'domain', 'route'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

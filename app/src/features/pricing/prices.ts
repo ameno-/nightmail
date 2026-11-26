@@ -201,6 +201,8 @@ export type Entry = {
   /** The page's address: /compare/<slug>. */
   slug: string
   vendor: string
+  /** Another name buyers search the vendor by, beside it in the search result's title and description (searchWords). */
+  aka?: string
   /** Who the page is for, as onboarding asks it (api/src/workspace-focus.ts): its Get started signs in with ?focus=. */
   focus: WorkspaceFocus
   /** How the vendor charges and its price points, each with its source. */
@@ -224,14 +226,15 @@ export type Entry = {
   /** What the vendor's buyer may count on that Nightmail doesn't do ("signup forms", "a web archive"): said on the page
    *  and in its twin as "Not in the box", so a comparison on price doesn't stand in for one on features. */
   without?: string[]
-  /** The search result's and the link preview's description. */
-  description: string
   /** Questions the page answers, shown on it and given to search engines as an FAQ (FAQPage). */
   faq?: { question: string; answer: string }[]
 }
-/** An entry as the pages use it: with its three sizes and each fader size as the usage both prices are for. */
+/** An entry as the pages use it: with its three sizes and each fader size as the usage both prices are for, and its
+ *  search result's title and description (searchWords). */
 export type Comparison = Omit<Entry, 'sizes'> & {
   title: string
+  searchTitle: string
+  description: string
   path: string
   sizes: Usage[]
   use: (size: number) => Usage
@@ -245,7 +248,29 @@ export function comparisonOf(entry: Entry): Comparison {
       : m.per === 'received'
         ? (received: number): Usage => ({ contacts: 0, sent: 0, received, seats: 1 })
         : (sent: number): Usage => ({ contacts: 0, sent, received: 0, seats: 1 })
-  return { ...entry, title: `Nightmail vs ${entry.vendor}`, path: `/compare/${entry.slug}`, sizes: entry.sizes.map(use), use }
+  const sizes = entry.sizes.map(use)
+  return { ...entry, title: `Nightmail vs ${entry.vendor}`, ...searchWords(entry, sizes[1]!), path: `/compare/${entry.slug}`, sizes, use }
+}
+/** The board's opening size as a sentence names it, with both monthly prices, the competitor's plan and the day its
+ *  prices were read: what the search result's description (searchWords) and the Markdown twin's summary quote. */
+export function opening(entry: Pick<Entry, 'offer' | 'model'>, u: Usage) {
+  const m = entry.model, theirs = theirPrice(entry.offer, u)!
+  const size = m.per === 'contact' ? `${formatCount(u.contacts)} contacts emailed ${m.sendsPerContact} times a month`
+    : m.per === 'inbox' ? `${formatCount(u.inboxes ?? 0)} agent inboxes, each ${m.receivedPerInbox} in and ${m.sentPerInbox} out a month`
+      : m.per === 'received' ? `${formatCount(u.received)} emails received a month` : `${formatCount(u.sent)} emails a month`
+  return { size, theirs: money(theirs.cents), plan: theirs.plan, ours: nightmailBill(u.sent, u.received).text, day: dayOf(entry.offer.checked) }
+}
+/** A comparison's title and description in search results and link previews, made from its data: led by what someone
+ *  types ("<vendor> alternative", "<vendor> pricing"), then the board's opening size with both monthly prices and the day
+ *  the vendor's were read, and how the vendor charges (its lead's first sentence) or what else the page has. The title
+ *  fits 60 characters and the description 160 (price-pages.ts checks both): the first of these that fits. */
+function searchWords(entry: Entry, u: Usage): { searchTitle: string; description: string } {
+  const { vendor } = entry, { size, theirs, plan, ours, day } = opening(entry, u)
+  const named = entry.aka ? `${vendor} (${entry.aka})` : vendor, title = `${named} alternative: Nightmail vs ${vendor} pricing`
+  const head = `${named} pricing vs Nightmail, checked ${day}: ${size}, `, how = entry.lead.split(/(?<=\.) /)[0]!
+  const prices = [`${head}${vendor} ${theirs} (${plan}), Nightmail ${ours}.`, `${head}${vendor} ${theirs}, Nightmail ${ours}.`]
+  const words = [...prices.map(text => `${text} ${how}`), ...prices.map(text => `${text} See every size and what each includes.`), ...prices]
+  return { searchTitle: title.length <= 60 ? title : `${named} alternative and pricing · Nightmail`, description: words.find(text => text.length <= 160) ?? words.at(-1)! }
 }
 /** A comparison's unit as its page names it: the fader's label, the board's head and a size in a sentence. */
 export const UNITS = {
@@ -339,7 +364,6 @@ export function entryProblems(entry: Entry, today: string, panels: readonly stri
   if (entry.sizes.length !== 3 || entry.sizes.some(size => !(size > 0))) at('sizes', 'must be three sizes above zero.')
   if (entry.steps.length < 2 || entry.steps.some((size, i) => i > 0 && size <= entry.steps[i - 1]!)) at('steps', 'must be at least two sizes, smallest first.')
   if (entry.panels.length !== PANEL_SLOTS || new Set(entry.panels).size !== PANEL_SLOTS || entry.panels.some(id => !panels.includes(id))) at('panels', `must be ${PANEL_SLOTS} different panels of ${panels.join(', ')}.`)
-  if (!entry.description.trim() || entry.description.length > 160) at('description', 'must be a sentence or two, at most 160 characters.')
   for (const [i, item] of (entry.faq ?? []).entries()) if (!item.question.trim() || !item.answer.trim()) at(`faq[${i}]`, 'needs a question and its answer.')
   return problems
 }
