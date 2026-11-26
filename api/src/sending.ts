@@ -255,8 +255,8 @@ const Delivery = z.object({ total: z.number().int().describe('Fixed recipient co
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
   waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'ramp', 'link_record']), linkHold: z.enum(['daily_budget', 'blocklist']).optional().describe('When present, the daily pacing window is the shared link allowance, or the link record is held for operator review.'), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender\'s first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour\'s step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace\'s sending is paused, or with own link hosts, its domain\'s isn\'t active yet); it continues by itself.'),
-  stoppedDomains: z.array(z.object({ domain: z.string(), resolved: z.number().int().describe('Messages there with a result when it stopped.'), bounced: z.number().int().describe('Of those, hard bounces.'), stoppedAt: z.string() })).optional()
-    .describe('Recipient domains this campaign stopped sending to because nearly all of its mail there bounced for good (the rest of its recipients there are counted in canceled), oldest first, at most 50. Empty unless the guard is on.'),
+  stoppedDomains: z.array(z.object({ domain: z.string(), stoppedAt: z.string() })).optional()
+    .describe('Recipient domains this campaign stopped sending to because its mail there kept bouncing for good (the rest of its recipients there are counted in canceled, are not charged and are not suppressed), oldest first, at most 50. Empty unless the guard is on.'),
   feedbackLag: z.object({ oldestMs: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 /** The daily cap of a campaign's `index`th 24-hour window: its plan's batch (the last repeating), else pacePerDay; null for none. */
 const dailyCap = (row: Pick<typeof campaigns.$inferSelect, 'pacePlan' | 'pacePerDay' | 'windowIndex'>, index = row.windowIndex) =>
@@ -267,7 +267,7 @@ const firstBatchWait = (row: Pick<typeof campaigns.$inferSelect, 'pacePlan' | 'p
   const until = Date.parse(windowStartedAt) + row.paceFirstWaitMinutes * 60_000;
   return nowMs < until ? until : null;
 };
-type StoppedDomain = { domain: string; resolved: number; bounced: number; stoppedAt: string };
+type StoppedDomain = { domain: string; stoppedAt: string };
 function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null, stopped: StoppedDomain[] = []) {
   if (!row.reviewId) return null;
   const next = dailyCap(row) !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
@@ -277,7 +277,8 @@ function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'
     pacing: { perDay: row.pacePerDay, autoPause: row.autoPause, rateShare: row.rateShare ?? 1, windowStartedAt: row.windowStartedAt, windowExpanded: row.windowExpanded, nextWindowAt: next,
       plan: row.pacePlan, batch: row.pacePlan ? Math.min(row.windowIndex, row.pacePlan.length - 1) + 1 : null,
       firstBatch: row.pacePlan && row.paceFirstBatch && row.paceFirstWaitMinutes ? { size: row.paceFirstBatch, waitMinutes: row.paceFirstWaitMinutes } : null,
-      held: row.pacePlan && row.planHeld ? { ...row.planHeld, toGrow: 'It opens its next batch after a day with hard bounces at most 3% of what was accepted, complaints under 0.08% and no reply naming a blocklist: remove the addresses that bounce or complain, and fix whatever the blocklist lists.' } : null },
+      // Only while it still sends: a finished or canceled campaign isn't repeating a batch.
+      held: row.pacePlan && row.planHeld && ['sending', 'paused'].includes(row.state) ? { ...row.planHeld, toGrow: 'It opens its next batch after a day with hard bounces at most 3% of what was accepted, complaints under 0.08% and no reply naming a blocklist: remove the addresses that bounce or complain, and fix whatever the blocklist lists.' } : null },
     consent: row.consent ? { source: row.consent.source, confirmedAt: row.consent.confirmedAt } : null,
     pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { ...wait, until: row.waitingUntil } : null,
     feedbackLag: ['preparing', 'sending', 'paused'].includes(row.state) ? feedbackLag : null, stoppedDomains: stopped });
@@ -649,11 +650,12 @@ async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, 
   // Recipient domains a campaign stopped sending to (src/send-guards.ts), for its sender: one read by the table's key.
   const stopped = new Map<string, StoppedDomain[]>();
   const launched = rows.filter(row => row.reviewId).map(row => row.id);
-  if (launched.length) for (const item of (await db.execute<StoppedDomain & { campaign_id: string }>(sql`SELECT campaign_id, domain, resolved, bounced,
+  if (launched.length) for (const item of (await db.execute<StoppedDomain & { campaign_id: string }>(sql`SELECT campaign_id, domain,
       to_char(stopped_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "stoppedAt" FROM campaign_stopped_domains
       WHERE campaign_id = ANY(${sql.param(launched)}::text[]) AND workspace_id = ${a.workspaceId} ORDER BY campaign_id, stopped_at, domain`)).rows) {
     const list = stopped.get(item.campaign_id) ?? [];
-    if (list.length < 50) list.push({ domain: item.domain, resolved: item.resolved, bounced: item.bounced, stoppedAt: item.stoppedAt });
+    // The domain and when, never the counts that tripped it: those would show the private line (NIGHTMAIL_RAMP domainStop).
+    if (list.length < 50) list.push({ domain: item.domain, stoppedAt: item.stoppedAt });
     stopped.set(item.campaign_id, list);
   }
   return rows.map(row => {
@@ -4445,8 +4447,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const grows = !(opening && campaign.windowStartedAt && campaign.pacePlan?.length) || !guardLines.planHealth || (judged?.window === campaign.windowStartedAt ? judged.day.healthy : true);
     if (!grows) log('info', { code: 'CAMPAIGN_PLAN_HELD', campaignId: campaign.id, batch: campaign.windowIndex + 1 });
     // The sender sees a held plan, since when and why (delivery.pacing.held); it clears when the plan grows again.
-    if (opening && campaign.windowStartedAt && campaign.pacePlan?.length && guardLines.planHealth && judged?.window === campaign.windowStartedAt && (!grows || campaign.planHeld))
-      await db.execute(sql`UPDATE sending_campaigns SET plan_held=${grows ? null : JSON.stringify({ since: campaign.planHeld?.since ?? now(), batch: campaign.windowIndex + 1, why: planHeldWhy(judged.day) })}::jsonb WHERE workspace_id=${a.workspaceId} AND id=${campaign.id}`);
+    // Cleared whenever it grows (also when the guard was turned off since), so it never says a growing plan is held.
+    if (opening && campaign.windowStartedAt && campaign.pacePlan?.length && (!grows || campaign.planHeld))
+      await db.execute(sql`UPDATE sending_campaigns SET plan_held=${grows || !judged ? null : JSON.stringify({ since: campaign.planHeld?.since ?? now(), batch: campaign.windowIndex + 1, why: planHeldWhy(judged.day) })}::jsonb WHERE workspace_id=${a.workspaceId} AND id=${campaign.id}`);
     const windowStart = opening ? now() : campaign.windowStartedAt, windowIndex = opening && campaign.windowStartedAt ? campaign.windowIndex + (grows ? 1 : 0) : campaign.windowIndex;
     const windowUsed = opening ? 0 : campaign.windowExpanded, dayCap = dailyCap(campaign, windowIndex);
     // In the first window, before the first small batch's wait is over, only the first small batch goes.

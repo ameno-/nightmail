@@ -33425,7 +33425,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const later = await view();
       assert.deepEqual([await sentTo(dead), later.delivery.canceled > 0, later.delivery.expanded > 100], [deadFirst, true, true]);
       // Its sender sees the domain it stopped, and that the plan repeats its first batch because of the bounces.
-      assert.deepEqual(later.delivery.stoppedDomains.map((item: Json) => [item.domain, item.resolved, item.bounced, typeof item.stoppedAt]), [[dead, deadFirst, deadFirst, 'string']]);
+      // The domain and when, never the counts behind it (they'd show the private line).
+      assert.deepEqual(later.delivery.stoppedDomains.map((item: Json) => [Object.keys(item).sort().join(), item.domain, typeof item.stoppedAt]), [['domain,stoppedAt', dead, 'string']]);
       assert.deepEqual([later.delivery.pacing.held.batch, later.delivery.pacing.held.why, typeof later.delivery.pacing.held.toGrow], [1, ['bounces'], 'string']);
       // A plan's day: unhealthy (all bounced), so the same batch again; a clean one opens the next.
       const since = new Date(Date.now() - 3 * 86_400_000).toISOString();

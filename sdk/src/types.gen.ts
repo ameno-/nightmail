@@ -2040,18 +2040,10 @@ export type CampaignDelivery = {
         until: string;
     } | null;
     /**
-     * Recipient domains this campaign stopped sending to because nearly all of its mail there bounced for good (the rest of its recipients there are counted in canceled), oldest first, at most 50. Empty unless the guard is on.
+     * Recipient domains this campaign stopped sending to because its mail there kept bouncing for good (the rest of its recipients there are counted in canceled, are not charged and are not suppressed), oldest first, at most 50. Empty unless the guard is on.
      */
     stoppedDomains?: Array<{
         domain: string;
-        /**
-         * Messages there with a result when it stopped.
-         */
-        resolved: number;
-        /**
-         * Of those, hard bounces.
-         */
-        bounced: number;
         stoppedAt: string;
     }>;
     /**
