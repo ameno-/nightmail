@@ -50,12 +50,12 @@
 .pp-line[data-lead] { color: var(--ours); }
 /* The verdict as the television draws its type (home/tv/tv.tsx, the tube's shader, FRAG), still and in CSS, only on
    these two lines: the phosphor's glow round the letters (BLOOM .50, tinted .85 .92 1), the colour a tape smears to
-   the right, which only coloured type carries (BLEED .016 of the screen; here .05em, so the figures stay sharp at
-   320 px), and the scanlines over them (SCAN .30 deep, three device pixels a line). Paint only: the box, the words and
+   the right, which only coloured type carries (BLEED .016 of the screen; here a soft .04 to .09em, so the figures stay
+   sharp at 320 px), and the scanlines over them (SCAN .30 deep, three device pixels a line). Paint only: the box, the words and
    what a screen reader hears are the heading's own, painted with the page, and nothing moves. */
 .pp-verdict { position: relative; }
 .pp-line { text-shadow: 0 0 .3em rgb(217 235 255 / 26%); }
-.pp-line[data-lead] { text-shadow: .05em 0 rgb(157 174 255 / 38%), .1em 0 rgb(157 174 255 / 16%), 0 0 .3em rgb(170 190 255 / 34%); }
+.pp-line[data-lead] { text-shadow: .04em 0 .04em rgb(157 174 255 / 45%), .09em 0 .09em rgb(157 174 255 / 18%), 0 0 .3em rgb(170 190 255 / 34%); }
 .pp-verdict::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(to bottom, transparent 0 2px, rgb(0 0 0 / 30%) 2px 3px); }
 @media (min-resolution: 2dppx) { .pp-verdict::after { background: repeating-linear-gradient(to bottom, transparent 0 1px, rgb(0 0 0 / 30%) 1px 1.5px); } }
 .pp-caption { margin: 14px 0 0; color: var(--soft); font: 700 13px / 1.45 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; text-wrap: pretty; }
