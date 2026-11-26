@@ -24,6 +24,14 @@ export const SHOWN_OTHERS = 6
 /** A small count in words, as a caption says it: "six alternatives". */
 /** Under a table, what a dash means: no price was read for that size (a service may still sell one: Bird's deposit plan at
  *  10,000). One sentence for every page of several services, so they can't drift. */
+/** The days a page's prices were read, as its caption says them: "25 Nov 2026", or a span, "25–26 Nov 2026" (one month)
+ *  or "30 Nov to 1 Dec 2026". Shared by the pages of several services. */
+export function checkedOn(days: string[]) {
+  const sorted = [...new Set(days)].sort(), first = sorted[0]!, last = sorted.at(-1)!
+  if (first === last) return dayOf(first)
+  const [a, b] = [dayOf(first).split(' '), dayOf(last).split(' ')]
+  return a[1] === b[1] && a[2] === b[2] ? `${a[0]}–${dayOf(last)}` : a[2] === b[2] ? `${a[0]} ${a[1]} to ${dayOf(last)}` : `${dayOf(first)} to ${dayOf(last)}`
+}
 export const DASH = ' A dash: no price read for that size.'
 const spelled = (n: number) => ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'][n] ?? String(n)
 const month = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' })
@@ -50,7 +58,7 @@ export function vendorAlternatives(c: Comparison): Doc {
   if (!Number.isFinite(lowest) || counted.some(row => row.bills[1]!.theirsCents === null) || !(ours[1]!.oursUc < BigInt(lowest) * 1_000_000n))
     throw new Error(`/alternatives/${c.slug}'s headline would price ${counted.length} services from ${money(lowest)} at ${formatCount(sizes[1]!)}: each must have a price there above Nightmail's (docs/alternatives.ts).`)
   const checked = [...new Set([self, ...shown].map(row => row.o.offer.checked))].sort()
-  const when = checked.length === 1 ? dayOf(checked[0]!) : `${dayOf(checked[0]!)} to ${dayOf(checked.at(-1)!)}`
+  const when = checkedOn(checked)
 
   // ---------------------------------------------------------------- the page: the headline, one table, the facts
 
