@@ -240,6 +240,7 @@ const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
   createInbox: 'create', listInboxes: 'read', getInbox: 'read', updateInbox: 'modify', deleteInbox: 'modify', listInboxMessages: 'read', getInboxMessage: 'read', updateInboxMessage: 'modify', getInboxAttachment: 'read', replyToInboundThread: 'send', createInboundThread: 'send',
 };
 /** Better descriptions for directly published receiving tools, where the operation summary alone is thin. */
+// Bump INSTRUCTION_VERSION in mcp-session.ts for a new safety requirement, not a wording change.
 const DESCRIPTIONS: Record<string, string> = {
   sendFeedback: `Tell ${productName} what got in your way, or ask support about your workspace: what happened and what would have helped, with a request ID if you have one. Only message is needed. Filed for the ${productName} team. A question is answered by email to a person (behind this connection; for an API key, the workspace's owner), never through this tool, so don't wait or call again. One report per problem.`,
   updateWorkspaceSettings: 'Rename the workspace, set its focus (marketing, newsletter, developer, agents; the first leads) or its postal address (plain text, up to 6 lines and 300 characters, no HTML; null removes it). Campaigns and marketing sends show the address under Unsubscribe (CAN-SPAM); sendCampaign and scheduleCampaign refuse with POSTAL_ADDRESS_REQUIRED until it is set. Confirm the address with the user.',

@@ -33,27 +33,40 @@ function canonical(value: Json, schema = false): string {
 
 export const fingerprintTag = (text: string) => createHash('sha256').update(text).digest('base64url').slice(0, 16);
 
-// Each fixed-width tag covers ONE name + input contract: an old snapshot remains a subset after an
-// addition, without a release registry, previous schemas or a session store. At the catalog's 256
-// operation limit plus built-in tools this is under 4.3 KiB. Never used to authorize a request.
+// Three SHA-256 bytes per tool: four base64url characters with no padding. Joining the sorted
+// tags is exactly the encoding of their packed bytes. Collisions affect freshness only.
 export function toolSnapshot(tools: Tool[]): string {
-  return tools.map(tool => fingerprintTag(JSON.stringify(tool.name) + ':' + canonical(tool.inputSchema as Json, true))).sort().join('');
+  return tools.map(tool => {
+    const contract = [
+      JSON.stringify(tool.name), canonical(tool.inputSchema as Json, true), canonical((tool.outputSchema ?? null) as Json, true),
+      tool.annotations?.readOnlyHint ?? false, tool.annotations?.destructiveHint ?? true,
+    ].join('\n');
+    return fingerprintTag(contract).slice(0, 4);
+  }).sort().join('');
 }
-export const issueLegacySession = (access: string, snapshot: string) =>
-  `m1.${INSTRUCTION_VERSION}.${access}.${snapshot}.${crypto.randomUUID().replaceAll('-', '')}`;
+
+export const MAX_LEGACY_SESSION_CHARS = 2000;
+export function issueLegacySession(access: string, snapshot: string): string | null {
+  const id = `m2.${INSTRUCTION_VERSION}.${access}.${snapshot}.${crypto.randomUUID().replaceAll('-', '')}`;
+  return id.length <= MAX_LEGACY_SESSION_CHARS ? id : null;
+}
 
 export type StaleReason = 'contract_changed' | 'access_changed' | 'version_bumped' | 'malformed_id';
 export function staleLegacySession(id: string, access: string, snapshot: string): StaleReason | undefined {
-  // Old full-list hashes cannot tell us which inputs a client saw. Refresh once at cutover.
+  // Old full-list hashes cannot tell us which contracts a client saw. Refresh once at cutover.
   if (/^[a-f0-9]{16}\.[a-f0-9]{32}$/.test(id)) return 'version_bumped';
-  const parsed = id.length <= 4900 && /^m1\.(\d{1,9})\.([A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]*)\.([a-f0-9]{32})$/.exec(id);
-  if (!parsed || parsed[3].length % 16 !== 0) return 'malformed_id';
+  const parsed = id.length <= MAX_LEGACY_SESSION_CHARS && /^m2\.(\d{1,9})\.([A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]*)\.([a-f0-9]{32})$/.exec(id);
+  if (!parsed || parsed[3].length % 4 !== 0) return 'malformed_id';
   const [, version, previousAccess, held] = parsed;
   if (version !== String(INSTRUCTION_VERSION)) return 'version_bumped';
   if (held === snapshot) return;
-  const previous = held.match(/.{16}/g) ?? [];
-  if (previous.some((value, i) => i > 0 && value <= previous[i - 1])) return 'malformed_id';
+  const previous = held.match(/.{4}/g) ?? [];
+  if (previous.some((value, i) => i > 0 && value < previous[i - 1])) return 'malformed_id';
   if (previousAccess !== access) return 'access_changed';
-  const current = new Set(snapshot.match(/.{16}/g));
-  if (!previous.every(value => current.has(value))) return 'contract_changed';
+  // The held tags must occur in the same sorted order, including the multiplicity of a collision.
+  let matched = 0;
+  for (const tag of snapshot.match(/.{4}/g) ?? []) {
+    if (tag === previous[matched]) matched++;
+  }
+  if (matched !== previous.length) return 'contract_changed';
 }

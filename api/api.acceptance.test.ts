@@ -731,6 +731,16 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   const effective = (a: Json = {}) => ({ readOnlyHint: a.readOnlyHint ?? false, destructiveHint: a.destructiveHint ?? true, idempotentHint: a.idempotentHint ?? false, openWorldHint: a.openWorldHint ?? true, title: a.title });
   const listable = [...[...catalog.values()].map(op => op.tool), ...plain, ...workspaceTools, workspaceResource];
   assert.equal(listable.length, catalog.size + plain.length + 3);
+  // Budget both listing modes before filtering by deployment, toolset or credential. Leave 10%
+  // headroom so adding routes or built-in tools fails CI before an operator hits the wire limit.
+  const { toolSnapshot, issueLegacySession, staleLegacySession, MAX_LEGACY_SESSION_CHARS } = await import('./src/mcp-session.js');
+  const { supportTools } = await import('./src/mcp-support.js');
+  for (const tools of [[...catalog.values()].map(op => op.tool).concat(workspaceTools), [...plain, workspaceResource]]) {
+    const snapshot = toolSnapshot([...tools, ...supportTools].map(listedTool)), access = 'a'.repeat(16);
+    const id = issueLegacySession(access, snapshot);
+    assert.ok(id && id.length <= 0.9 * MAX_LEGACY_SESSION_CHARS, 'Largest catalog must leave 10% legacy session header headroom.');
+    assert.equal(staleLegacySession(id, access, snapshot), undefined);
+  }
   for (const tool of listable) {
     const listed = listedTool(tool);
     assert.deepEqual(effective(listed.annotations), effective(tool.annotations), tool.name);
@@ -5921,7 +5931,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const path = '/mcp?codemode=false';
     const init = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } };
     const contact = { name: 'listContacts', arguments: {} };
-    const release = async (revision: 'original' | 'copy' | 'contract') => {
+    const release = async (revision: 'original' | 'copy' | 'contract' | 'output') => {
       const app = await createOpenApiApp();
       const document = app.getOpenAPI31Document.bind(app);
       t.mock.method(app, 'getOpenAPI31Document', (...args: Parameters<typeof document>) => {
@@ -5934,6 +5944,10 @@ describe('Hosted MCP OAuth and tools', () => {
           post.description = 'A different description.';
         } else delete spec.paths['/v1/newsletters']!.get; // published in the next release
         if (revision === 'contract') post.parameters = [...post.parameters ?? [], { name: 'mode', in: 'query', required: true, schema: { type: 'string' } }];
+        if (revision === 'output') {
+          const response = spec.paths['/v1/contacts']!.get!.responses!['200'] as Json;
+          response.content['application/json'].schema.properties.total = { type: 'integer' };
+        }
         return spec;
       });
       return (key: string, method: string, params: Json, session?: string, headers = rpcHeaders as Record<string, string>) =>
@@ -5970,6 +5984,16 @@ describe('Hosted MCP OAuth and tools', () => {
         body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: contact } }) });
     assert.equal(child.status, 0, redact(child.stderr?.toString() ?? child.error?.message));
 
+    // Nothing changed except the listed response. Refuse the old ID before dispatch; one new
+    // handshake gives the client the new response schema and its calls keep working.
+    const output = await release('output');
+    const obsoleteOutput = await output(read.secret, 'tools/call', contact, reader);
+    assert.deepEqual([obsoleteOutput.status, (obsoleteOutput.body as Json).error.code], [404, -32001]);
+    const updated = await start(output, read.secret);
+    const relisted = ok(await output(read.secret, 'tools/list', {}, updated)).result.tools;
+    assert.deepEqual(relisted.find((tool: Json) => tool.name === contact.name).outputSchema.properties.total, { type: 'integer' });
+    for (let i = 0; i < 2; i++) assert.equal(ok(await output(read.secret, 'tools/call', contact, updated)).result.isError, false);
+
     const changed = await release('contract');
     const warnings: string[] = [];
     const capture = t.mock.method(console, 'warn', (line: string) => warnings.push(line));
@@ -5999,10 +6023,11 @@ describe('Hosted MCP OAuth and tools', () => {
   });
 
   test('legacy MCP contract fingerprints preserve input semantics in schema and literal positions', async () => {
-    const { toolSnapshot, staleLegacySession, issueLegacySession } = await import('./src/mcp-session.js');
+    const { toolSnapshot, staleLegacySession, issueLegacySession, MAX_LEGACY_SESSION_CHARS } = await import('./src/mcp-session.js');
     const schema = { type: 'object' as const, properties: { description: { type: 'string', enum: ['a','b'], format: 'email' }, title: { const: { description: ['x','y'] } } }, required: ['description','title'] };
     const snapshot = (inputSchema: Json, name = 'tool') => toolSnapshot([{ name, inputSchema: inputSchema as import('@modelcontextprotocol/server').Tool['inputSchema'] }]);
     const held = issueLegacySession('a'.repeat(16), snapshot(schema));
+    assert.ok(held);
     const reason = (inputSchema: Json, name?: string) => staleLegacySession(held, 'a'.repeat(16), snapshot(inputSchema, name));
     assert.equal(reason({ ...schema, title: 'New title', required: [...schema.required].reverse(), properties: {
       title: schema.properties.title, description: { description: 'New advice', ...schema.properties.description, enum: ['b','a'] } } }), undefined);
@@ -6013,8 +6038,32 @@ describe('Hosted MCP OAuth and tools', () => {
     }
     assert.equal(reason(schema, 'renamed'), 'contract_changed');
     assert.equal(staleLegacySession(held, 'a'.repeat(16), ''), 'contract_changed');
-    assert.equal(staleLegacySession(issueLegacySession('a'.repeat(16), ''), 'a'.repeat(16), snapshot(schema)), undefined);
-    assert.equal(staleLegacySession(held.replace(/^m1\.\d+/, 'm1.0'), 'a'.repeat(16), snapshot(schema)), 'version_bumped');
+    const access = 'a'.repeat(16), empty = issueLegacySession(access, '');
+    assert.ok(empty);
+    assert.equal(staleLegacySession(empty, access, snapshot(schema)), undefined);
+    assert.equal(staleLegacySession(held.replace(/^m2\.\d+/, 'm2.0'), 'a'.repeat(16), snapshot(schema)), 'version_bumped');
+
+    const tool = { name: 'tool', inputSchema: schema, outputSchema: schema };
+    const tag = toolSnapshot([tool]);
+    assert.equal(toolSnapshot([{ ...tool, outputSchema: { ...schema, title: 'New title', required: [...schema.required].reverse() },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false } }]), tag);
+    for (const change of [{ outputSchema: undefined }, { outputSchema: { ...schema, additionalProperties: false } },
+      { annotations: { readOnlyHint: true } }, { annotations: { destructiveHint: false } }]) {
+      assert.notEqual(toolSnapshot([{ ...tool, ...change }]), tag);
+    }
+
+    // Equal truncated tags are valid. A catalog addition preserves them; a removal still counts.
+    const collision = issueLegacySession(access, tag.repeat(2));
+    assert.ok(collision);
+    assert.equal(staleLegacySession(collision, access, tag.repeat(3)), undefined);
+    assert.equal(staleLegacySession(collision, access, tag), 'contract_changed');
+    const capacity = Math.floor((MAX_LEGACY_SESSION_CHARS - empty.length) / tag.length);
+    assert.ok(capacity >= 400);
+    const largest = issueLegacySession(access, tag.repeat(capacity));
+    assert.ok(largest);
+    assert.equal(staleLegacySession(largest, access, tag.repeat(capacity)), undefined);
+    assert.equal(issueLegacySession(access, tag.repeat(capacity + 1)), null);
+    assert.equal(staleLegacySession(largest.replace(tag, tag + tag), access, tag.repeat(capacity + 1)), 'malformed_id');
   });
 
   test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
@@ -12108,6 +12157,17 @@ describe('Hosted MCP OAuth and tools', () => {
             const operatorBytes = await wire(mine.token);
             t.diagnostic(`Plain tools/list: customer (an owner) ${customerBytes} bytes before and after; operator (an owner too) ${operatorOff} bytes off, ${operatorBytes} bytes on (+${operatorBytes - operatorOff})`);
             assert.ok(operatorBytes <= 50_000, `${operatorBytes} bytes`);
+            const { MAX_LEGACY_SESSION_CHARS } = await import('./src/mcp-session.js');
+            for (const [role, token] of [['customer', customer.token], ['operator', mine.token]]) {
+              const path = '/mcp?codemode=false', headers = { ...rpcHeaders, authorization: `Bearer ${token}` };
+              const init = await send('POST', path, headers, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+                protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'header-budget', version: '1' } } });
+              ok(init);
+              const id = init.headers.get('mcp-session-id');
+              assert.ok(id && id.length <= MAX_LEGACY_SESSION_CHARS);
+              const listed = ok(await send('POST', path, { ...headers, 'mcp-session-id': id }, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }));
+              t.diagnostic(`Hosted ${role}: accepted ${id.length}-character legacy ID for ${listed.result.tools.length} tools.`);
+            }
             for (const token of [customer.token, readOnly.token]) refused(await call(token, 'supportInbox'), 'TOOL_UNAVAILABLE');
 
             // Not approved: a human step, never data. The same code while it waits; nothing read.
