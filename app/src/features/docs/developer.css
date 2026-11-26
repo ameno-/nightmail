@@ -44,6 +44,15 @@
 .connect-agent__empty { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8) var(--space-12); font-size: var(--text-sm); }
 /* The agent prompt is prose for an agent to read: it wraps at every width instead of hiding its long lines behind a sideways scroll. */
 .developer-code.developer-code--prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* AgentPromptPanel (Get started, Docs): Copy, its line, then the prompt in a box that scrolls, its text fading where it
+   runs on. The page sets the box's height. */
+.agent-prompt__actions { display: flex; }
+.agent-prompt__actions[data-pending] { visibility: hidden; }
+@media (max-width: 640px) { .agent-prompt__actions > .ui-button { flex: 1; } }
+.agent-prompt__line { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.agent-prompt__box.developer-code { display: flex; padding: 0; overflow: hidden; }
+.agent-prompt__box > code { flex: 1; min-width: 0; padding: var(--space-12) var(--space-16); overflow-y: auto; --fade-top: 0px; --fade-bottom: 0px;
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent); }
 /* The send example takes the height of the tab shown: cURL doesn't leave the gap TypeScript needs. A click resizes it, which is not a layout shift. */
 .developer-client-panels--fit > .developer-client-panel:not([data-active]) { display: none; }
 /* Connect an agent: a fixed height, so the client panels (one shared cell) and the agents list loading or growing move

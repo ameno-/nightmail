@@ -1,16 +1,6 @@
-/* Hosted settings: a grouped rail on the page's surface beside one section at a time. */
-.hosted-settings { display: grid; flex: 1; grid-template-columns: 196px minmax(0, 1fr); gap: var(--space-40); align-items: start; }
-.settings-rail { position: sticky; top: 0; display: flex; flex-direction: column; gap: var(--space-20); }
-.settings-rail__groups { display: flex; flex-direction: column; gap: var(--space-20); }
-.settings-rail__title { display: flex; align-items: center; min-height: var(--control-height); font-size: var(--text-title); line-height: var(--leading-title); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-title); }
-.settings-rail__group { display: flex; flex-direction: column; gap: var(--space-2); }
-.settings-rail a { display: flex; align-items: center; height: 28px; padding-inline: var(--space-8); border-radius: var(--radius-xs); color: var(--color-muted); text-decoration: none; transition: background-color var(--motion-duration), color var(--motion-duration); }
-@media (hover: hover) and (pointer: fine) { .settings-rail a:hover { color: var(--color-text); background: var(--color-hover); } }
-.settings-rail a:focus-visible { color: var(--color-text); background: var(--color-hover); text-decoration: none; }
-.settings-rail a[aria-current='page'] { color: var(--color-text); background: var(--color-active-bg); font-weight: var(--font-weight-bold); }
-.settings-rail a[data-locked] { justify-content: space-between; gap: var(--space-4); }
-.settings-rail a[data-locked] svg { color: var(--color-faint); }
-.hosted-settings__content { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; padding-top: calc(var(--control-height) + var(--space-20)); animation: section-enter 120ms ease-out both; }
+/* Hosted settings: the list of sections (SubNav) beside one section at a time, its top level with the list's first group. */
+.hosted-settings__content { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; padding-top: var(--subnav-head); animation: section-enter 120ms ease-out both; }
+@container subnav (width < 880px) { .hosted-settings__content { padding-top: 0; } }
 .hosted-settings__content > .ui-section-header { margin-bottom: calc(-1 * var(--space-8)); }
 .settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: var(--space-8); }
 .hosted-settings__content > .settings-actions { margin-bottom: calc(-1 * var(--space-4)); }
@@ -72,21 +62,7 @@
 .settings-danger { margin-top: var(--space-24); }
 .settings-danger .settings-row__label > span:first-child { color: var(--color-danger); }
 
-/* Tablet and phone: the rail becomes a row of tabs under the title (scrolling sideways if it must), so each section
-   gets the full width. Phone: each row puts its label above a full-width control when the control is a field. */
-@media (max-width: 1100px) {
-  .hosted-settings { grid-template-columns: minmax(0, 1fr); align-content: start; gap: var(--space-20); }
-  .settings-rail { position: static; gap: var(--space-12); }
-  .settings-rail__groups { flex-direction: row; gap: var(--space-6); margin-inline: calc(-1 * var(--bleed, 0px)); padding-inline: var(--bleed, 0px); overflow-x: auto; }
-  /* The strip scrolls, so it clips: padding keeps room around the tabs, with negative margins so nothing moves. No
-     track under the tabs: the current one alone carries its marker. */
-  .settings-rail__groups { padding-block: var(--focus-reach); margin-block: calc(-1 * var(--focus-reach)); }
-  .settings-rail__group { display: contents; }
-  .settings-rail a { position: relative; flex: none; height: var(--control-height); padding-inline: var(--space-8); border-radius: 0; }
-  .settings-rail a[aria-current='page'] { background: none; }
-  .settings-rail a[aria-current='page']::after { content: ''; position: absolute; inset: auto 0 0; height: 1px; background: var(--color-text); }
-  .hosted-settings__content { padding-top: 0; }
-}
+/* Phone: each row puts its label above a full-width control when the control is a field. */
 @media (max-width: 640px) {
   .settings-row { grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-12); height: auto; min-height: 53px; padding-block: var(--space-8); }
   .settings-rows .settings-row__label > span { overflow: visible; white-space: normal; }
