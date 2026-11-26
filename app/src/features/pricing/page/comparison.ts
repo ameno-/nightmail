@@ -4,6 +4,7 @@ import { COMPARISONS } from '../compare/index.ts'
 import { comparisonQuestions } from '../questions.ts'
 import { dayOf, formatCount, lastChecked, money, nightmail, nightmailBill, sourcesOf, theirPrice, type Comparison, type Usage } from '../prices.ts'
 import type { PageDoc, Text } from './shape.ts'
+import { ownPages } from '../docs/registry.ts'
 
 // A comparison (/compare/<slug>) as a page (shape.ts): the verdict first, both prices at the comparison's middle size and
 // the day they were read; then the price table, every size the vendor's own page prices; the questions (questions.ts);
@@ -57,10 +58,11 @@ export function comparisonDoc(c: Comparison): PageDoc {
     }] }],
     questions: comparisonQuestions(c),
     sources: sourcesOf(c),
-    related: ORDERED.filter(other => other.focus === c.focus && other.slug !== c.slug).map(other => {
+    // The vendor's own pages first (docs/registry.ts: its pricing page), then the other comparisons of its kind.
+    related: [...ownPages(c.slug).map(path => ({ title: `${vendor} pricing`, path, line: `Every ${vendor} plan, and what a month costs at each size.` })), ...ORDERED.filter(other => other.focus === c.focus && other.slug !== c.slug).map(other => {
       const o = verdictOf(other)
       return { title: other.title, path: other.path, line: `${o.at.replaceAll('\u00a0', ' ').replace(/^Per/, 'At')}: ${productName} ${o.ours}, ${other.offer.vendor} ${o.theirs}.` }
-    }),
+    })],
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }, { name: vendor, path: c.path }],
     about: { name: vendor, url: c.offer.pricing }, modified: lastChecked(c), focus: c.focus,
     llms: `${productName} ${v.ours}, ${vendor} ${v.theirs}: ${v.at.replaceAll('\u00a0', ' ').toLowerCase()}.`,

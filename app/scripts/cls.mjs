@@ -375,6 +375,12 @@ const pages = ids => [
     ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
     ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
   ],
+  // The vendors' pricing pages (features/pricing/docs/), each its own HTML drawn from its data (page/), measured cold; an
+  // unknown vendor's is not found.
+  ['Pricing · SendGrid', '/pricing/sendgrid', { user: null }],
+  ['Pricing · Resend', '/pricing/resend', { user: null }],
+  ['Pricing · Mailchimp', '/pricing/mailchimp', { user: null }],
+  ['Pricing · unknown vendor', '/pricing/nobody', { user: null, notFound: true }],
   // The other comparisons, from the calculator's Compare line.
   ['Compare · AgentMail', '/compare/agentmail', { user: null, from: '/pricing', click: 'AgentMail' }],
   ['Compare · Bird', '/compare/bird', { user: null, from: '/pricing', click: 'Bird' }],
@@ -608,6 +614,9 @@ const phonePages = new Set([
   'Legal · privacy',
   'Pricing',
   'Pricing · large',
+  'Pricing · SendGrid',
+  'Pricing · Resend',
+  'Pricing · Mailchimp',
   'Compare · Mailchimp',
   'Compare · Mailchimp · steel frame',
   'Compare · Resend',

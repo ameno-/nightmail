@@ -13,6 +13,9 @@ import './pricing.css'
 const boardPage = () => import('./board-page')
 const PriceScene = lazy(() => boardPage().then(m => ({ default: m.PriceScene })))
 const BoardEnd = lazy(() => boardPage().then(m => ({ default: m.BoardEnd })))
+// A vendor's pricing page (/pricing/<vendor>: docs/) is drawn from its data as page/ draws every such page (page/view.tsx).
+const pageView = () => import('./page/view')
+const DocView = lazy(() => pageView().then(m => ({ default: m.DocView })))
 
 // Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor), linked
 // from the homepage's footer and from each other (live.ts).
@@ -24,7 +27,7 @@ export const fontsReady = Promise.race([
   new Promise(resolve => setTimeout(resolve, 3000)),
 ]).catch(() => {})
 
-const pageLinks = (label: (page: (typeof PRICE_PAGES)[number]) => string) => PRICE_PAGES.map(page => <NavLink key={page.path} to={page.path} end>{label(page)}</NavLink>)
+const pageLinks = (label: (page: (typeof PRICE_PAGES)[number]) => string) => PRICE_PAGES.filter(page => !page.doc).map(page => <NavLink key={page.path} to={page.path} end>{label(page)}</NavLink>)
 
 /** The page each price page's own file paints before this code (app/price-pages.ts, #price-shell: the same scene, over
  *  this one until now, with its CSS). It goes as this page is first drawn, in the same frame and at the same place, so
@@ -93,6 +96,14 @@ function PriceFrame({ title, children, end, scene }: { title: string; children: 
   </div>
 }
 
+/** A page drawn from its data (page/), once the fonts it is set in are in, under its own title. */
+function DocFrame({ title, children }: { title: string; children: ReactNode }) {
+  use(fontsReady)
+  useEffect(() => { document.title = title }, [title])
+  useLayoutEffect(() => { window.scrollTo(0, 0) }, [title])
+  return children
+}
+
 /** The three price pages are one page: the hall stays as the reader moves between them (App.tsx gives both addresses
  *  this component, so it isn't drawn again) and only its board changes (scene.tsx). An unknown comparison is not found. */
 export function PricePage() {
@@ -103,7 +114,9 @@ export function PricePage() {
   // The board's frame in the homepage's steel, while its concrete waits for a yes (board.tsx): ?frame=steel.
   const [search] = useSearchParams()
   // (/compare is a page only with the comparisons drawn from their data: page/pricing.tsx answers it there.)
-  if ((vendor !== null && !comparison) || pathname.replace(/\/+$/, '') === '/compare') return <PriceFrame title={`Page not found · ${productName.toLowerCase()}`}><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
+  const doc = pathname.startsWith('/pricing/') ? PRICE_PAGES.find(p => p.path === pathname.replace(/\/+$/, ''))?.doc : undefined
+  if (doc) return <DocFrame title={doc.searchTitle}><DocView doc={doc} /></DocFrame>
+  if ((vendor !== null && !comparison) || pathname.startsWith('/pricing/') || pathname.replace(/\/+$/, '') === '/compare') return <PriceFrame title={`Page not found · ${productName.toLowerCase()}`}><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
   // The tab's title is the one the page's HTML carries (price-pages.ts), so search engines read one title either way.
   return <PriceFrame title={page!.searchTitle} end={<BoardEnd comparison={comparison} />} scene>
     <PriceScene comparison={comparison} frame={search.get('frame')} />

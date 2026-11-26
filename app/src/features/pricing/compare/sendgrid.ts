@@ -9,7 +9,9 @@ const read = readOn(CHECKED)
 const SENDGRID = 'https://www.twilio.com/en-us/products/email-api/pricing'
 const PDF = 'https://www.twilio.com/content/dam/twilio-com/global/en/pricing/all-pricing/twi121--sendgrid-pricing-pdf-st1.pdf'
 const tier = (size: number, cents: number, quote: string, overage: number, overageQuote: string): Tier => ({ size, cents, overage, source: read(SENDGRID, quote), overageSource: read(PDF, overageQuote) })
-const seats = (count: number) => ({ count, source: read(SENDGRID, 'Teammate Permissions 1 teammate 1 teammate 1,000 teammates 1,000 teammates') })
+// Teammates in SendGrid's own words: its plan cards list "Additional teammates" (besides the account's owner), which its
+// feature table calls "Teammate Permissions … 1 teammate"; the kinder reading of the two is the cards'.
+const seats = (count: number) => ({ count, label: 'additional teammates', source: readOn('2026-11-26')(SENDGRID, 'What’s included: … Additional teammates: 1 … Additional teammates: 1 … Additional teammates: 1,000 … Additional teammates: 1,000') })
 // Past a plan's emails SendGrid bills each extra one at the plan's overage rate, so a smaller plan plus its overage can
 // cost less than the next plan up. The free trial (100 emails a day for 60 days) isn't a plan, so it isn't here.
 const offer: Offer = {
@@ -46,7 +48,7 @@ export const sendgrid: Entry = {
   assume: 'One recipient each, nothing received, SendGrid’s cheapest plan, or a smaller one plus its overage where that costs less. List prices before tax.',
   rows: [
     fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'SendGrid’s free trial is 100 emails a day for 60 days.', read(SENDGRID, 'Free trial lets you send 100 emails/day for 60 days')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'SendGrid Essentials includes 1 teammate.', seats(1).source),
+    fact('Teammates at no charge', 'No charge for teammates.', 'SendGrid Essentials includes 1 additional teammate.', seats(1).source),
   ],
   // SendGrid's readers first see the API, the allowances and the team.
   panels: ['send', 'free', 'team', 'receive', 'agent', 'campaign', 'domain'],

@@ -7,6 +7,7 @@ import { CRAWL_DISALLOW } from '../api/src/site-index.ts'
 import { pruneCss, usedNames } from './critical-css.ts'
 import { linkCard, withCard } from './link-card.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
+import { docProblems } from './src/features/pricing/docs/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
 import { PRICE_PAGES, type PricePage } from './src/features/pricing/pages.ts'
 import { comparisonDoc } from './src/features/pricing/page/comparison.ts'
@@ -71,7 +72,7 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
     configResolved(config) { publicDir = config.publicDir; root = config.root },
     generateBundle: { order: 'post', async handler(_options, bundle) {
       const today = new Date().toISOString().slice(0, 10)
-      const problems = ENTRIES.flatMap(entry => entryProblems(entry, today, PANEL_IDS))
+      const problems = [...ENTRIES.flatMap(entry => entryProblems(entry, today, PANEL_IDS)), ...docProblems()]
       if (new Set(ENTRIES.map(entry => entry.slug)).size !== ENTRIES.length) problems.push('Two comparisons have the same slug.')
       for (const [path] of PRICE_LINKS) if (!PRICE_PAGES.some(page => page.path === path)) problems.push(`live.ts links ${path}, which is no price page.`)
       for (const page of PRICE_PAGES) {
@@ -112,7 +113,8 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       const { module: prerender } = await runnerImport<typeof import('./src/features/pricing/prerender.tsx')>(prerenderModule, { root, configFile: false, logLevel: 'error' })
       // With the new look: the pages drawn from their data, the CSS they load in the app (page/view.tsx: page.css and the
       // television's tv.css), and the set's photograph for /compare drawn with it.
-      const drawn = verdict ? {
+      // (The vendors' pricing pages, docs/, are drawn so in every build.)
+      const drawn = verdict || PRICE_PAGES.some(page => page.doc) ? {
         render: (await runnerImport<typeof import('./src/features/pricing/page/prerender.tsx')>(pagesModule, { root, configFile: false, logLevel: 'error' })).module.renderPage,
         css: [...new Set([styles[0]!.slice(1), ...pageCss(bundle, ['/features/pricing/page/view.tsx'])])].map(file => {
           const asset = bundle[file]
@@ -123,8 +125,8 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       } : null
       const hub = hubDoc(), hubPage: PricePage = { path: hub.path, file: 'compare.html', title: hub.title, searchTitle: hub.searchTitle, description: hub.description, card: hubCard(), comparison: null, modified: hub.modified }
       const written: { page: PricePage; file: string; doc?: PageDoc; set?: boolean; robots?: boolean }[] = [
-        ...PRICE_PAGES.map(page => ({ page, file: page.file, doc: drawn && page.comparison ? comparisonDoc(page.comparison) : undefined })),
-        ...drawn ? [{ page: hubPage, file: hubPage.file, doc: hub }, { page: hubPage, file: 'compare/with-set.html', doc: hub, set: true, robots: true }] : [],
+        ...PRICE_PAGES.map(page => ({ page, file: page.file, doc: page.doc ?? (verdict && page.comparison ? comparisonDoc(page.comparison) : undefined) })),
+        ...verdict ? [{ page: hubPage, file: hubPage.file, doc: hub }, { page: hubPage, file: 'compare/with-set.html', doc: hub, set: true, robots: true }] : [],
       ]
 
       for (const { page, file, doc, set: withSet, robots } of written) {
@@ -186,11 +188,11 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
         this.emitFile({ type: 'asset', fileName: file, source: html })
       }
       for (const { file, source } of words.markdownFiles()) this.emitFile({ type: 'asset', fileName: file, source })
-      if (drawn) this.emitFile({ type: 'asset', fileName: 'compare.md', source: hubMarkdown(hub) })
-      this.emitFile({ type: 'asset', fileName: 'llms-site.txt', source: llmsSiteIndex(drawn ? [`- [Compare](${canonicalOrigin}/compare.md): ${hub.llms}`] : []) })
+      if (verdict) this.emitFile({ type: 'asset', fileName: 'compare.md', source: hubMarkdown(hub) })
+      this.emitFile({ type: 'asset', fileName: 'llms-site.txt', source: llmsSiteIndex(verdict ? [`- [Compare](${canonicalOrigin}/compare.md): ${hub.llms}`] : []) })
       this.emitFile({ type: 'asset', fileName: 'llms-full.txt', source: words.llmsFull() })
       // The homepage's lastmod: the newest figure it quotes or links (every comparison's, which the price pages carry).
-      const listed = [{ path: '/', modified: PRICE_PAGES.map(page => page.modified).sort().at(-1)! }, ...PRICE_PAGES_LIVE ? [...PRICE_PAGES, ...drawn ? [hubPage] : []].map(page => ({ path: page.path, modified: page.modified })) : []]
+      const listed = [{ path: '/', modified: PRICE_PAGES.map(page => page.modified).sort().at(-1)! }, ...PRICE_PAGES_LIVE ? [...PRICE_PAGES, ...verdict ? [hubPage] : []].map(page => ({ path: page.path, modified: page.modified })) : []]
       this.emitFile({ type: 'asset', fileName: 'robots.txt', source: `User-agent: *\nAllow: /\n${CRAWL_DISALLOW.map(path => `Disallow: ${path}\n`).join('')}\nSitemap: ${canonicalOrigin}/sitemap.xml\n` })
       this.emitFile({ type: 'asset', fileName: 'sitemap.xml', source: `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${listed.map(({ path, modified }) => `  <url><loc>${canonicalOrigin}${path}</loc>${modified ? `<lastmod>${modified}</lastmod>` : ''}</url>\n`).join('')}</urlset>\n` })
     } },
