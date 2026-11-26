@@ -5,7 +5,7 @@ import { errors, json, log, notFound, response, type App, type Config, type Data
 import { productName } from './brand.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { renderNotice, type Line, type Notice } from './notices.js';
-import { approvalLink, KINDS, propose } from './support-approvals.js';
+import { approvalLink, heldWhy, KINDS, propose } from './support-approvals.js';
 import { emailEvidence, supportPlatformOnly } from './support-conversations.js';
 import { event, itemColumns, itemFrom, triageCandidates, TRIAGE_REASONS, type ItemRow } from './support-inbox.js';
 
@@ -100,10 +100,6 @@ const TYPE_DECISION: Record<string, string> = {
   account: 'Answer what the agent couldn’t.', deliverability: 'Answer what the agent couldn’t.', abuse_report: 'Decide how to handle the report.',
   privacy: 'Decide how to handle the request.', legal: 'Decide how to handle the request.',
 };
-const HELD_WHY: Record<string, string> = {
-  gate: 'the output check held it', paused: 'staff took over before it went', access: 'their access changed before it went', closed: 'the conversation ended before it went',
-  earlier: 'an earlier version of the agent wrote it', unknown: 'it was held before reasons were kept',
-};
 /** A held answer that may go as written (held by the check or a pause); any other needs a fresh reply. */
 const sendable = (row: StaffRow) => row.held_reason === 'gate' || row.held_reason === 'paused';
 export function subjectOf(need: Need, row: StaffRow, short: string) {
@@ -163,7 +159,7 @@ function decisionOf(need: Need, row: StaffRow): { decision: string; recommendati
     case 'failed': return { decision: 'Send the reply again, or write a new one.', recommendation: null };
     case 'held': return sendable(row)
       ? { decision: 'Send the agent’s held answer, or write your own.', recommendation: recommended ?? (row.held_reason === 'gate' ? 'The output check held it: read it before sending.' : null) }
-      : { decision: 'Write them a fresh reply.', recommendation: `The agent’s held answer can’t go as written: ${HELD_WHY[row.held_reason ?? 'unknown'] ?? HELD_WHY.unknown}.` };
+      : { decision: 'Write them a fresh reply.', recommendation: `The agent’s held answer can’t go as written. ${heldWhy(row.held_reason)}.` };
     case 'no_reply': return { decision: 'Reply to them now.', recommendation: recommended };
     case 'blocked': return { decision: 'Retry the stuck work, or look at why it’s stuck.', recommendation: null };
     case 'waiting': return { decision: 'Reply to them, or hand the conversation back to the agent.', recommendation: recommended };
@@ -310,7 +306,7 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
         // is proposed only when it may go as written (held by the check or a pause); one that needs a fresh reply isn't.
         const kind = need === 'blocked' ? 'retry_work' : need === 'held' && row.held_id && (row.held_reason === 'gate' || row.held_reason === 'paused') ? 'send_held_answer' : null;
         const approval = kind === 'retry_work' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', reason: `The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work.` })
-          : kind === 'send_held_answer' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', payload: { messageId: row.held_id }, reason: `The agent’s answer was held: ${HELD_WHY[row.held_reason ?? 'unknown']}.` }) : null;
+          : kind === 'send_held_answer' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', payload: { messageId: row.held_id }, reason: `${heldWhy(row.held_reason)}.` }) : null;
         mail = conversationEmail(origin, row, reasons, first, now, approval && kind ? { label: KINDS[kind].label, url: approvalLink(config, approval) } : null, first ? subjectOf(need, row, whoOf(row).short) : thread.subject);
       }
       const seq = thread.emails + 1;

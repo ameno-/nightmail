@@ -209,7 +209,8 @@ function ApprovalPrompt({ conversationId, canAct }: { conversationId: string; ca
     footer={waiting && canAct ? <><Button variant="ghost" disabled={busy !== null} loading={busy === 'decline'} onClick={() => void decide('decline')}>Decline</Button>
       <Button disabled={busy !== null} onClick={close}>Not now</Button><Button variant="primary" disabled={busy !== null || blocked !== null} loading={busy === 'approve'} onClick={() => void decide('approve')}>Approve</Button></>
       : <Button onClick={close}>Close</Button>}>
-    <KeyValues items={[['Why', a.reason], ['Proposed by', a.proposedBy === 'agent' ? 'The support agent' : `${productName}, in the email to staff`],
+    {/* Why: for a held answer, why it was held as stored now ("Held by the output check"), above what would go; the reason it was proposed with once it is gone. */}
+    <KeyValues items={[['Why', waiting && a.preview?.held ? a.preview.held : a.reason], ['Proposed by', a.proposedBy === 'agent' ? 'The support agent' : `${productName}, in the email to staff`],
       [waiting ? 'Expires' : 'State', status ?? shortDateTime(a.expiresAt)], ...(!canAct && waiting ? [['Who can approve', 'Staff with the operator role']] as [string, string][] : [])]} />
     {waiting && a.preview?.text && <blockquote className="sinbox-approval__preview" aria-label="What would be sent">{a.preview.text}</blockquote>}
     {blocked && <p className="sinbox-approval__blocked" role="status">{blocked}</p>}

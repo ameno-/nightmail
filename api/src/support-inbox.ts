@@ -10,7 +10,7 @@ import { mutate, operatorActor, type OperatorIdentity } from './operator.js';
 import type { OperatorRole } from './operator-identity.js';
 import { supportPlatformOnly } from './support-conversations.js';
 import { CONVERSATION_ID, FILE_AUDIENCE, signSupportToken, type InboxState, type OutboxReply } from './support-platform.js';
-import { EXPIRES_MS, isKind, KINDS, validToken } from './support-approvals.js';
+import { EXPIRES_MS, heldWhy, isKind, KINDS, validToken } from './support-approvals.js';
 
 // The support inbox (api/README.md "Support integration"): every support conversation, its transcript and the staff
 // replies to it. Internal, in two halves:
@@ -689,14 +689,17 @@ export function registerSupportInbox(app: App) {
     await tx.execute(sql`UPDATE support_messages SET draft_outcome = ${fresh ? 'replaced' : unchanged ? 'sent' : 'edited'}, draft_by = ${operator.userId}, draft_at = now(), draft_reply = ${queued.id} WHERE id = ${messageId}`);
     return queued;
   }
-  /** What sending a held answer as written would send, and why it can't be sent, if it can't: read only, for a confirm step. */
+  /**
+   * What sending a held answer as written would send, why it was held (support-approvals.ts HELD_WHY: our words for the
+   * stored reason, never blank), and why it can't be sent, if it can't: read only, for a confirm step.
+   */
   async function draftPreview(db: DbExecutor, id: string, messageId: string, channel: string) {
     try {
       const draft = await heldDraft(db, id, messageId, false), written = draft.text.trim(), fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
-      return { text: channel === 'email' ? plainText(written) : written, blocked: fresh ? `${fresh}, so it can’t be sent. Write a fresh reply.`
+      return { text: channel === 'email' ? plainText(written) : written, held: heldWhy(draft.reason), blocked: fresh ? `${fresh}, so it can’t be sent. Write a fresh reply.`
         : draft.answered ? 'A newer reply already reached the customer, so this held answer can’t be sent as written.' : null };
     } catch (error) {
-      if (error instanceof ApiError) return { text: null, blocked: error.code === 'SUPPORT_DRAFT_DECIDED' ? error.message : 'This held answer is gone.' };
+      if (error instanceof ApiError) return { text: null, held: null, blocked: error.code === 'SUPPORT_DRAFT_DECIDED' ? error.message : 'This held answer is gone.' };
       throw error;
     }
   }
@@ -874,7 +877,8 @@ export function registerSupportInbox(app: App) {
     risky: z.boolean(), reason: z.string().describe('Why it was proposed.'), proposedBy: z.enum(['nightmail', 'agent']),
     state: z.enum(['proposed', 'approved', 'declined', 'failed', 'expired']), createdAt: z.string(), expiresAt: z.string(), decidedAt: z.string().nullable(),
     decidedBy: z.object({ userId: z.string(), name: z.string().nullable() }).nullable(), result: z.record(z.string(), z.unknown()).nullable(),
-    preview: z.object({ text: z.string().nullable().describe('Exactly what would be sent.'), blocked: z.string().nullable().describe('Why it can\u2019t be, now.') }).nullable()
+    preview: z.object({ text: z.string().nullable().describe('Exactly what would be sent.'), held: z.string().nullable().describe('Why the support platform held it, in our words for its stored reason (Held by the output check, Held by a staff pause, Reason not recorded…); null once it is gone.'),
+      blocked: z.string().nullable().describe('Why it can\u2019t be, now.') }).nullable()
       .describe('Send the held answer: the answer as it would go, and why it can\u2019t go, when it can\u2019t (it needs a fresh reply, a newer reply reached them, or it was decided).'),
   }).openapi('SupportApproval');
   type ApprovalRow = { id: string; conversation_id: string; kind: string; payload: Record<string, unknown>; proposed_by: 'nightmail' | 'agent'; reason: string; state: 'proposed' | 'approved' | 'declined' | 'failed';
