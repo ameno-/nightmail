@@ -9,6 +9,7 @@ import { NightmailWordmark } from '../../components/NightmailLogo'
 import { useSession } from '../../data/context'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { request } from '../../data/live'
+import { relativeTime } from '../../lib/format'
 import { ApiError, errorText } from '../../data/types'
 import { productName } from '../../../../api/src/brand'
 import { agentKeyName } from '../../../../api/src/agent-key-name'
@@ -18,7 +19,7 @@ import './connect.css'
 // /connect: where a person approves an agent that started the device flow (api/src/agent-setup.ts). The agent shows a
 // code and this link; the person signs in, checks the code, chooses the workspace and approves or denies. Its key is the
 // same one a copied prompt's setup token gives.
-type AgentRequest = { userCode: string; clientName: string | null; status: 'pending' | 'approved' | 'denied' | 'used' | 'expired'; createdAt: string; expiresAt: string; suggestedWorkspaceId?: string | null }
+type AgentRequest = { userCode: string; clientName: string | null; status: 'pending' | 'approved' | 'denied' | 'used' | 'expired'; createdAt: string; expiresAt: string; suggestedWorkspaceId?: string | null; promptCopiedAt?: string | null }
 type Decision = 'approved' | 'denied'
 
 const CODE = /^[BCDFGHJKLMNPQRSTVWXZ]{8}$/
@@ -134,6 +135,8 @@ function Review({ request: agent, typed, onDecided, onAnother }: { request: Agen
     <dl className="connect-facts onb-rise" style={rise(1)}>
       <dt>Code</dt><dd><code>{agent.userCode}</code></dd>
       <dt>Agent</dt><dd>{agent.clientName ? <><bdi>{agent.clientName}</bdi><span className="muted"> · as it names itself</span></> : <span className="muted">Didn’t name itself</span>}</dd>
+      {/* Asked with one of this person's setup tokens: when they copied that prompt, so a request long after looks wrong. */}
+      {agent.promptCopiedAt && <><dt>Prompt</dt><dd>From the prompt you copied {relativeTime(agent.promptCopiedAt)}</dd></>}
       <dt>Expires</dt><dd>{expiresIn(agent.expiresAt)}</dd>
       {identity?.email && <><dt>Account</dt><dd className="connect-account"><PrivateAddress value={identity.email} />
         {hosted && <button type="button" className="onboarding-skip connect-account__switch" disabled={!!busy} onClick={() => session?.addAccount(`/connect?code=${agent.userCode}`)}>Use another account</button>}</dd></>}

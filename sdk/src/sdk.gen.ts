@@ -336,7 +336,7 @@ export const exchangeAgentSetupToken = <ThrowOnError extends boolean = false>(op
 /**
  * Start the device flow for a coding agent
  *
- * For a coding agent without a setup token (RFC 8628): returns a device code to keep and a user code to show. Show the person verification_uri_complete as a link on its own line and ask them to open it, sign in, check the code and approve; nextStep says so in words. Then poll pollAgentDeviceToken every interval seconds until it returns the key. Codes work once, for 15 minutes. With setup_token (a spent one from the person's prompt), their dashboard shows you waiting.
+ * For a coding agent without a setup token (RFC 8628): returns a device code to keep and a user code to show. Show the person verification_uri_complete as a link on its own line and ask them to open it, sign in, check the code and approve; nextStep says so in words. Then poll pollAgentDeviceToken every interval seconds until it returns the key. Codes work once, for 15 minutes. With setup_token (one from the person's prompt that expired or was replaced before it was used), their dashboard shows you waiting.
  */
 export const startAgentDeviceAuthorization = <ThrowOnError extends boolean = false>(options?: Options<StartAgentDeviceAuthorizationData, ThrowOnError>): RequestResult<StartAgentDeviceAuthorizationResponses, StartAgentDeviceAuthorizationErrors, ThrowOnError> => (options?.client ?? client).post<StartAgentDeviceAuthorizationResponses, StartAgentDeviceAuthorizationErrors, ThrowOnError>({
     url: '/v1/agent/device',

@@ -1,8 +1,9 @@
 import { Link, useLocation } from 'react-router'
 import { useApiQuery, useSession } from '../data/context'
 import { request } from '../data/live'
+import { relativeTime } from '../lib/format'
 
-type Waiting = { data: { userCode: string; clientName: string | null; createdAt: string; expiresAt: string }[] }
+type Waiting = { data: { userCode: string; clientName: string | null; createdAt: string; expiresAt: string; promptCopiedAt: string }[] }
 
 const minutesLeft = (at: string) => Math.max(1, Math.round((Date.parse(at) - Date.now()) / 60_000))
 
@@ -24,8 +25,10 @@ export function AgentWaiting() {
   return <aside className="agent-waiting" aria-label="Agent waiting for approval">
     <span className="agent-waiting__pulse" aria-hidden="true" />
     <div className="agent-waiting__text" role="status">
-      <p className="agent-waiting__what"><bdi>{agent.clientName ?? 'Your agent'}</bdi> is waiting for your approval</p>
-      <p className="agent-waiting__when">Code {agent.userCode} · {minutesLeft(agent.expiresAt)} min left</p>
+      {/* When they copied that prompt: a request long after their last copy, or with no agent started, looks wrong. */}
+      <p className="agent-waiting__what">An agent with the prompt you copied {relativeTime(agent.promptCopiedAt)} is waiting for your approval</p>
+      {/* Its name is its own claim, never checked: said as such, after the code to compare with the agent's. */}
+      <p className="agent-waiting__when">Code {agent.userCode} · {minutesLeft(agent.expiresAt)} min left{agent.clientName ? <> · calls itself <bdi>{agent.clientName}</bdi></> : null}</p>
     </div>
     <Link className="ui-button ui-button--primary ui-button--sm agent-waiting__review" to={`/connect?code=${agent.userCode}`} data-analytics="agent-waiting/review">Review</Link>
   </aside>

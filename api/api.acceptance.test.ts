@@ -5342,7 +5342,7 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       const { rows: [revocation] } = await db.query("SELECT via FROM audit_events WHERE workspace_id=$1 AND action='api_key.revoke' AND target_id=$2", [w, agent.keyId]);
       assert.match(error(await request('GET', '/v1/me', agent.key), 401, 'KEY_REVOKED').message,
         new RegExp(`^This key was revoked on \\d{4}-\\d{2}-\\d{2} at \\d{2}:\\d{2}:\\d{2} UTC ${({ dashboard: 'from the dashboard', api: 'with an API key' } as Json)[revocation.via]}; get a new one by running setup again`));
-      assert.match(error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED').message, /has since been revoked\. Ask them to copy the prompt again, or start a device code with POST \/v1\/agent\/device and \{"setup_token":"<this token>"\}: their dashboard shows you waiting\.$/);
+      assert.match(error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED').message, /has since been revoked\. Ask them to copy the prompt again, or connect with a device code \(POST \/v1\/agent\/device\)\.$/);
       assert.equal(await agentStep(), false, 'A revoked agent key no longer counts as a connected agent.');
     });
   });
@@ -5392,6 +5392,9 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.ok(replaced.message.indexOf(`${PUBLIC_ORIGIN}/docs#agent-prompt`) > 0 && replaced.message.indexOf(`${PUBLIC_ORIGIN}/docs#agent-prompt`) < replaced.message.indexOf(asked.verification_uri_complete), replaced.message);
       const listed = await waiting(owner);
       assert.deepEqual(listed.map((item: Json) => [item.userCode, item.clientName]), [[asked.user_code, 'Devin']]);
+      // When they copied that prompt, so a request long after, or with no agent started, looks wrong to them.
+      const copiedAt = (await db.query('SELECT created_at FROM agent_setups WHERE id=$1', [first.id])).rows[0].created_at.toISOString();
+      assert.equal(listed[0].promptCopiedAt, copiedAt);
       // Only that person, in that workspace: not another admin here, not them in another workspace, not a member.
       const admin = await person('admin'), member = await person('member'), elsewhere = await workspace();
       await join(owner, elsewhere, 'owner');
@@ -5399,8 +5402,9 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       error(await request('GET', '/v1/agent/device/waiting', undefined, undefined, as(member)), 403, 'PERMISSION_DENIED');
       error(await request('GET', '/v1/agent/device/waiting'), 401, 'AUTH_REQUIRED');
       // The page chooses that workspace first for its person only; anyone else approving chooses as before.
-      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: asked.user_code }, as(owner))).suggestedWorkspaceId, w);
-      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: asked.user_code }, as(admin))).suggestedWorkspaceId, null);
+      const looked = (who: Person) => request('POST', '/v1/agent/device/lookup', undefined, { userCode: asked.user_code }, as(who));
+      assert.deepEqual([ok(await looked(owner)).suggestedWorkspaceId, ok(await looked(owner)).promptCopiedAt], [w, copiedAt]);
+      assert.deepEqual([ok(await looked(admin)).suggestedWorkspaceId, ok(await looked(admin)).promptCopiedAt], [null, null]);
       // Nothing without an approval: still pending, no key, until a signed-in owner or admin approves at /connect.
       error(await poll(asked.device_code), 400, 'AUTHORIZATION_PENDING');
       assert.equal((await db.query('SELECT count(*)::int AS n FROM api_keys WHERE workspace_id=$1 AND agent_setup_id IS NOT NULL', [w])).rows[0].n, 0);
@@ -5422,11 +5426,19 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.deepEqual((await waiting(admin)).map((item: Json) => item.userCode), [renewed.user_code]);
       assert.deepEqual(await waiting(owner), []);
 
-      // Used, and the agent lost its key: it asks with that token on POST /v1/agent/device, and its person sees it.
+      // A used token lives on in its agent's transcript: whoever reads it later gets a code that asks nobody in particular,
+      // never one in its person's dashboard (device code phishing). Their own agent got a key with it.
       const spent = await mint(request, as(owner));
       secrets.add(ok(await exchange(request, spent.token), 201).key);
       error(await exchange(request, spent.token), 409, 'SETUP_TOKEN_USED');
-      const again = ok(await request('POST', '/v1/agent/device', undefined, { client_name: 'Codex', setup_token: spent.token }));
+      const reused = ok(await request('POST', '/v1/agent/device', undefined, { client_name: 'Codex', setup_token: spent.token }));
+      secrets.add(reused.device_code);
+      assert.ok(!reused.nextStep.includes('dashboard'));
+      assert.deepEqual(await waiting(owner), []);
+      // Replaced before it was used: the agent that held it has no key, and its person sees it waiting.
+      const older = await mint(request, as(owner)), newer = await mint(request, as(owner));
+      secrets.add(newer.token);
+      const again = ok(await request('POST', '/v1/agent/device', undefined, { client_name: 'Codex', setup_token: older.token }));
       secrets.add(again.device_code);
       assert.deepEqual((await waiting(owner)).map((item: Json) => item.userCode), [again.user_code]);
       // A token that isn't one of ours, or a forged verifier, addresses nobody: refused, no code made.

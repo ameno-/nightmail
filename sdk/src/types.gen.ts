@@ -638,6 +638,10 @@ export type AgentDeviceRequest = {
      * The workspace of your own setup token that the agent held, which the page chooses first; null otherwise. Approving may still choose any workspace you own or administer.
      */
     suggestedWorkspaceId: string | null;
+    /**
+     * When you copied the prompt whose setup token the agent held; null for an agent that asked without one of yours. A request long after your last copy, or when you started no agent, isn't yours.
+     */
+    promptCopiedAt: string | null;
 };
 
 export type WaitingAgentDevices = {
@@ -649,6 +653,10 @@ export type WaitingAgentDevices = {
         clientName: string | null;
         createdAt: string;
         expiresAt: string;
+        /**
+         * When you copied the prompt whose setup token it held.
+         */
+        promptCopiedAt: string;
     }>;
 };
 
@@ -8268,7 +8276,7 @@ export type StartAgentDeviceAuthorizationData = {
          */
         client_name?: string;
         /**
-         * The setup token from the person's prompt, even if it expired, was replaced or was used: their dashboard then shows you waiting for their approval.
+         * The setup token from the person's prompt, even if it expired or was replaced: their dashboard then shows you waiting for their approval. One that was used already addresses nobody.
          */
         setup_token?: string;
     };
