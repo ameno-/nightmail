@@ -10503,6 +10503,19 @@ describe('Hosted MCP OAuth and tools', () => {
           await sent(reports);
           await later();
 
+          // A held answer staff already discarded is not asked about again; the agent's own words (its summary and
+          // recommendation) are protected as theirs are: escaped, each link with its real host, never a link.
+          const dropped = await stranger(), draft = msg();
+          ok(reply(await platform.mirrorMessages(dropped, [{ id: msg(), author: 'customer', text: 'Can I get a refund?', at: at(30) }, { id: draft, author: 'agent', kind: 'held', text: 'Yes.', delivery: 'held', reason: 'gate', at: at(29) }])));
+          ok(reply(await platform.mirrorState(dropped, { ticket: { id: ticketId(), type: 'billing', severity: 'P3', brief: { title: 'Refund', summary: 'They asked at https://pay-now.example/refund.', ask: 'A refund.', recommendation: 'Refund it at refunds.example.' } } })));
+          ok(await send('POST', `${inbox}/${dropped}/drafts/${draft}/discard`, keyed(operator)));
+          const [asked] = await due();
+          assert.ok(!asked.subject.startsWith('Review a held answer') && !asked.text.includes('send the held answer'), asked.subject);
+          assert.ok(asked.text.includes('They asked at https://pay-now.example/refund. (links to pay-now.example)') && asked.text.includes('It recommends: Refund it at refunds.example.'), asked.text);
+          assert.ok(asked.html.includes('pay-now.\u200bexample') && asked.html.includes('refunds.\u200bexample') && !asked.html.includes('refunds.example'), 'The agent’s words are never a link.');
+          await sent(asked);
+          await later();
+
           // Stuck work: the email's button is an approve link, and opening it changes nothing.
           const stuck = await chat(member);
           ok(reply(await platform.mirrorMessages(stuck, [{ id: msg(), author: 'customer', text: 'Is my domain verified?', at: at(2) }])));
