@@ -63,6 +63,8 @@ export type GlassCount = { n: number; atLeast: boolean }
 export type GlassHour = { accepted: number; marketing: number; delivered: number; bounced: number; complained: number }
 export type GlassGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F'
 export type GlassDay = { last: number; previous: number }
+/** What the support AI's model calls cost in a period (US dollars), and the turns and conversations behind it. */
+export type GlassAiPeriod = { costUsd: number; turns: number; conversations: number }
 export type GlassRequests = { requests: number; errors4xx: number; errors5xx: number }
 export type GlassRegion = { region: string; place: string; sending: boolean; receiving: boolean; maxSendRate: number | null; max24HourSend: number | null; sentLast24Hours: number | null; checkedAt: string | null }
 export interface Glass {
@@ -75,6 +77,7 @@ export interface Glass {
   receiving: { today: number; spam: number; atLeast: boolean; hourly: number[]; day: GlassDay }
   builtin: { active: number; ready: number; revoked: number; parent: { name: string; ok: boolean; problem: string | null; trippedAt: string | null; resetAt: string | null; checkedAt: string } | null }
   support: { open: number; ticketed: number; noReply: number; staffMailFailed: number; overLimit: number; week: { answerable: number; withoutHuman: number; apart: number; atLeast: boolean }; hourly: number[]; day: GlassDay; configured: { chat: boolean; email: boolean } }
+  supportAi: { line: number; today: GlassAiPeriod; week: GlassAiPeriod; month: GlassAiPeriod; daily: number[]; answered: number; top: { id: string; channel: string | null; workspace: { id: string; name: string } | null; costUsd: number; turns: number }[] }
   screening: { compared: GlassCount; agree: number | null; jevFlagged: number; jevfFlagged: number; jevFailed: number; jevfFailed: number; screened: number; rejected: number; hourly: number[] }
   api: { hourly: GlassRequests[]; previous: GlassRequests; p50Ms: number | null; p95Ms: number | null }
   money: { creditToday: string; creditMonth: string; creditDaily: number[]; owed: string; owing: number; usageMonth: string }

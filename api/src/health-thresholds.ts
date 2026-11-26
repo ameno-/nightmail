@@ -206,3 +206,12 @@ export const DATABASE = {
    */
   diskShare: 0.75, criticalDiskShare: 0.90, diskRemindMinutes: 360, // Plan capacity at 75%; intervene before the 95% write cutoff.
 } as const;
+
+/**
+ * The support AI's spend (src/support-ai-cost.ts). When a UTC day's model cost reaches dailyLineUsd, Health shows the
+ * support-ai-cost warning until the day ends, and the operators' Slack gets one card that day (operator-alerts.ts). An
+ * alarm, not a switch: nothing stops answering; the support platform's daily turn caps (support/src/limits.ts) do that.
+ * The line is a tenth or so of what the caps allow at worst (1,500 customer turns, 100 general email answers and the
+ * triage agent's reads), at about $0.20–0.35 a turn: far above an ordinary day, well before a runaway one.
+ */
+export const SUPPORT_AI = { dailyLineUsd: 50, remindMinutes: 24 * 60 } as const;

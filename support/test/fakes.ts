@@ -357,6 +357,13 @@ export class SupportPlatform extends WorkerEntrypoint {
     return ok({ earlier: earlierOf(r).map(o => ({ ticketId: o.ticketId, filedAt: o.filedAt, operation: o.operation, requestId: o.requestId, resolved: false, classification: o.note?.classification ?? null, text: o.text.slice(0, 600) })),
       more: 0, elsewhere: r.operation ? { operation: r.operation, reports: others.length, workspaces: new Set(others.map(o => o.workspaceId)).size } : null, window: '30 days' });
   }
+  async feedbackUsage(id, usage) {
+    calls.push(['feedbackUsage', id, usage]);
+    const r = reports.get(id);
+    if (!r) return refuse(404, 'NOT_FOUND');
+    r.usage = { turns: (r.usage?.turns ?? 0) + usage.turns, costUsd: (r.usage?.costUsd ?? 0) + usage.costUsd };
+    return ok({ conversationId: id, ...r.usage });
+  }
   async feedbackTriage(id, note) {
     calls.push(['feedbackTriage', id, note]);
     const r = reports.get(id);

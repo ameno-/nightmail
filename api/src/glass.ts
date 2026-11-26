@@ -13,7 +13,8 @@ import { regionLabels } from './region-labels.js';
 import { MicroCentsJson } from './billing/money.js';
 import { PUBLIC_ROUTE } from './analytics-traffic.js';
 import { gradeCounts, registerGlassDeliverability } from './glass-deliverability.js';
-import { noReplyCount, supportWeek } from './support-inbox.js';
+import { noReplyCount, reached, supportWeek } from './support-inbox.js';
+import { supportAiSql } from './support-ai-cost.js';
 
 // Glass (/glass in the dashboard): everything going on in the installation on one page, for operators. One read that
 // returns every figure, cached GLASS_TTL_SECONDS per installation, so the page's 30-second refresh costs one statement
@@ -28,6 +29,7 @@ import { noReplyCount, supportWeek } from './support-inbox.js';
 //  - sign-ups, standing, billing accounts, the health tables and the pool's regions with their SES quota samples
 //    (provider_pool_regions, provider_account_limits): small tables (one row per account, workspace, alert or region);
 //  - money: topups through the ledger's (kind, source_id) index, this month's cost from billing_months per account;
+//  - the support AI's spend: support_ai_usage (one row per mirror or triage read) through its time index, 30 days at most;
 //  - visitors: analytics_hourly (#680), by its hour-first key: today's hours only, and at most GLASS_VISITOR_CODES visitor
 //    codes told apart (a busier day's count is a lower bound). Page views and referrers are the public pages' (the paths
 //    the public hook reports), the ones visitor codes count: a signed-in dashboard page view has no visitor code.
@@ -51,6 +53,7 @@ const Count = z.object({ n: int, atLeast: z.boolean().describe(`n is a lower bou
 const Split = z.object({ open: int, waitlist: int });
 const Hour = z.object({ accepted: int, marketing: int.describe('Of accepted, marketing mail.'), delivered: int, bounced: int, complained: int });
 const Day = z.object({ last: int.describe('The last 24 hours (the current hour and the 23 before it).'), previous: int.describe('The 24 hours before those.') });
+const AiPeriod = z.object({ costUsd: z.number().describe('US dollars.'), turns: int, conversations: int });
 const Glass = z.object({
   generatedAt: z.string(),
   signups: z.object({
@@ -87,6 +90,14 @@ const Glass = z.object({
       apart: int.describe('Conversations started in the last 7 days with a bug, billing, abuse report, privacy or legal ticket: a person handles those by design.'),
       atLeast: z.boolean().describe(`Counted over the newest ${GLASS_CAP.toLocaleString('en-US')} conversations only.`) }).describe('The support AI\u2019s week.'), hourly: z.array(int).describe('Conversations started per hour, the last 24.'), day: Day,
     configured: z.object({ chat: z.boolean().describe('NIGHTMAIL_SUPPORT_SIGNING_KEY and NIGHTMAIL_SUPPORT_URL are set.'), email: z.boolean().describe('NIGHTMAIL_SUPPORT_ADDRESS_IDS is set.') }) }),
+  supportAi: z.object({
+    line: z.number().describe('The daily line in US dollars: past it, Health shows support-ai-cost and the operators\u2019 Slack gets one card that UTC day (src/health-thresholds.ts SUPPORT_AI).'),
+    today: AiPeriod.describe('Since UTC midnight.'), week: AiPeriod.describe('The last 7 days.'), month: AiPeriod.describe('The last 30 days.'),
+    daily: z.array(z.number()).describe('US dollars each UTC day, the last 30, oldest first; the last is today.'),
+    answered: int.describe('Conversations that spent in the last 30 days and got an answer from the AI that reached the customer.'),
+    top: z.array(z.object({ id: z.string(), channel: z.string().nullable(), workspace: z.object({ id: z.string(), name: z.string() }).nullable(), costUsd: z.number(), turns: int }))
+      .describe('The conversations that cost the most in the last 30 days, most first (at most 3).'),
+  }).describe('What the support AI\u2019s model calls cost (src/support-ai-cost.ts): the answering agent\u2019s and the feedback triage agent\u2019s.'),
   screening: z.object({ compared: Count.describe('Content screened by both classifiers in the last 24 hours (the newest at most).'),
     agree: z.number().nullable().describe('Share of those where both gave the same verdict.'), jevFlagged: int, jevfFlagged: int,
     jevFailed: int.describe('Jev answered with an error or not at all (the second classifier answered instead).'), jevfFailed: int,
@@ -116,7 +127,7 @@ type Raw = {
   mail_previous: Glass['sending']['previous'] | null; steps: Glass['delivery']['steps']; ramp: { ramping: number; waiting: number };
   received_day: { last: number; previous: number }; builtin: { active: number; revoked: number; ready: number }; parent: Glass['builtin']['parent'];
   support: { open: number; ticketed: number; last: number; previous: number; no_reply: number; staff_mail_failed: number; over_limit: number }; support_hourly: number[];
-  support_week: { answerable: number; without_human: number; apart: number; capped: boolean };
+  support_week: { answerable: number; without_human: number; apart: number; capped: boolean }; support_ai: Glass['supportAi'];
   screen: { n: number; agree: number; both: number; jev_flagged: number; jevf_flagged: number; jev_failed: number; jevf_failed: number } ; screened: { screened: number; rejected: number }; screened_hourly: number[];
   api: { back: number; key: string; n: number }[]; api_recent: { slowest: number; hist: number[] | null }[]; views_day: { last: number; previous: number };
   minutes: number[]; today: Glass['sending']['today']; hourly: Glass['sending']['hourly']; queued: number; held: number;
@@ -202,6 +213,7 @@ export async function readGlass(runtime: Pick<Runtime, 'db' | 'config'>): Promis
             WHERE u.conversation_id=si.conversation_id AND u.author='system' AND u.kind='unanswered' AND u.source_message_id=si.message_id)))
         FROM support_conversations c WHERE c.status<>'closed' OR c.created_at>=t.since48) AS support,
       ${supportWeek(GLASS_CAP)} AS support_week,
+      ${supportAiSql(reached)} AS support_ai,
       ${series(sql`t.day`, 'hour', 24, sql`SELECT date_trunc('hour',c.created_at,'UTC') AS at,count(*) AS n FROM support_conversations c WHERE c.created_at>=t.day GROUP BY 1`)} AS support_hourly,
       (SELECT json_build_object('n',count(*),'agree',count(*) FILTER (WHERE x.jev_flagged=x.jevf_flagged),'both',count(*) FILTER (WHERE x.jev_flagged IS NOT NULL AND x.jevf_flagged IS NOT NULL),
           'jev_flagged',count(*) FILTER (WHERE x.jev_flagged),'jevf_flagged',count(*) FILTER (WHERE x.jevf_flagged),
@@ -284,6 +296,7 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy' | 'support'>): G
     support: { open: num(r.support.open), ticketed: num(r.support.ticketed), noReply: num(r.support.no_reply), staffMailFailed: num(r.support.staff_mail_failed), overLimit: num(r.support.over_limit),
       week: { answerable: num(r.support_week.answerable), withoutHuman: num(r.support_week.without_human), apart: num(r.support_week.apart), atLeast: r.support_week.capped }, hourly: r.support_hourly.map(num), day: { last: num(r.support.last), previous: num(r.support.previous) },
       configured: { chat: Boolean(config.support?.signingKey && config.support.url), email: Boolean(config.support?.addressIds?.length) } },
+    supportAi: { ...r.support_ai, daily: r.support_ai.daily.map(num), top: r.support_ai.top.map(c => ({ ...c, costUsd: num(c.costUsd), turns: num(c.turns) })) },
     screening: { compared: { n: Math.min(num(r.screen.n), GLASS_CAP), atLeast: num(r.screen.n) > GLASS_CAP }, agree: num(r.screen.both) ? num(r.screen.agree) / num(r.screen.both) : null,
       jevFlagged: num(r.screen.jev_flagged), jevfFlagged: num(r.screen.jevf_flagged), jevFailed: num(r.screen.jev_failed), jevfFailed: num(r.screen.jevf_failed),
       screened: num(r.screened.screened), rejected: num(r.screened.rejected), hourly: r.screened_hourly.map(num) },

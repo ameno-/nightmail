@@ -9,7 +9,7 @@ import { external, WorkQueue, type NewWork, type Outcome, type WorkRow, type Wor
 import { attachmentLink, deleteConversationUploads, MAX_ATTACHMENTS, modelImage, safeName, storeImage, type Attachment } from './attachments.js';
 import { cleanImage, ImageRejected, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
 import { customerBlock, firstName, notesBlock, oneLine, type Customer, type Note } from './agent/context.js';
-import type { Harness, HarnessEvent, TurnResult } from './agent/harness.js';
+import { spentBy, type Harness, type HarnessEvent, type TurnResult, type Usage } from './agent/harness.js';
 import { createHarness, MODEL, promptFragments } from './agent/opencode.js';
 import { searchDocs } from './agent/docs.js';
 import { actionTitle, NOTE_MAX, ToolFailure, toolNames, type ActionProposal, type TicketInput, type ToolHost } from './agent/tools.js';
@@ -424,6 +424,22 @@ export class SupportConversation extends DurableObject<Env> {
   }
   private save(meta: Meta) { this.sql.exec('INSERT INTO _support_meta (id, value) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET value = excluded.value', JSON.stringify(meta)); }
   private update(change: (meta: Meta) => void) { const meta = this.meta(); if (!meta) throw new Error('conversation not opened'); change(meta); this.save(meta); return meta; }
+  /** Adds a model turn's usage to the conversation's counters; `turns`: whether it counts as a turn (a nudge doesn't). */
+  private charge(usage: Usage, turns: number) {
+    return this.update(m => { m.turns += turns; m.inputTokens += usage.inputTokens; m.outputTokens += usage.outputTokens; m.cacheReadTokens = (m.cacheReadTokens ?? 0) + usage.cacheReadTokens; m.costUsd += usage.costUsd; m.lastActivity = Date.now(); });
+  }
+  /** The counters in D1. The inbox gets them with the next mirror, which is how Nightmail counts the spend (api/src/support-ai-cost.ts). */
+  private saveUsage(meta: Meta) {
+    return this.env.DB.prepare('UPDATE conversations SET turns = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, updated_at = ? WHERE id = ?').bind(meta.turns, meta.inputTokens, meta.outputTokens, meta.costUsd, Date.now(), meta.conversationId).run();
+  }
+  /** A turn that threw after its model calls began still spent: counted, saved and mirrored like any other. */
+  private chargeLost(error: unknown, turns: number) {
+    const lost = spentBy(error);
+    if (!lost) return;
+    const meta = this.charge(lost, turns);
+    this.ctx.waitUntil(this.saveUsage(meta).then(() => {}, e => logError(e, { event: 'turn', code: 'USAGE_NOT_SAVED' }, 'warn')));
+    this.mirrorSoon();
+  }
   private fresh(conversationId: string, channel: Meta['channel']): Meta {
     return { conversationId, channel, status: 'open', userId: null, email: null, name: null, role: null, workspace: null, workspaces: [], verified: null, contentAccess: false, page: null, handoffMessage: null,
       requestIds: [], threadId: null, greeted: false, turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, ticketId: null, lastActivity: Date.now(), closedAt: null };
@@ -1271,6 +1287,7 @@ export class SupportConversation extends DurableObject<Env> {
       }, this.abort.signal);
     } catch (error) {
       this.abort = null;
+      this.chargeLost(error, 1);
       if (await this.stoppedTurn(messageId)) return;
       const missing = error instanceof MissingSecret ? error.secret : null;
       logError(error, { event: 'chat', code: missing ? 'SECRET_MISSING' : 'TURN_FAILED' });
@@ -1280,7 +1297,7 @@ export class SupportConversation extends DurableObject<Env> {
       return;
     }
     this.abort = null;
-    meta = this.update(m => { m.turns += 1; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.cacheReadTokens = (m.cacheReadTokens ?? 0) + result.usage.cacheReadTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
+    meta = this.charge(result.usage, 1);
     if (await this.stoppedTurn(messageId)) return;
     let final = result.text.trim(), redacted = false;
     if (result.refused) {
@@ -1304,7 +1321,7 @@ export class SupportConversation extends DurableObject<Env> {
     if (final) this.broadcast({ type: 'text.delta', messageId, delta: final });
     this.broadcast({ type: 'message.end', messageId, text: final, redacted });
     this.broadcast({ type: 'status', busy: false });
-    await this.env.DB.prepare('UPDATE conversations SET turns = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, updated_at = ? WHERE id = ?').bind(meta.turns, meta.inputTokens, meta.outputTokens, meta.costUsd, Date.now(), meta.conversationId).run();
+    await this.saveUsage(meta);
   }
 
   /**
@@ -2133,8 +2150,9 @@ export class SupportConversation extends DurableObject<Env> {
         // the model declined, and asking again would only be declined again.
         for (const prompt of [input, { ...input, text: NUDGE, images: [] }]) {
           if (prompt !== input && (progress.model !== undefined || refused || stop.signal.aborted)) break;
-          const result: TurnResult = await external(agent.turn(prompt, this.toolHost(), () => {}, stop.signal));
-          this.update(m => { m.turns += prompt === input ? 1 : 0; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.cacheReadTokens = (m.cacheReadTokens ?? 0) + result.usage.cacheReadTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
+          const turns = prompt === input ? 1 : 0;
+          const result: TurnResult = await external(agent.turn(prompt, this.toolHost(), () => {}, stop.signal).catch(error => { this.chargeLost(error, turns); throw error; }));
+          this.charge(result.usage, turns);
           refused ||= !!result.refused;
         }
       } finally { this.emailTurn = null; }
@@ -2148,7 +2166,7 @@ export class SupportConversation extends DurableObject<Env> {
       }
     }
     const updated = this.meta()!;
-    await external(this.env.DB.prepare('UPDATE conversations SET turns = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, updated_at = ? WHERE id = ?').bind(updated.turns, updated.inputTokens, updated.outputTokens, updated.costUsd, Date.now(), updated.conversationId).run());
+    await external(this.saveUsage(updated));
     // The model declined: the fixed decline is this email's one answer (no account data, so it is sent), and nothing waits.
     if (progress.model === null && progress.declined) { progress.fixed = 'decline'; progress.text = FIXED.decline(origin); progress.mode = 'general'; save(); return; }
     // No reply, even after the nudge: the fixed busy reply, and the team gets the email in a ticket.

@@ -3219,6 +3219,11 @@ describe('support Worker', () => {
       // Quoted fence text is stored as plain data: the escapes undone once, never markup the harness reads.
       assert.equal(noted.f.cause, `The report quotes: ${FENCE}`);
 
+      // What each reading cost reaches Nightmail once, after it ends: one turn (its nudge isn't another), at a cost above zero.
+      const usage = calls.filter(c => c[0] === 'feedbackUsage');
+      assert.deepEqual(usage.map(c => c[1]).sort(), read.map(conv).sort(), JSON.stringify(usage));
+      for (const [, , spent] of usage) assert.ok(spent.turns === 1 && spent.costUsd > 0 && Object.keys(spent).sort().join() === 'costUsd,turns', JSON.stringify(spent));
+
       // The daily cap: once it is reached, nothing more is claimed today.
       const d1 = await db(), day = new Date().toISOString().slice(0, 10);
       await d1.prepare("UPDATE daily_counters SET n = 100 WHERE day = ? AND key = 'global:triage'").bind(day).run();

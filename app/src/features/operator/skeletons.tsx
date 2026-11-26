@@ -303,6 +303,9 @@ const STEP_SLOTS = ['OK', 'Notice', 'Warn', 'Restrict', 'Pause']
 const GRADE_SLOTS = ['A+', 'A', 'B', 'C', 'D', 'F', 'Warmup']
 const slots = (prefix: string, n: number, extra: Omit<GlassRowDef, 'key'> = {}) => Array.from({ length: n }, (_, i): GlassRowDef => ({ key: `${prefix}:${i}`, ...extra }))
 export const glassGroups: GlassGroupDef[] = [
+  // What the support AI costs (api/src/support-ai-cost.ts): its own group beside Support's tile, not inside it.
+  { key: 'ai', title: 'Support AI cost', to: ['/support', 'Support'], rows: [{ key: 'today', label: 'Today (UTC)' }, { key: 'week', label: '7 days' }, { key: 'month', label: '30 days', spark: true },
+    { key: 'answered', label: 'Average per answer' }, ...slots('top', 3)] },
   { key: 'sending', title: 'Sending & receiving', to: ['/operator?view=health', 'Health'], rows: [{ key: 'transactional', label: 'Transactional', spark: true }, { key: 'marketing', label: 'Marketing', spark: true },
     { key: 'received', label: 'Received · 24 h', spark: true }, { key: 'queued', label: 'Queued' }, { key: 'ramp', label: 'On the ramp' }, ...slots('campaign', 2, { meter: true })] },
   { key: 'standing', title: 'Standing', to: ['/operator', 'Queue'], rows: [{ key: 'grades', cells: GRADE_SLOTS }, { key: 'steps', cells: STEP_SLOTS }, { key: 'paused', label: 'Paused senders' },

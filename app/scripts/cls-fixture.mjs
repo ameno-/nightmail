@@ -601,6 +601,9 @@ async function supportInbox(db, webhookId) {
       NULL,NULL,'active',NULL,NULL,now()-interval '6 minutes',2,1,0.0410,0,now()-interval '8 minutes',NULL)`,
     [chat, email, stranger, closed, supportId('tkt', 'samdkim', 16), supportId('tkt', 'samlimit', 16), keys]);
   await db.query(`UPDATE support_conversations SET ticket_at = created_at + interval '2 minutes' WHERE ticket_id IS NOT NULL AND id = ANY($1)`, [[chat, closed]]);
+  // What those turns cost (api/src/support-ai-cost.ts): today's rows, and the closed chat's three days ago, for Glass's Support AI cost.
+  await db.query(`INSERT INTO support_ai_usage(at,conversation_id,agent,turns,cost_usd) VALUES (now()-interval '12 minutes',$1,'support',4,0.1840),
+    (now()-interval '25 minutes',$2,'support',1,0.0610),(now()-interval '3 days',$3,'support',2,0.0920),(now()-interval '6 minutes',$4,'support',1,0.0410)`, [chat, email, closed, keys]);
   const line = (id, conversation, seq, author, text, minutes, extra = {}) => db.query(`INSERT INTO support_messages(id,conversation_id,seq,author,kind,text,tools,staff_user_id,delivery,delivered_at,held_reason,source_message_id,created_at)
     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,CASE WHEN $9 = 'sent' AND $4 = 'staff' THEN now()-make_interval(mins=>$10) END,$11,$12,now()-make_interval(mins=>$10))`,
     [id, conversation, seq, author, extra.kind ?? null, text, JSON.stringify(extra.tools ?? []), extra.staff ?? null, extra.delivery ?? null, minutes, extra.held ?? null, extra.source ?? null]);
