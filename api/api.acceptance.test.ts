@@ -748,7 +748,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
         const prop = node.properties?.[req];
         if (!prop) continue;
         assert.ok(Object.keys(prop).length > 0, `${at}.${req} lost its type`);
-        if (prop.type === 'array' && prop.items) assert.ok(Object.keys(prop.items).length > 0, `${at}.${req}[] lost its item type`);
+        if (prop.type === 'array' || (Array.isArray(prop.type) && prop.type.includes('array'))) assert.ok(prop.items && Object.keys(prop.items).length > 0, `${at}.${req}[] lost its item type`);
         checkReq(prop, `${at}.${req}`);
       }
     };

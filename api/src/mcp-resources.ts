@@ -131,10 +131,13 @@ type Schema = Record<string, any>;
 // A field's type alone (no properties or variants), for fields below the summarised depth.
 function typeOnly(field: Schema, defs: Schema): Schema {
   if (field.$ref) return typeOnly(defs[field.$ref.slice('#/$defs/'.length)], defs);
+  if (field.type === 'array' && field.items) { const items = typeOnly(field.items, defs); return items.type ? { type: 'array', items } : { type: 'array' }; }
   if (field.type) return { type: field.type };
   if (Array.isArray(field.enum) && field.enum.every((x: unknown) => typeof x === 'string')) return { type: 'string' };
   const types = [...new Set(((field.oneOf ?? field.anyOf) as Schema[] | undefined ?? []).flatMap(v => [typeOnly(v, defs).type ?? []].flat()))];
-  return types.length ? { type: types.length === 1 ? types[0] : types } : {};
+  const arrays = ((field.oneOf ?? field.anyOf) as Schema[] | undefined ?? []).map(v => v.$ref ? defs[v.$ref.slice('#/$defs/'.length)] : v).filter(v => v.type === 'array' && v.items);
+  const items = arrays.length === 1 ? typeOnly(arrays[0].items, defs) : {};
+  return types.length ? { type: types.length === 1 ? types[0] : types, ...(items.type ? { items } : {}) } : {};
 }
 function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
   if (field.$ref) return fieldSummary(defs[field.$ref.slice('#/$defs/'.length)], defs, depth);
