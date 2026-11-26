@@ -525,6 +525,7 @@ const CampaignReadiness = z.object({
   summary: z.string().nullable().describe('Why, in one or two plain sentences, when a ramp is recommended or required.'),
   reasons: z.array(z.object({ code: z.enum(LEGACY_READINESS_REASONS), message: z.string() })).describe('The findings behind the verdict in the original codes, one per code: a newly registered domain, one new here and a new link domain read NEW_DOMAIN, a jump over the usual day SIZE_JUMP; blocklist findings appear only in findings. Prefer findings.'),
   findings: z.array(z.object({ code: z.enum(READINESS_REASONS), message: z.string() })).optional().describe('Every finding behind the verdict, with its own code: NEW_REGISTRATION (registered recently, from public registry data), NEW_HERE (registered long ago, new to this workspace), NEW_DOMAIN (added recently, registration not known), USUAL_JUMP, NEW_LINK_DOMAIN, BLOCKLISTED_BEFORE (an earlier send drew replies naming a blocklist and none has finished without since), BLOCKLIST_UNCOUNTED (a recent send\'s blocklist replies aren\'t counted yet, so it isn\'t taken for clean), and the original codes.'),
+  unavailable: z.string().optional().describe('Present when part of the review couldn\'t be worked out just now (sizing the plan): what was left out, in a sentence. The review is then the one without that part, and its verdict is at least ramp_recommended.'),
   domain: z.object({ name: z.string(), firstSeenAt: z.string().nullable().describe('When the From domain (or the domain it is under) was added to this workspace.'), ageDays: z.number().int().nullable().describe('Days since it was added to this workspace: its history here, not its age.'),
     registeredAt: z.string().nullable().optional().describe('When its registrable domain was registered (YYYY-MM-DD), from public registry data; null when not known (never taken for old).'),
     registeredDays: z.number().int().nullable().optional().describe('Days since registeredAt; null when not known.'),
@@ -704,15 +705,36 @@ async function sendEstimates(runtime: Runtime, db: DbExecutor, a: Actor, rows: C
  * with that import's consent evidence) and how much larger this send is, then the verdict and the plan. Two statements;
  * `audience` brings the recipients. `lastSent`: when the list was last sent to, if the caller already knows.
  */
-async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { id: string; draft: CampaignDraft },
-  audience: { recipients: number; matched: number | null; risky: number; neverMailed: number | null; lastSent: string | null }) {
+type ReviewedAudience = { recipients: number; matched: number | null; risky: number; neverMailed: number | null; lastSent: string | null };
+/**
+ * The send review. With the private ramp lines (NIGHTMAIL_RAMP) it sizes the plan by them; that part is optional, so if
+ * it fails (an error or a statement past its limit) the review is the one without them, says so (unavailable), and never
+ * less cautious than ramp_recommended: a preview never fails on it, and a launch goes on with that review (a ramp it
+ * requires without the lines is still required). `savepoint`: `db` is a transaction (a launch), which a failed
+ * statement would otherwise end.
+ */
+async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { id: string; draft: CampaignDraft }, audience: ReviewedAudience, o: { savepoint?: boolean } = {}) {
+  if (!runtime.config.rampLines) return reviewSend(runtime, db, a, row, audience, false);
+  if (o.savepoint) await db.execute(sql`SAVEPOINT send_review_ramp`);
+  try {
+    const review = await reviewSend(runtime, db, a, row, audience, true);
+    if (o.savepoint) await db.execute(sql`RELEASE SAVEPOINT send_review_ramp`);
+    return review;
+  } catch (error) {
+    if (o.savepoint) await db.execute(sql`ROLLBACK TO SAVEPOINT send_review_ramp`);
+    log('error', { code: 'SEND_REVIEW_PLAN_UNAVAILABLE', campaignId: row.id, errorType: (error as Error)?.name ?? typeof error, sqlState: (error as { code?: unknown })?.code ?? null });
+    const plain = await reviewSend(runtime, db, a, row, audience, false);
+    const unavailable = 'This send\'s plan couldn\'t be sized just now, so this review leaves that part out and recommends sending in batches.';
+    return { ...plain, verdict: plain.verdict === 'ready' ? 'ramp_recommended' as const : plain.verdict, summary: plain.summary ?? unavailable, unavailable };
+  }
+}
+async function reviewSend(runtime: Runtime, db: DbExecutor, a: Actor, row: { id: string; draft: CampaignDraft }, audience: ReviewedAudience, tuned: boolean) {
   const domain = (row.draft.from.split('@')[1] ?? '').toLowerCase(), listId = row.draft.audience?.listId ?? null, r = RAMP.readiness, c = RAMP.check;
   // Where this campaign's links go (src/link-domains.ts): a blocklist lists the link domain as readily as the sender's.
   const links = await linkReview(runtime, db, a.workspaceId, row.draft.from), linkHost = links.origin ? new URL(links.origin).hostname.toLowerCase() : null;
   // Clean: within the ramp check's bounce and complaint lines, no reply named a blocklist in the days it went out, and the
   // delivery history has counted it (src/delivery-history.ts), so a send not counted yet is never taken for clean.
   // Without the private ramp lines (NIGHTMAIL_RAMP) the review is today's: clean is the bounce and complaint lines alone.
-  const tuned = !!runtime.config.rampLines;
   const clean = sql`bounced<=accepted*${c.bounceRate}::float8 AND (complained<${c.complaints}::int OR complained<=accepted*${c.complaintRate}::float8)${tuned ? sql` AND NOT blocked AND counted` : sql``}`;
   const [f] = (await db.execute<{ first_seen: string | null; dmarc: string | null; mail_from: string | null; ws_largest: number; dom_largest: number; dom_clean: number;
     dom_accepted: number; dom_bounced: number; dom_complained: number; ws_accepted: number | null; ws_bounced: number | null; ws_complained: number | null; usual_day: number | null; first_sent: string | null;
@@ -3122,7 +3144,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // The send review as of now (src/standing-model.ts RAMP.readiness). A send it requires a ramp for goes with the
   // recommended plan, a daily limit no larger than its first day, or a consent source the sender confirms.
   const readiness = draft.requiredNotice ? null : await sendReadiness(runtime, db, a, { id: campaignId, draft },
-    { recipients: judgedRecipients ?? queued, matched: null, risky: risky?.total ?? 0, neverMailed: null, lastSent: await audienceMod.listLastSent(db, a, draft.audience.listId) });
+    { recipients: judgedRecipients ?? queued, matched: null, risky: risky?.total ?? 0, neverMailed: null, lastSent: await audienceMod.listLastSent(db, a, draft.audience.listId) }, { savepoint: true });
   const plan = input.pacing?.plan === 'recommended' && readiness?.plan ? readiness.plan.batches : null;
   // A consent confirmation answers a new domain or a size jump, not a blocklist: after one, only a ramp will do.
   const consentWaives = !!input.consent && readiness?.required?.reason !== 'BLOCKLISTED';
