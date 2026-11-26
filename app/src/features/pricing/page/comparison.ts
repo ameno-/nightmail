@@ -63,7 +63,7 @@ export function priceTable(c: Comparison, caption: Text, mark: number): Table {
 export function comparisonDoc(c: Comparison): PageDoc {
   const vendor = c.offer.vendor, v = verdictOf(c), opening = middle(c)
   // (Only what the pre-merge check asks a comparison to tell a buyer; the rate and the free allowance are the facts'.)
-  const terms: Text = [`${c.assume} Monthly billing, no promotions. ${productName} top-ups start at ${nightmail.minTopUp} and expire ${nightmail.expiresAfterMonths} months after purchase; received mail kept past ${nightmail.storageAfterDays} days is ${nightmail.storagePerGb} per GB a month after ${nightmail.freeStorageGb} GB free.`]
+  const terms: Text = [`${c.assume} Monthly billing, no promotions. ${productName} is prepaid. Top-ups start at ${nightmail.minTopUp} and expire ${nightmail.expiresAfterMonths} months after purchase; received mail kept past ${nightmail.storageAfterDays} days is ${nightmail.storagePerGb} per GB a month after ${nightmail.freeStorageGb} GB free.`]
   return {
     path: c.path, title: c.title, searchTitle: c.searchTitle, description: c.description,
     h1: verdictHeading(c, v),
