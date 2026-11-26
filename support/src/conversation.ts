@@ -1287,6 +1287,9 @@ export class SupportConversation extends DurableObject<Env> {
       if (reply.status === 403 && code === 'PERMISSION_DENIED') throw new ToolFailure(ROLE_REFUSED);
       if (reply.status === 403) throw lost();
       if (reply.status === 409 && code === 'SUPPORT_ACTIONS_OPEN') throw new ToolFailure('This chat already has 3 changes waiting for the customer. Don’t propose another until they confirm or decline one (or it expires after 24 hours); tell them so if they ask for more.');
+      if (reply.status === 409 && code === 'SUPPORT_PROPOSALS_OPEN') throw new ToolFailure('This chat already has 3 proposals waiting for the team. Don’t propose another; tell the customer the team is looking at the earlier ones.');
+      // A safe action's target takes turns (once a minute for a re-check, every 10 minutes for a resend): not the reads' budget.
+      if (reply.status === 429 && code === 'SUPPORT_ACTION_TOO_SOON') throw new ToolFailure('That was just done for the same target. Don’t try again in this answer: tell the customer to give it a few minutes, then check again.');
       if (reply.status === 404) throw new ToolFailure(`Not found (${code ?? 'NOT_FOUND'}). ${notFound}`);
       if (reply.status === 422) throw new ToolFailure('Those IDs don’t fit that change. Check them against the earlier tool results.');
       if (reply.status === 429) { this.readsBlockedUntil = Date.now() + retryAfterMs(reply.retryAfter); throw new ToolFailure(`${productName}’s support budget is spent for this minute. Don’t try again in this answer.`); }
@@ -1393,13 +1396,15 @@ export class SupportConversation extends DurableObject<Env> {
         this.broadcast({ type: 'action.request', actionId: action.id, kind: action.kind, summary: action.summary.slice(0, 1000) });
         return `${reply.status === 200 ? 'Already proposed, still waiting for the customer' : 'Proposed'}: ${actionTitle(action.kind)} (${action.id}), status proposed. The customer now sees a card with ${productName}’s own description of it and a button to confirm it. End your answer by saying what you proposed and that it runs once they confirm it on the card. Nothing has changed yet, and a typed “yes” changes nothing: never say it’s done, and never write a link for it. You’ll get a note with what came of it once they decide.`;
       },
-      // A DNS re-check changes nothing but the stored status, so it needs no confirmation (still owners and admins only).
-      recheckDomain: async (domainId: string) => {
+      // Safe actions (a DNS re-check, a forward confirmation resent) and proposals to staff: no confirmation here, for the chat's
+      // own workspace, owners and admins only. Nightmail checks the target is the person's, takes the target's turn, records
+      // it, and runs nothing risky: a proposal waits for an operator's approval.
+      act: async (path: string, body: Record<string, unknown> | undefined, notFound: string) => {
         const workspace = await mayChange();
         if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);
-        const reply = await this.stamped('POST', `/v1/support/domains/${encodeURIComponent(domainId)}/verify?workspaceId=${encodeURIComponent(workspace)}`);
-        if (reply.status === 200) return toolResult(reply.body, this.hidden());
-        return refusedChange(reply, 'Use a domain ID from list_domains.');
+        const reply = await this.stamped('POST', `${path}?workspaceId=${encodeURIComponent(workspace)}`, body);
+        if (reply.status === 200 || reply.status === 201) return reply.body;
+        return refusedChange(reply, notFound);
       },
       // Public text bundled with this Worker: no stamp, so a general email turn may search it too.
       searchDocs: (query: string) => searchDocs(query),

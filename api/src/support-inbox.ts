@@ -61,7 +61,7 @@ const TRANSCRIPT_LIMIT = 500;
 const EMAIL_TEXT_LIMIT = 20_000;
 const MAIL_MESSAGE_ID = /^msg_[0-9a-f]{32}$/, ATTACHMENT_ID = /^att_[a-z2-7]{16}$/;
 const HELD_REASONS = ['paused', 'gate', 'access', 'closed', 'earlier'] as const;
-const EVENT_KINDS = ['opened', 'ticket', 'priority', 'paused', 'resumed', 'resolved', 'done', 'undone', 'closed', 'approved', 'declined'] as const;
+const EVENT_KINDS = ['opened', 'ticket', 'priority', 'paused', 'resumed', 'resolved', 'done', 'undone', 'closed', 'approved', 'declined', 'action', 'proposed'] as const;
 
 const Author = z.enum(['customer', 'agent', 'staff', 'system']);
 const Delivery = z.enum(['queued', 'sent', 'failed', 'held']);
@@ -842,7 +842,8 @@ export function registerSupportInbox(app: App) {
   const ApprovalParams = z.object({ id: z.string().regex(CONVERSATION_ID), approvalId: z.string().regex(/^apr_[a-z2-7]{26}$/) });
   const Approval = z.object({
     id: z.string(), conversationId: z.string(), kind: z.string(), label: z.string().describe('What approving does, in a few words.'), effect: z.string().describe('What happens, in one sentence.'),
-    risky: z.boolean(), reason: z.string().describe('Why it was proposed.'), proposedBy: z.enum(['nightmail', 'agent']),
+    risky: z.boolean(), summary: z.string().nullable().describe('The exact target in Nightmail\u2019s words (an agent\u2019s risky proposal): what it acts on, with its numbers.'),
+    reason: z.string().describe('Why it was proposed: the proposer\u2019s words (the agent\u2019s, for a risky one).'), proposedBy: z.enum(['nightmail', 'agent']),
     state: z.enum(['proposed', 'approved', 'declined', 'failed', 'expired']), createdAt: z.string(), expiresAt: z.string(), decidedAt: z.string().nullable(),
     decidedBy: z.object({ userId: z.string(), name: z.string().nullable() }).nullable(), result: z.record(z.string(), z.unknown()).nullable(),
     preview: z.object({ text: z.string().nullable().describe('Exactly what would be sent.'), blocked: z.string().nullable().describe('Why it can\u2019t be, now.') }).nullable()
@@ -860,7 +861,7 @@ export function registerSupportInbox(app: App) {
   }
   const approvalView = (r: ApprovalRow, preview: z.infer<typeof Approval>['preview'] = null): z.infer<typeof Approval> => {
     const kind = KINDS[r.kind as keyof typeof KINDS];
-    return { preview, id: r.id, conversationId: r.conversation_id, kind: r.kind, label: kind.label, effect: kind.effect, risky: kind.risky, reason: r.reason, proposedBy: r.proposed_by,
+    return { preview, id: r.id, conversationId: r.conversation_id, kind: r.kind, label: kind.label, effect: kind.effect, risky: kind.risky, summary: kind.summary?.(r.payload) ?? null, reason: r.reason, proposedBy: r.proposed_by,
       state: r.state === 'proposed' && r.expired ? 'expired' : r.state, createdAt: isoTime(r.created_at)!, expiresAt: isoTime(r.expires_at)!, decidedAt: isoTime(r.decided_at),
       decidedBy: r.decided_by ? { userId: r.decided_by, name: r.decided_by_name } : null, result: r.result };
   };
@@ -889,19 +890,25 @@ export function registerSupportInbox(app: App) {
       if (a.expired) throw new ApiError(409, 'SUPPORT_APPROVAL_EXPIRED', 'This proposal expired. Open the conversation to act on it.');
       let state: 'approved' | 'declined' | 'failed' = 'declined', result: Record<string, unknown> | null = null;
       if (body.decision === 'approve') {
+        // A refused run gives back whatever it wrote before its refusal, and the decision records the refusal.
+        await tx.execute(sql`SAVEPOINT support_approval`);
         try {
-          result = await KINDS[a.kind as keyof typeof KINDS].run({ wake: id => wakeSupport(c.env.config, id), sendDraft: messageId => sendDraft(tx, operator, conversation, params.id, messageId) }, a.conversation_id, a.payload);
+          result = await KINDS[a.kind as keyof typeof KINDS].run({ wake: id => wakeSupport(c.env.config, id), sendDraft: messageId => sendDraft(tx, operator, conversation, params.id, messageId),
+            tx, c, operator, userId: conversation.user_id, approvalId: a.id }, a.conversation_id, a.payload);
           state = 'approved'; sent = a.kind === 'send_held_answer';
+          await tx.execute(sql`RELEASE SAVEPOINT support_approval`);
         } catch (error) {
-          // Refused as the dashboard's own button would be (a stale draft, one that needs a fresh reply, a closed conversation): said, not thrown.
+          // Refused as the dashboard's own button would be (a stale draft, one that needs a fresh reply, a closed conversation,
+          // a workspace already paused): said, not thrown.
           if (!(error instanceof ApiError)) throw error;
+          await tx.execute(sql`ROLLBACK TO SAVEPOINT support_approval`);
           state = 'failed'; result = { error: error.code, message: error.message };
         }
       }
       const { rows: [decided] } = await tx.execute<ApprovalRow>(sql`UPDATE support_approvals SET state = ${state}, decided_by = ${operator.userId}, decided_at = now(), result = ${result ? JSON.stringify(result) : null}::jsonb
         WHERE id = ${a.id} RETURNING id, conversation_id, kind, payload, proposed_by, reason, state, created_at::text AS created_at, expires_at::text AS expires_at, ${EXPIRES_MS}, false AS expired,
           decided_at::text AS decided_at, decided_by, (SELECT name FROM nightmail_users WHERE id = ${operator.userId}) AS decided_by_name, result`);
-      await tx.execute(event(params.id, body.decision === 'approve' ? 'approved' : 'declined', operator.userId, { approval: a.id, kind: a.kind, ...state === 'failed' ? { failed: true } : {} }));
+      await tx.execute(event(params.id, body.decision === 'approve' ? 'approved' : 'declined', operator.userId, { approval: a.id, kind: a.kind, label: KINDS[a.kind as keyof typeof KINDS].label, ...state === 'failed' ? { failed: true } : {} }));
       return { result: approvalView(decided!) };
     }, body);
     if (sent) await wakeAfter(c, params.id);

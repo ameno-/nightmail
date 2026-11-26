@@ -42,8 +42,13 @@ const STAMPED_WRITES: [method: string, path: RegExp][] = [
   ['POST', /^\/v1\/support\/notes$/],
 ];
 
-/** The writes about the person's account (src/support-actions.ts): proposing a change they confirm signed in, and re-checking a domain's DNS. */
-const ACTION_WRITES: [method: string, path: RegExp][] = [['POST', /^\/v1\/support\/actions$/], ['POST', /^\/v1\/support\/domains\/[A-Za-z0-9_-]{1,120}\/verify$/]];
+/**
+ * The writes about the person's account (src/support-actions.ts): proposing a change they confirm signed in, the safe
+ * actions (re-checking a domain's or a receiving host's DNS, resending a forward confirmation), and proposing a risky
+ * change to staff, which only an operator's approval runs.
+ */
+const ACTION_WRITES: [method: string, path: RegExp][] = [['POST', /^\/v1\/support\/actions$/], ['POST', /^\/v1\/support\/domains\/[A-Za-z0-9_-]{1,120}\/verify$/],
+  ['POST', /^\/v1\/support\/receiving\/hosts\/[A-Za-z0-9_-]{1,120}\/recheck$/], ['POST', /^\/v1\/support\/receiving\/forwards\/[A-Za-z0-9_-]{1,120}\/resend$/], ['POST', /^\/v1\/support\/approvals$/]];
 
 /** Whether the binding may make this call without a conversation: the operator support routes. */
 export function supportPlatformAllows(method: string, path: string) {
