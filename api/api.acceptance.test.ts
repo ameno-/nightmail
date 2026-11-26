@@ -978,10 +978,10 @@ test('optional Worker secrets disable only their feature on a partial rollout; c
   for (const link of [{NIGHTMAIL_LINK_SAAS_ZONE_ID:zone},{NIGHTMAIL_LINK_SAAS_TOKEN:token}]) {
     const config=loadConfig({...base,...link,NIGHTMAIL_LINK_HOST:'links.example.net',NIGHTMAIL_POSTMASTER_CREDENTIALS:token,
       NIGHTMAIL_SUPPORT_URL:'https://support.example.org',NIGHTMAIL_SUPPORT_SIGNING_KEY:token,CF_OBSERVABILITY_TOKEN:token,CF_OBSERVABILITY_ACCOUNT_ID:'bad',
-      ANALYTICS_PUSH_SECRET:token,DOMAIN_NS_CHECK:'typo',NIGHTMAIL_PLACEMENT_SHADOW:'typo',STRIPE_SECRET_KEY:'not-a-key',STRIPE_WEBHOOK_SECRET:'whsec_fixture',DOMAIN_CONNECT_KEY_ID:'_dck1'});
+      ANALYTICS_PUSH_SECRET:token,NIGHTMAIL_PLACEMENT_SHADOW:'typo',STRIPE_SECRET_KEY:'not-a-key',STRIPE_WEBHOOK_SECRET:'whsec_fixture',DOMAIN_CONNECT_KEY_ID:'_dck1'});
     assert.deepEqual([config.linkHosts,config.linkHost,config.postmaster,config.support?.url,config.support?.signingKey,
       config.observability,config.analyticsPush,config.billing?.stripe,config.domainConnect],[undefined,'links.example.net',undefined,undefined,undefined,undefined,undefined,undefined,undefined]);
-    assert.deepEqual([config.domainNsCheck,config.placementShadow],[false,false]);
+    assert.equal(config.placementShadow,false);
     const runtime={config,db,snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){return null;}}};
     assert.equal((await app.fetch(new Request(PUBLIC_ORIGIN+'/health'),runtime)).status,200);
     const me=await app.fetch(new Request(PUBLIC_ORIGIN+'/v1/me'),runtime); assert.deepEqual([me.status,(await me.json() as Json).error?.code],[401,'AUTH_REQUIRED']);
@@ -32575,15 +32575,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const abuseModule = await import('./src/abuse.js'), { sql } = await import('drizzle-orm'), { loadConfig } = await import('./src/config.js');
       const stored = async () => (await db.query('SELECT count(*)::int AS n FROM abuse_signals')).rows[0].n as number, before = await stored();
       // Off: self-hosted; hosted without the setting; hosted before its activation time. A sign-in notes nothing and
-      // the job does not run. Production sets it but stays monitor-only: NIGHTMAIL_ABUSE_ENFORCE is never set there.
+      // the job does not run. Production sets it and stays monitor-only.
       const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), ...extra });
       const hosted = { MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google' };
       assert.deepEqual([settings({ NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T00:00:00Z' }).abuseMonitoring, settings(hosted).abuseMonitoring, settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T01:00:00+01:00' }).abuseMonitoring],
         [undefined, undefined, { since: '2026-11-23T00:00:00.000Z' }]);
       assert.equal(settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: 'true' }).abuseMonitoring, undefined);
-      assert.deepEqual([settings(hosted).abuseEnforce, settings({ ...hosted, NIGHTMAIL_ABUSE_ENFORCE: 'true' }).abuseEnforce], [false, true]);
       const wrangler = async (file: string, key: string) => new RegExp(`^\\s*"${key}"\\s*:`, 'm').test(await readFile(new URL(file, import.meta.url), 'utf8'));
-      assert.deepEqual([await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.dev.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_ENFORCE')], [true, true, false], 'Monitoring is on in production, monitor-only.');
+      assert.deepEqual([await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.dev.jsonc', 'NIGHTMAIL_ABUSE_MONITORING')], [true, true], 'Monitoring is on in production and dev.');
       const seen = { outcome: 'not_approved', email: 'off@abuse-off.example.com', provider: null, network: { ip: '198.51.100.7', userAgent: 'curl/8.1', asn: 'AS64500', country: 'US' } };
       for (const off of [{ multiTenant: false, abuseMonitoring: { since: '2020-01-01T00:00:00.000Z' } }, { multiTenant: true, abuseMonitoring: undefined }, { multiTenant: true, abuseMonitoring: { since: new Date(Date.now() + 3600_000).toISOString() } }]) {
         Object.assign(runtime.config, off);
@@ -32763,7 +32762,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','111122223333','ready')`, [wid, REGION]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('abuse-a.example',$1,$1,'verified')`, [wid]);
       await gradedSender(db, wid, 1000);
-      runtime.config.abuseEnforce = true;
       const admission = t.mock.method(db, 'query');
       ok(await local('POST', '/v1/emails/send', { from: 'offers@abuse-a.example', to: 'seed-inbox@abuse-recipient.example.com', subject: 'An exclusive spring offer', html: offer(48213) }), 202);
       const admitted = admission.mock.calls.map(call => String((call.arguments[0] as { text?: string })?.text ?? call.arguments[0]));
@@ -32995,7 +32993,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','111122223333','ready')`, [wid, REGION]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('abuse-a.example',$1,$1,'verified')`, [wid]);
       await gradedSender(db, wid, 1000);
-      runtime.config.abuseEnforce = true;
       const admission = t.mock.method(db, 'query');
       ok(await local('POST', '/v1/emails/send', { from: 'offers@abuse-a.example', to: 'seed-inbox@abuse-recipient.example.com', subject: 'An exclusive spring offer', html: offer(4) }), 202);
       assert.ok(!admission.mock.calls.some(call => /abuse_|identity_links/.test(String((call.arguments[0] as { text?: string })?.text ?? call.arguments[0]))));

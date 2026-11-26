@@ -301,7 +301,7 @@ export async function setAutoRecharge(runtime: Runtime, workspaceId: string, set
 // ---------- the credit product ----------
 const creditProducts = new WeakMap<StripeConfig, Map<string, Promise<string>>>();
 /**
- * The one Stripe Product every top-up and recharge is for (STRIPE_CREDIT_PRODUCT_ID), so tax (STRIPE_TAX_CODE, SaaS for
+ * The one Stripe Product every top-up and recharge is for (nightmail_credit), so tax (txcd_10103001, SaaS for
  * business use) is set and seen on one object instead of a throwaway product per Checkout. Read once per isolate and
  * created under its fixed ID when missing, so isolates racing to create it make one. An existing product is never
  * changed: a different tax code or an archived product is logged for an operator, who may have set it in Stripe.
