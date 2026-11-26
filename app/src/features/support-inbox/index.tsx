@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { Link, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { Archive, Bot, Check, CheckCheck, ChevronRight, CircleCheck, CircleX, Flag, Hand, Image as ImageIcon, Inbox, Info, Mail, MessageSquare, Paperclip, Ticket, Undo2, X } from 'lucide-react'
+import { Archive, Bot, Check, CheckCheck, ChevronRight, CircleCheck, CircleX, Flag, Hand, Image as ImageIcon, Inbox, Info, Mail, MessageSquare, Paperclip, RefreshCw, Send, Ticket, Undo2, X } from 'lucide-react'
 import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, StatusBadge, StatusDot, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
@@ -210,7 +210,7 @@ function ApprovalPrompt({ conversationId, canAct }: { conversationId: string; ca
       <Button disabled={busy !== null} onClick={close}>Not now</Button><Button variant="primary" disabled={busy !== null || blocked !== null} loading={busy === 'approve'} onClick={() => void decide('approve')}>Approve</Button></>
       : <Button onClick={close}>Close</Button>}>
     {/* Why: for a held answer, why it was held as stored now ("Held by the output check"), above what would go; the reason it was proposed with once it is gone. */}
-    <KeyValues items={[['Why', waiting && a.preview?.held ? a.preview.held : a.reason], ['Proposed by', a.proposedBy === 'agent' ? 'The support agent' : `${productName}, in the email to staff`],
+    <KeyValues items={[...(a.summary ? [['What', a.summary]] as [string, string][] : []), ...(waiting && a.change ? [['Now', a.change.now], ['After', a.change.after]] as [string, string][] : []), ['Why', waiting && a.preview?.held ? a.preview.held : a.reason], ['Proposed by', a.proposedBy === 'agent' ? 'The support agent' : `${productName}, in the email to staff`],
       [waiting ? 'Expires' : 'State', status ?? shortDateTime(a.expiresAt)], ...(!canAct && waiting ? [['Who can approve', 'Staff with the operator role']] as [string, string][] : [])]} />
     {waiting && a.preview?.text && <blockquote className="sinbox-approval__preview" aria-label="What would be sent">{a.preview.text}</blockquote>}
     {blocked && <p className="sinbox-approval__blocked" role="status">{blocked}</p>}
@@ -535,7 +535,9 @@ function Files({ conversationId, files }: { conversationId: string; files: Suppo
 }
 
 // What happened besides the messages, as one quiet line each.
-const eventIcon: Record<SupportEventKind, typeof Info> = { opened: Inbox, ticket: Ticket, priority: Flag, paused: Hand, resumed: Bot, resolved: CheckCheck, done: Check, undone: Undo2, closed: Archive, approved: CircleCheck, declined: CircleX }
+const eventIcon: Record<SupportEventKind, typeof Info> = { opened: Inbox, ticket: Ticket, priority: Flag, paused: Hand, resumed: Bot, resolved: CheckCheck, done: Check, undone: Undo2, closed: Archive, approved: CircleCheck, declined: CircleX, action: RefreshCw, proposed: Send }
+/** A safe action the agent took on its own (api/src/support-actions.ts), in words, with what it acted on. */
+const actionWords: Record<string, string> = { verify_domain: 'The agent re-checked DNS for', recheck_receiving_host: 'The agent re-checked the MX of', resend_forward: 'The agent resent the forward confirmation for' }
 function eventText(e: SupportEvent, c: SupportDetail['conversation']) {
   const who = e.by ? e.by.name ?? 'Staff' : null, d = e.details as Record<string, string | boolean | null | undefined>
   switch (e.kind) {
@@ -548,11 +550,13 @@ function eventText(e: SupportEvent, c: SupportDetail['conversation']) {
     case 'done': return `${who ?? 'Staff'} marked it done`
     case 'undone': return `${who ?? 'Staff'} undid Done`
     case 'closed': return 'Conversation closed'
-    case 'approved': return d.failed ? `${who ?? 'Staff'} approved ${approvalWords(d.kind)}, and it failed` : `${who ?? 'Staff'} approved ${approvalWords(d.kind)}`
-    case 'declined': return `${who ?? 'Staff'} declined ${approvalWords(d.kind)}`
+    case 'approved': return d.failed ? `${who ?? 'Staff'} approved ${approvalWords(d)}, and it failed` : `${who ?? 'Staff'} approved ${approvalWords(d)}`
+    case 'declined': return `${who ?? 'Staff'} declined ${approvalWords(d)}`
+    case 'action': return `${actionWords[String(d.kind)] ?? 'The agent acted on'} ${d.host ?? d.domain ?? d.endpoint ?? 'its target'}`
+    case 'proposed': return `The agent asked staff to approve: ${d.label ?? 'a change'}${d.summary ? ` · ${d.summary}` : ''}`
   }
 }
-const approvalWords = (kind: unknown) => kind === 'retry_work' ? 'retrying the stuck work' : 'a proposed action'
+const approvalWords = (d: Record<string, unknown>) => d.kind === 'retry_work' ? 'retrying the stuck work' : typeof d.label === 'string' ? `“${d.label}”` : 'a proposed action'
 function EventLine({ e, c }: { e: SupportEvent; c: SupportDetail['conversation'] }) {
   const Icon = e.kind !== 'opened' ? eventIcon[e.kind] ?? Info : c.channel === 'chat' ? MessageSquare : c.channel === 'agent_feedback' ? Bot : Mail
   return <li className="sinbox-event" data-kind={e.kind}><Icon size={14} aria-hidden="true" /><span className="sinbox-event__text">{eventText(e, c)}</span><time dateTime={e.at} title={when(e.at)}>{shortDateTime(e.at)}</time></li>

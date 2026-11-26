@@ -59,7 +59,11 @@ const handoff = token => {
 const conversations = new Map();
 const view = (c, created) => ({ id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, status: c.closed ? 'closed' : 'open', workspaceId: c.workspaceId, contentShared: !!c.content, created });
 // A chat's own routes (api/src/support-conversations.ts chatOnly): an email conversation is refused them.
-const chatOnly = path => /^\\/v1\\/support\\/(?:notes|actions)(?:\\/|$)/.test(path) || /^\\/v1\\/support\\/domains\\/[^/]+\\/verify$/.test(path);
+const chatOnly = path => /^\\/v1\\/support\\/(?:notes|actions|approvals)(?:\\/|$)/.test(path) || /^\\/v1\\/support\\/domains\\/[^/]+\\/verify$/.test(path)
+  || /^\\/v1\\/support\\/receiving\\/(?:hosts\\/[^/]+\\/recheck|forwards\\/[^/]+\\/resend)$/.test(path);
+// Risky changes the agent proposes to staff (api/src/support-approvals.ts AGENT_KINDS): each kind's fields. Kept, never run.
+const STAFF_FIELDS = { raise_daily_limit: ['daily'], raise_domain_limit: ['limit'], lift_growth_pace: [], pause_sending: [], resume_sending: [], release_marketing: [], release_campaign: ['campaignId'], grant_credit: ['amountCents'] };
+const proposals = [];
 const inScope = c => memberships(c.userId).filter(w => !c.workspaceId || w.id === c.workspaceId);
 // Support notes (api/src/support-notes.ts): a person's own, tagged with the conversation's workspace when written, read
 // back while untagged or while they still belong to that workspace.
@@ -219,6 +223,18 @@ export class SupportPlatform extends WorkerEntrypoint {
       if (a?.refused) return refuse(403, 'SUPPORT_GRANT_REQUIRED');
       return a && !a.hidden && a.conversationId === c.id && allowed.some(w => w.id === a.workspaceId && managed(w)) ? ok(actionView(a)) : refuse(404, 'NOT_FOUND');
     }
+    // A proposal to staff, for the chat's one workspace (an owner's or admin's): kept, never run.
+    if (url.pathname === '/v1/support/approvals' && method === 'POST') {
+      const fields = STAFF_FIELDS[body?.kind], keys = Object.keys(body ?? {}).filter(k => k !== 'kind' && k !== 'reason').sort();
+      if (!fields || typeof body.reason !== 'string' || body.reason.length < 10 || keys.join() !== [...fields].sort().join()) return refuse(422, 'VALIDATION_FAILED');
+      if (allowed.length !== 1) return refuse(422, 'WORKSPACE_REQUIRED');
+      if (!managed(allowed[0])) return refuse(404, 'NOT_FOUND');
+      const p = { id: 'apr_' + 'a'.repeat(22) + String(proposals.length).padStart(4, '0'), conversationId: c.id, workspaceId: allowed[0].id, kind: body.kind, fields: Object.fromEntries(keys.map(k => [k, body[k]])), reason: body.reason };
+      proposals.push(p);
+      const label = { raise_daily_limit: 'Set the daily sending limit', pause_sending: 'Pause the workspace’s sending' }[p.kind] ?? 'A change for staff';
+      return ok({ id: p.id, kind: p.kind, label, summary: (p.kind === 'raise_daily_limit' ? 'Daily limit ' + Number(body.daily ?? 0).toLocaleString('en-US') + ' for workspace ' : 'Workspace ') + p.workspaceId, state: 'proposed',
+        expiresAt: new Date(Date.now() + 72 * 3600000).toISOString() }, 201);
+    }
     const recheck = url.pathname.match(/^\\/v1\\/support\\/domains\\/([A-Za-z0-9_-]{1,120})\\/verify$/);
     if (recheck && method === 'POST') {
       const workspace = allowed.find(w => w.id === targetWorkspace(recheck[1]));
@@ -376,6 +392,7 @@ export default {
     // Support actions: read them all; the person decides one (status, with the API's result, error and delivery); its
     // read is refused or answers 404, or its sentence changes; the label the next proposals' sentences carry; a stamped
     // path answers with an outage.
+    if (url.pathname === '/__proposals') return Response.json(proposals);
     if (url.pathname === '/__actions') {
       if (request.method === 'GET') return Response.json([...actions.values()]);
       const { id, status, result, error, delivery, hidden, refused, summary, label, outage } = await request.json();
@@ -656,6 +673,22 @@ export async function fakeGateway(request: Request): Promise<Response> {
   // Where received mail goes: an owner's chat reads its routes, then answers.
   // Why a mail app's send was refused: an owner's chat reads its SMTP refusals, then answers.
   if (said.includes('SMTP probe')) return answered ? say(body, ['Your mail app was refused 3 times in the last hour: it sent from an address your SMTP login may not use.']) : toolUse('toolu_smtp', 'smtp_refusals', {});
+  // A limit the customer needs sooner: the model first reaches for a change it has no tool for (pause_sending), then asks
+  // the team with propose_to_staff, then answers.
+  // The same thing two ways in one turn: a card pausing the campaign and asking the team to pause the workspace's sending,
+  // in either order. The second is refused before Nightmail; then the model answers.
+  for (const [probe, order] of [['Pause probe', ['propose_action', 'propose_to_staff']], ['Staff pause probe', ['propose_to_staff', 'propose_action']]] as const) {
+    if (!said.includes(probe)) continue;
+    const next = order.find(name => !used.includes(name));
+    if (!next) return say(body, ['I’ve set that up: it needs one more step.']);
+    return next === 'propose_action' ? toolUse(`toolu_pause_card_${probe.length}`, 'propose_action', { kind: 'pause_campaign', campaignId: 'cmp_1_acme' })
+      : toolUse(`toolu_pause_staff_${probe.length}`, 'propose_to_staff', { kind: 'pause_sending', reason: 'Their campaign is mailing a list that complained; they want it stopped now.' });
+  }
+  if (said.includes('Limit probe')) {
+    if (!used.includes('pause_sending')) return toolUse('toolu_limit_direct', 'pause_sending', { workspaceId: 'ws_acme' });
+    if (!used.includes('propose_to_staff')) return toolUse('toolu_limit_staff', 'propose_to_staff', { kind: 'raise_daily_limit', daily: 50000, reason: 'Launch next week; standing is ok and the evaluation finished.' });
+    return say(body, ['I’ve asked the Nightmail team to set your daily limit to 50,000. Nothing has changed yet: they’ll reply here.']);
+  }
   if (said.includes('Routes probe')) return answered ? say(body, ['Mail to help@acme.test goes to your helpdesk webhook, which failed 3 of 43 deliveries this week.']) : toolUse('toolu_routes', 'receiving_routes', {});
   // Proposed changes. A turn they aren't offered in (a member's chat, any email) calls them anyway.
   const propose = async (id: string, input: object) => { await control.beforeTool?.('propose_action'); return toolUse(id, 'propose_action', input); };
@@ -738,7 +771,7 @@ export async function fakeGateway(request: Request): Promise<Response> {
   // A verified email asking for billing, keys and logs: the model calls each tool email never offers, one after another,
   // then answers.
   if (said.includes('A support email arrived') && said.includes('Excluded probe')) {
-    const next = ['get_billing', 'get_audit', 'api_errors', 'explain_request', 'list_webhook_deliveries', 'receiving_routes', 'held_addresses', 'pending_verifications', 'smtp_refusals'].find(name => !used.includes(name));
+    const next = ['get_billing', 'get_audit', 'api_errors', 'explain_request', 'list_webhook_deliveries', 'receiving_routes', 'held_addresses', 'pending_verifications', 'smtp_refusals', 'recheck_receiving_host', 'resend_forward_link', 'propose_to_staff'].find(name => !used.includes(name));
     if (next) return toolUse(`toolu_x_${next}_${body?.messages?.length ?? 0}`, next, next === 'explain_request' ? { requestId: 'req_' + 'c'.repeat(32) } : {});
     return say(body, ['Hi Ada,\n\nYour balance, invoices and API keys are answered in Help in the dashboard: sign in to Nightmail and open Help.\n\nNightmail support (AI)']);
   }

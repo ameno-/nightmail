@@ -5,7 +5,7 @@ import { errors, json, log, notFound, response, type App, type Config, type Data
 import { productName } from './brand.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { renderNotice, type Line, type Notice } from './notices.js';
-import { approvalLink, heldWhy, KINDS, propose } from './support-approvals.js';
+import { approvalLink, heldWhy, isKind, KINDS, propose } from './support-approvals.js';
 import { emailEvidence, supportPlatformOnly } from './support-conversations.js';
 import { event, itemColumns, itemFrom, triageCandidates, TRIAGE_REASONS, type ItemRow } from './support-inbox.js';
 
@@ -54,8 +54,10 @@ export type StaffRow = ItemRow & {
   brief: Brief | null; evidence: { filedBy?: string } | null; staff_thread: string | null; staff_seq: number; staff_reasons: string[]; role: string | null;
   max_seq: number; held_reason: string | null; held_seq: number | null; held_id: string | null; first_words: Words | null; fresh_words: Words[] | null;
   operation: string | null; request_id: string | null; filed_at: string | null; failed_by: 'agent' | 'staff' | null;
+  /** The agent's newest risky proposal waiting for staff (support-approvals.ts), if any. */
+  proposal?: { id: string; kind: string; payload: Record<string, unknown>; reason: string; expires_ms: number } | null;
 };
-type Need = 'failed' | 'held' | 'no_reply' | 'blocked' | 'waiting' | 'ticket' | 'feedback';
+type Need = 'failed' | 'held' | 'no_reply' | 'proposal' | 'blocked' | 'waiting' | 'ticket' | 'feedback';
 type Thread = { key: string; subject: string; opened_at: string; last_sent_at: string | null; emails: number; pending: boolean };
 
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
@@ -76,8 +78,21 @@ const ago = (iso: string, now: number) => {
 };
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/**
+ * Gives a conversation a ticket of type staff (it needs a person), with its timeline line: when it has none, or, with
+ * `reopen`, when its ticket was resolved. Answers the new ticket's ID, or null when it kept the one it had.
+ */
+export async function openStaffTicket(tx: DbExecutor, conversationId: string, severity: 'P2' | 'P3', reopen = false) {
+  const id = ticketId();
+  const { rows: [opened] } = await tx.execute<{ id: string }>(sql`UPDATE support_conversations SET ticket_id = ${id}, ticket_type = 'staff', ticket_severity = ${severity}, ticket_at = now(), ticket_resolved_at = NULL,
+      status = CASE WHEN status = 'open' THEN 'ticketed' ELSE status END WHERE id = ${conversationId} AND (ticket_id IS NULL ${reopen ? sql`OR ticket_resolved_at IS NOT NULL` : sql``}) RETURNING id`);
+  if (!opened) return null;
+  await tx.execute(event(conversationId, 'ticket', null, { ticketId: id, type: 'staff', severity, by: 'nightmail' }));
+  return id;
+}
+
 export const needOf = (row: StaffRow, reasons: string[]): Need => row.channel === 'agent_feedback' ? 'feedback' : reasons.includes('failed') ? 'failed' : row.held_reason ? 'held'
-  : reasons.includes('no_reply') ? 'no_reply' : reasons.includes('blocked') ? 'blocked' : reasons.includes('paused') ? 'waiting' : 'ticket';
+  : reasons.includes('no_reply') ? 'no_reply' : row.proposal && isKind(row.proposal.kind) ? 'proposal' : reasons.includes('blocked') ? 'blocked' : reasons.includes('paused') ? 'waiting' : 'ticket';
 
 /** Who wrote, and where: how sure Nightmail is of them is said with them, so nobody acts on an account because of an unverified email. */
 export function whoOf(row: StaffRow) {
@@ -102,6 +117,10 @@ const TYPE_DECISION: Record<string, string> = {
   account: 'Answer what the agent couldn’t.', deliverability: 'Answer what the agent couldn’t.', abuse_report: 'Decide how to handle the report.',
   privacy: 'Decide how to handle the request.', legal: 'Decide how to handle the request.',
 };
+/** The agent's waiting proposal in fixed words: its kind's label and its exact target, with the agent's reason (untrusted). */
+const proposalOf = (row: StaffRow) => row.proposal && isKind(row.proposal.kind) ? { label: KINDS[row.proposal.kind].label, summary: KINDS[row.proposal.kind].summary?.(row.proposal.payload) ?? null, reason: row.proposal.reason } : null;
+/** What a conversation's last email covered of its proposal, kept with its reasons (staff_reasons). */
+const proposalMark = (row: StaffRow) => `proposal:${row.proposal?.id ?? ''}`;
 /** A held answer that may go as written (held by the check or a pause); any other needs a fresh reply. */
 const sendable = (row: StaffRow) => row.held_reason === 'gate' || row.held_reason === 'paused';
 export function subjectOf(need: Need, row: StaffRow, short: string) {
@@ -110,6 +129,7 @@ export function subjectOf(need: Need, row: StaffRow, short: string) {
     case 'failed': return `A reply to ${short} failed to send`;
     case 'held': return `Review a held answer to ${short}`;
     case 'no_reply': return `${short} got no reply`;
+    case 'proposal': return `Approve a change for ${short}: ${proposalOf(row)?.label ?? 'a proposal'}`;
     case 'blocked': return `Support work for ${short} is stuck`;
     case 'waiting': return `${short} is waiting for you`;
     case 'feedback': return `Agent feedback from ${short}${title ? `: ${title}` : ''}`;
@@ -163,6 +183,8 @@ function decisionOf(need: Need, row: StaffRow): { decision: string; recommendati
       ? { decision: 'Send the agent’s held answer, or write your own.', recommendation: recommended ?? (row.held_reason === 'gate' ? 'The output check held it: read it before sending.' : null) }
       : { decision: 'Write them a fresh reply.', recommendation: `The agent’s held answer can’t go as written. ${heldWhy(row.held_reason)}.` };
     case 'no_reply': return { decision: 'Reply to them now.', recommendation: recommended };
+    case 'proposal': { const p = proposalOf(row);
+      return { decision: `Approve or decline: ${p?.label ?? 'the agent’s proposal'}${p?.summary ? ` (${p.summary})` : ''}.`, recommendation: p ? { untrusted: `The agent’s reason: ${oneLine(p.reason, 220)}` } : null }; }
     case 'blocked': return { decision: 'Retry the stuck work, or look at why it’s stuck.', recommendation: null };
     case 'waiting': return { decision: 'Reply to them, or hand the conversation back to the agent.', recommendation: recommended };
     case 'ticket': return { decision: TYPE_DECISION[row.ticket_type ?? ''] ?? 'Answer them.', recommendation: recommended };
@@ -182,6 +204,7 @@ function changesOf(row: StaffRow, reasons: string[], now: number) {
     if (reason === 'paused') parts.push('the agent is paused and they’re waiting');
     if (reason === 'ticket' && row.ticket_type !== 'staff') parts.push('the agent filed a ticket');
   }
+  if (row.proposal && !row.staff_reasons.includes(proposalMark(row))) parts.push('the agent proposed a change for you to approve');
   return parts.length ? `Since the last email, ${parts.join(', ')}.` : 'It still needs you.';
 }
 /** The footer: the ticket (or tickets), and, for a conversation's thread, that replying adds a note to it (staffReply). */
@@ -253,14 +276,19 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
         (SELECT json_agg(json_build_object('text', left(x.text, 4000), 'at', x.created_at) ORDER BY x.seq) FROM (SELECT m.seq, m.text, m.created_at FROM support_messages m
           WHERE m.conversation_id = c.id AND m.author = 'customer' AND m.seq > c.staff_seq ORDER BY m.seq DESC LIMIT 3) x) AS fresh_words,
         f.operation, f.request_id, f.created_at::text AS filed_at,
-        (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'failed' ORDER BY m.seq DESC LIMIT 1) AS failed_by
+        (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'failed' ORDER BY m.seq DESC LIMIT 1) AS failed_by,
+        (SELECT json_build_object('id', a.id, 'kind', a.kind, 'payload', a.payload, 'reason', a.reason, 'expires_ms', (extract(epoch FROM a.expires_at) * 1000)::float8) FROM support_approvals a
+          WHERE a.conversation_id = c.id AND a.proposed_by = 'agent' AND a.state = 'proposed' AND a.expires_at > now() ORDER BY a.created_at DESC LIMIT 1) AS proposal
       FROM ${itemFrom('')}
       LEFT JOIN LATERAL (SELECT m.id, coalesce(m.held_reason, 'unknown') AS reason, m.seq FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'held' AND m.draft_outcome IS NULL
         AND m.seq > coalesce((SELECT max(s.seq) FROM support_messages s WHERE s.conversation_id = c.id AND s.author = 'staff' AND s.kind IS DISTINCT FROM 'note'), 0) ORDER BY m.seq DESC LIMIT 1) held ON true
       LEFT JOIN support_feedback f ON f.conversation_id = c.id
       WHERE ${triageCandidates} AND triage.needs_you ORDER BY triage.urgency, triage.since, c.id LIMIT 200`);
     const reasonsOf = (row: StaffRow) => TRIAGE_REASONS.filter(reason => row[`why_${reason}`]);
-    const changed = (row: StaffRow) => !row.staff_thread || reasonsOf(row).some(r => !row.staff_reasons.includes(r)) || !!row.fresh_words?.length || (row.held_seq ?? 0) > row.staff_seq;
+    const changed = (row: StaffRow) => !row.staff_thread || reasonsOf(row).some(r => !row.staff_reasons.includes(r)) || !!row.fresh_words?.length || (row.held_seq ?? 0) > row.staff_seq
+      || (!!row.proposal && !row.staff_reasons.includes(proposalMark(row)));
+    /** What this email covers, for the next one to compare: the Needs you reasons and the proposal it carried. */
+    const covered = (row: StaffRow) => [...reasonsOf(row), ...row.proposal ? [proposalMark(row)] : []];
 
     // Every conversation that needs a person has a thread, and a ticket.
     for (const row of rows.filter(r => !r.staff_thread)) {
@@ -272,11 +300,9 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
       }
       await tx.execute(sql`INSERT INTO support_staff_threads(key, subject, workspace_id) VALUES (${key}, '', ${row.channel === 'agent_feedback' ? row.workspace_id : null}) ON CONFLICT (key) DO NOTHING`);
       if (!row.ticket_id) {
-        const id = ticketId(), severity = row.urgency <= 2 ? 'P2' : 'P3';
-        const { rows: [opened] } = await tx.execute<{ id: string }>(sql`UPDATE support_conversations SET ticket_id = ${id}, ticket_type = 'staff', ticket_severity = ${severity}, ticket_at = now(),
-            status = CASE WHEN status = 'open' THEN 'ticketed' ELSE status END WHERE id = ${row.id} AND ticket_id IS NULL RETURNING id`);
         // Its ticket is one of the reasons it needs you from now on, and this email names it.
-        if (opened) { await tx.execute(event(row.id, 'ticket', null, { ticketId: id, type: 'staff', severity, by: 'nightmail' })); row.ticket_id = id; row.ticket_type = 'staff'; row.why_ticket = true; }
+        const id = await openStaffTicket(tx, row.id, row.urgency <= 2 ? 'P2' : 'P3');
+        if (id) { row.ticket_id = id; row.ticket_type = 'staff'; row.why_ticket = true; }
       }
       await tx.execute(sql`UPDATE support_conversations SET staff_thread = ${key} WHERE id = ${row.id}`);
       row.staff_thread = key;
@@ -307,14 +333,17 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
         // A yes or no on something proposed: the button opens the conversation with it ready to confirm. A held answer
         // is proposed only when it may go as written (held by the check or a pause); one that needs a fresh reply isn't.
         const kind = need === 'blocked' ? 'retry_work' : need === 'held' && row.held_id && (row.held_reason === 'gate' || row.held_reason === 'paused') ? 'send_held_answer' : null;
-        const approval = kind === 'retry_work' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', reason: `The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work.` })
-          : kind === 'send_held_answer' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', payload: { messageId: row.held_id }, reason: `${heldWhy(row.held_reason)}.` }) : null;
-        mail = conversationEmail(origin, row, reasons, first, now, approval && kind ? { label: KINDS[kind].label, url: approvalLink(config, approval) } : null, first ? subjectOf(need, row, whoOf(row).short) : thread.subject);
+        // The agent's risky proposal is already proposed (support-actions.ts): the email carries its link.
+        const proposed = need === 'proposal' && row.proposal ? { id: row.proposal.id, conversationId: row.id, expiresAt: new Date(Number(row.proposal.expires_ms)) } : null;
+        const approval = proposed ?? (kind === 'retry_work' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', reason: `The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work.` })
+          : kind === 'send_held_answer' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', payload: { messageId: row.held_id }, reason: `${heldWhy(row.held_reason)}.` }) : null);
+        const label = proposed ? proposalOf(row)!.label : kind ? KINDS[kind].label : null;
+        mail = conversationEmail(origin, row, reasons, first, now, approval && label ? { label, url: approvalLink(config, approval) } : null, first ? subjectOf(need, row, whoOf(row).short) : thread.subject);
       }
       const seq = thread.emails + 1;
       await tx.execute(sql`INSERT INTO support_staff_emails(key, thread_key, seq, subject, text, html) VALUES (${emailKey(key, seq)}, ${key}, ${seq}, ${mail.subject}, ${mail.text}, ${mail.html})`);
       if (first) await tx.execute(sql`UPDATE support_staff_threads SET subject = ${mail.subject} WHERE key = ${key}`);
-      for (const row of due) await tx.execute(sql`UPDATE support_conversations SET staff_seq = ${row.max_seq}, staff_reasons = ${sql.param(reasonsOf(row))}::text[] WHERE id = ${row.id}`);
+      for (const row of due) await tx.execute(sql`UPDATE support_conversations SET staff_seq = ${row.max_seq}, staff_reasons = ${sql.param(covered(row))}::text[] WHERE id = ${row.id}`);
       budget--; written++;
     }
 
