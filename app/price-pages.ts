@@ -5,6 +5,7 @@ import { runnerImport, type Plugin, type Rollup } from 'vite'
 import { publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
 import { CRAWL_DISALLOW } from '../api/src/site-index.ts'
 import { pruneCss, usedNames } from './critical-css.ts'
+import { linkCard, withCard } from './link-card.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
 import { PRICE_PAGES } from './src/features/pricing/pages.ts'
@@ -15,8 +16,8 @@ import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/read
 
 // The public price pages and what's made with them (features/pricing):
 // - pricing.html and compare/<slug>.html, one for every comparison's entry (compare/index.ts): index.html with the
-//   page's own title, description, canonical address, link preview (its card included: pages.ts), Markdown twin and
-//   structured data, and the page itself painted from the HTML alone (prerender.tsx: the scene as the app first draws
+//   page's own title, description, canonical address, link preview (its card, drawn here from its words: pages.ts,
+//   link-card.ts), Markdown twin and structured data, and the page itself painted from the HTML alone (prerender.tsx: the scene as the app first draws
 //   it, in #price-shell) with the CSS it needs inlined (critical-css.ts), so it shows before any of the app's code.
 //   The app's stylesheet and modules are out of the page: the homepage's boot script (home/shell/boot.js) starts them
 //   at the reader's first touch, key or scroll (a press held, and what they typed, carried over) or after 8 s, and the
@@ -99,9 +100,9 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       const { module: prerender } = await runnerImport<typeof import('./src/features/pricing/prerender.tsx')>(prerenderModule, { root, configFile: false, logLevel: 'error' })
 
       for (const page of PRICE_PAGES) {
-        if (!existsSync(resolve(publicDir, page.card.file))) return this.error(`${page.path}'s card, public/${page.card.file}, is missing: what it shows has changed (features/pricing/pages.ts). Make it with node scripts/price-cards.mjs and delete the old one.`)
-        const title = page.searchTitle, canonical = canonicalOrigin + page.path, image = `${origin}/${page.card.file}`
-        let html = template
+        const title = page.searchTitle, canonical = canonicalOrigin + page.path, card = linkCard(page.card)
+        if (!bundle[card.file]) this.emitFile({ type: 'asset', fileName: card.file, source: card.source })
+        let html = withCard(template, card, origin)
         const set = (pattern: RegExp, value: string) => {
           if (!pattern.test(html)) this.error(`index.html has no ${pattern.source} for ${page.file}.`)
           html = html.replace(pattern, (_match, start: string) => start + value)
@@ -112,14 +113,6 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
         set(/(<meta property="og:description" content=")[^"]*/, attr(page.description))
         set(/(<meta name="twitter:title" content=")[^"]*/, attr(title))
         set(/(<meta name="twitter:description" content=")[^"]*/, attr(page.description))
-        for (const name of ['property="og:image"', 'name="twitter:image"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(image))
-        for (const name of ['property="og:image:alt"', 'name="twitter:image:alt"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(page.card.alt))
-        set(/(<meta property="og:image:type" content=")[^"]*/, 'image/jpeg')
-        // The card's size as its file has it (a card cut short once said 630 and was 542 high).
-        const size = jpegSize(readFileSync(resolve(publicDir, page.card.file)))
-        if (!size) return this.error(`public/${page.card.file} is no JPEG with a size this build can read.`)
-        set(/(<meta property="og:image:width" content=")[^"]*/, String(size.width))
-        set(/(<meta property="og:image:height" content=")[^"]*/, String(size.height))
         set(/(<!-- Link previews\.)[^>]*-->/, ' This page\'s own (app/price-pages.ts). -->')
         set(/(<meta property="og:type" content="website" \/>)/, `\n    <meta property="og:url" content="${attr(canonical)}" />\n    <link rel="canonical" href="${attr(canonical)}" />`)
         set(/(<link rel="alternate" type="text\/markdown" href=")[^"]*(?=" title=")/, attr(canonicalOrigin + markdownPath(page.path)))
@@ -158,16 +151,6 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
  *  the homepage's. */
 export const priceFirstFiles = (files: string[]) => [/^assets\/(?:moondust-\d+|wall-\d+|lamp)-[\w-]+\.(?:avif|webp)$/, /^assets\/(?:pricing|board-page|machines)-[\w-]+\.(?:js|css)$/]
   .flatMap(pattern => files.filter(name => pattern.test(name)))
-
-/** A JPEG's width and height, from its start-of-frame marker. */
-function jpegSize(bytes: Buffer): { width: number; height: number } | null {
-  for (let at = 2; at + 9 < bytes.length && bytes[at] === 0xff;) {
-    const marker = bytes[at + 1]!, length = bytes.readUInt16BE(at + 2)
-    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) return { height: bytes.readUInt16BE(at + 5), width: bytes.readUInt16BE(at + 7) }
-    at += 2 + length
-  }
-  return null
-}
 
 /** The stylesheets the chunks of these modules load, theirs and their imports'. */
 function pageCss(bundle: Rollup.OutputBundle, modules: string[]) {
