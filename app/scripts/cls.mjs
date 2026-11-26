@@ -918,10 +918,11 @@ async function measure(browser, job, fx) {
       await settle(page, net);
     }
     if (job.disclose) {
-      const summary = page.locator('details > summary', { hasText: job.disclose }).first();
-      if (!await summary.count()) problems.push(`no disclosure “${job.disclose}”`);
-      else await summary.click();
-      await settle(page, net);
+      const toggle = page.locator('button[aria-expanded], details > summary', { hasText: job.disclose }).first();
+      if (await toggle.isVisible()) {
+        await toggle.click();
+        await settle(page, net);
+      } else if (job.device === 'phone') problems.push(`no disclosure “${job.disclose}”`);
     }
     if (job.dialog) {
       const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.textContent.trim().startsWith(label)); el?.click(); return Boolean(el); }, job.dialog);

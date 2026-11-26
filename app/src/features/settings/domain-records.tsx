@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { Alert, Button, CopyButton, DataTable, Disclosure, DropdownMenu, StatusBadge, useCopy, type MenuItem, type Tone } from '../../components/ui'
+import { ArrowRight, ChevronRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
+import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { Alert, Button, CopyButton, DataTable, DropdownMenu, Icon, StatusBadge, useCopy, type MenuItem, type Tone } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -322,8 +322,9 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const all = rows.flatMap(row => row.record.id === 'dmarc-policy' ? [] : [row.record])
   const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} records`)
   const policy = domain.dmarc
-  // Once verified (and no required record such as a new custom MAIL FROM is pending), fold the DNS records behind one
-  // disclosure. A domain that isn't verified or loses verification renders them open directly.
+  // Once verified (and no required record such as a new custom MAIL FROM is pending), fold the DNS records behind a
+  // phone-only toggle (<640px, decided at first paint in CSS). At 640px and wider, CSS renders the records open with no
+  // toggle exposed. A domain that isn't verified or loses verification renders them open at every width.
   const foldRecords = domain.status === 'verified' && !domain.records.some(required)
   const content = <>
     {(summary || actions || all.length > 0) && <div className="domain-records-actions">
@@ -342,6 +343,20 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
     {receivingView && alert}
     {receivingView && warning && <Alert tone="warning">{warning}</Alert>}
     {policy && !policy.alignment.dkim && !policy.alignment.spf && <Alert tone="warning">DMARC fails: publish the DKIM records, then check again.</Alert>}
-    {foldRecords ? <Disclosure title="DNS records · Verified" headingAs="h2" className="domain-records-disclosure">{content}</Disclosure> : content}
+    {foldRecords ? <VerifiedRecordsFold key={domain.id}>{content}</VerifiedRecordsFold> : content}
   </section>
+}
+
+// Phone-only disclosure (<640px in domain-records.css): at 640px and wider the toggle is display:none (invisible to
+// keyboard and assistive tech) and the wrapper/body are display:contents so desktop renders open identically to before.
+function VerifiedRecordsFold({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const bodyId = useId()
+  return <div className="domain-records-fold" data-open={open || undefined}>
+    <button type="button" className="domain-records-fold__toggle" aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen(current => !current)}>
+      <span className="domain-records-fold__title">DNS records · Verified</span>
+      <Icon icon={ChevronRight} size="sm" />
+    </button>
+    <div id={bodyId} className="domain-records-fold__body">{children}</div>
+  </div>
 }

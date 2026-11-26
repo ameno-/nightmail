@@ -168,7 +168,10 @@ export function DomainDetailSkeleton() {
   const { multiTenant } = useWorkspaceAccess()
   return <LoadingRegion className="stack domain-page" label="Loading domain">
     <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><Skeleton className="domain-status-skeleton" width={72} height={20} /><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
-    <div className="domain-sections"><section className="section stack domain-records-section"><div className="domain-records-actions"><ControlSkeleton width={128} /><ControlSkeleton width={104} /></div><div className="domain-records-list"><TableSkeleton className="domain-records ui-table--two-line" columns={settingsColumns.dns} rows={multiTenant ? 6 : 4} /><div className="domain-records-add"><SkeletonText width={176} /></div></div></section></div>
+    <div className="domain-sections"><section className="section stack domain-records-section">
+      <div className="domain-records-fold__skeleton" aria-hidden="true"><Skeleton width="100%" height={44} /></div>
+      <div className="domain-records-fold__desktop"><div className="domain-records-actions"><ControlSkeleton width={128} /><ControlSkeleton width={104} /></div><div className="domain-records-list"><TableSkeleton className="domain-records ui-table--two-line" columns={settingsColumns.dns} rows={multiTenant ? 6 : 4} /><div className="domain-records-add"><SkeletonText width={176} /></div></div></div>
+    </section></div>
   </LoadingRegion>
 }
 
