@@ -1,0 +1,119 @@
+import { Fragment, type CSSProperties, type ReactNode } from 'react'
+import { NightmailWordmark } from '../../../components/NightmailLogo'
+import { dayOf, type Source } from '../prices'
+import { linesOf, plain, type Block, type Inline, type PageDoc, type Table, type Text } from './shape'
+
+// A public price page, drawn from its data (shape.ts): a comparison (comparison.ts), the comparisons' index (hub.ts), or
+// any page made in that shape. The verdict first, in the homepage television's type and colours on its room's dark: the
+// heading's lines, Nightmail's in the screen's periwinkle, a small caption with the size and the day, and the way in, the
+// television's airmail label at an ordinary button's size with the sign-in terms under it. Then the page's sections (the
+// first, the price table, straight under the verdict, its heading for screen readers only), the questions, the related
+// pages, and the pages read. app/price-pages.ts writes it as the page's own HTML with its CSS inlined and none of the
+// app's code; the app draws the same at the same address (view.tsx). Nothing here may need a browser, and nothing here
+// imports a stylesheet or a picture (view.tsx and set.tsx do), so the pre-merge check can render it.
+
+const host = (url: string) => new URL(url).hostname.replace(/^www\./, '')
+const pageName = (url: string) => host(url) + new URL(url).pathname.replace(/\/$/, '')
+
+function Run({ text }: { text: Text }) {
+  return <>{text.map((part: Inline, i) => typeof part === 'string' ? <span key={i}>{part}</span>
+    : 'href' in part ? <a key={i} href={part.href} {...part.href.startsWith('/') ? {} : { target: '_blank', rel: 'noopener noreferrer' }}>{part.text}</a>
+      : <span key={i} data-nightmail-sent={part.sent} data-nightmail-received={part.received}>{part.ours}</span>)}</>
+}
+
+/** The way in: the television's airmail label (home/tv/tv.css, .chyp), an ordinary button's size, opening Overview with
+ *  the page's focus (data/landing-focus.ts), and the terms signing in agrees to under it. */
+function Way({ focus }: { focus?: string }) {
+  return <div className="pp-way">
+    <div className="chyp chyp-under pp-label"><a className="chyp-go" href={focus ? `/overview?focus=${focus}` : '/overview'}><span className="srt-cta-label">Get started</span></a></div>
+    <p className="pp-consent">By continuing you agree to the <a href="/legal/terms">Terms of Service</a> and <a href="/legal/privacy">Privacy Policy</a>.</p>
+  </div>
+}
+
+/** The heading: each line its own, the first of several in the screen's periwinkle (a verdict leads with Nightmail's),
+ *  set as large as its longest line fits the column (--chars, page.css). */
+function Heading({ doc, id }: { doc: PageDoc; id?: string }) {
+  const lines = linesOf(doc.h1), chars = Math.max(...lines.map(line => plain(line).length))
+  return <h1 id={id} className="pp-verdict" style={{ '--chars': chars } as CSSProperties}>{lines.map((line, i) => <span key={i} className="pp-line" data-lead={lines.length > 1 && i === 0 ? '' : undefined}>{i > 0 && ' '}<Run text={line} /></span>)}</h1>
+}
+
+/** Where the page sits: the wordmark (home), then each crumb; a crumb carries the slash before it, so a line never ends
+ *  on one. */
+function Crumbs({ doc }: { doc: PageDoc }) {
+  return <header className="pp-top"><nav aria-label="Breadcrumb"><ol className="pp-crumbs">{doc.crumbs.map((crumb, i) => <li key={crumb.path}>
+    {i === 0 ? <a href="/" aria-label="nightmail home"><NightmailWordmark /></a> : i === doc.crumbs.length - 1 ? <span aria-current="page">{crumb.name}</span> : <a href={crumb.path}>{crumb.name}</a>}
+  </li>)}</ol></nav></header>
+}
+
+/** A table: figures right-aligned in the page's mono, a row marked under the screen's blue bar (the size the verdict
+ *  quotes), a row with a Nightmail figure in periwinkle. A last column of words (a plan's name) folds under the figures
+ *  on a phone. */
+function TableBlock({ table }: { table: Table }) {
+  const last = table.head.length - 1, fold = table.head.length > 3 && !table.numeric.includes(last), ours = table.head.indexOf('Nightmail')
+  const align = (i: number) => table.numeric.includes(i) ? 'end' : undefined
+  return <table className="pp-table" data-fold={fold ? '' : undefined}>
+    <caption><Run text={table.caption} /></caption>
+    <thead><tr>{table.head.map((head, i) => <th key={i} scope="col" data-align={align(i)} data-ours={i === ours ? '' : undefined} data-last={fold && i === last ? '' : undefined}>{head}</th>)}</tr></thead>
+    <tbody>{table.rows.map((row, r) => <tr key={r} data-mark={row.mark ? '' : undefined}>{row.cells.map((cell, i) => i === 0
+      ? <th key={i} scope="row"><Run text={cell} /></th>
+      : <td key={i} data-align={align(i)} data-ours={i === ours ? '' : undefined} data-last={fold && i === last ? '' : undefined}><Run text={cell} /></td>)}</tr>)}</tbody>
+  </table>
+}
+function BlockView({ block }: { block: Block }) {
+  if (block.kind === 'p') return <p className="pp-p"><Run text={block.text} /></p>
+  if (block.kind === 'list') return <ul className="pp-list">{block.items.map((item, i) => <li key={i}><Run text={item} /></li>)}</ul>
+  return <TableBlock table={block} />
+}
+
+/** The pages read, by day: "Checked 25 Nov 2026 on resend.com/pricing." */
+function Checked({ sources }: { sources: Source[] }) {
+  const pages = [...new Map(sources.map(source => [source.url, source])).values()]
+  const days = [...new Set(pages.map(source => source.checked))].sort()
+  const join = (i: number, n: number) => i === 0 ? '' : i === n - 1 ? ' and ' : ', '
+  // (Each day's words one text, so the HTML reads "Checked 25 Nov 2026 on <a …>", as the pre-merge check looks for it.)
+  return <p>{days.map((day, d) => { const on = pages.filter(source => source.checked === day); return <Fragment key={day}>{`${d === 0 ? 'Checked ' : '; '}${dayOf(day)} on `}{on.map((source, i) => <Fragment key={source.url}>{join(i, on.length)}<a href={source.url} target="_blank" rel="noopener noreferrer">{pageName(source.url)}</a></Fragment>)}</Fragment> })}.</p>
+}
+
+export function PricePageView({ doc, set }: { doc: PageDoc; set?: ReactNode }) {
+  const comparisons = doc.related.length > 0 && doc.related.every(page => page.path.startsWith('/compare/'))
+  return <div className="pp" data-set={set ? '' : undefined}>
+    <Crumbs doc={doc} />
+    {set}
+    <main className="pp-col">
+      <section className="pp-hero" aria-labelledby="pp-h1">
+        <Heading doc={doc} id="pp-h1" />
+        {doc.answer.map((text, i) => <p key={i} className="pp-caption"><Run text={text} /></p>)}
+        <Way focus={doc.focus} />
+      </section>
+      {doc.sections.map((section, i) => <section key={section.id} id={section.id} className="pp-section" aria-labelledby={`${section.id}-title`}>
+        <h2 id={`${section.id}-title`} className={doc.sections.length === 1 && section.blocks[0]?.kind === 'table' ? 'sr-only' : 'pp-h2'}>{section.title}</h2>
+        {section.blocks.map((block, j) => <BlockView key={j} block={block} />)}
+      </section>)}
+      {doc.questions.length > 0 && <section id="questions" className="pp-section" aria-labelledby="questions-title">
+        <h2 id="questions-title" className="pp-h2">Questions</h2>
+        {doc.questions.map(item => <div key={item.id} className="pp-qa"><h3>{item.question}</h3><p>{item.answer}</p></div>)}
+      </section>}
+      {doc.related.length > 0 && <nav className="pp-section" aria-labelledby="related-title">
+        <h2 id="related-title" className="pp-h2">{comparisons ? 'More comparisons' : 'More'}</h2>
+        <ul className="pp-more">{doc.related.map(page => <li key={page.path}><a href={page.path}>{page.title}</a></li>)}</ul>
+      </nav>}
+      <footer className="pp-print">
+        {doc.sources.length > 0 && <Checked sources={doc.sources} />}
+        <p>Product names belong to their owners and only identify their products. Nightmail isn’t affiliated with them.</p>
+      </footer>
+    </main>
+    <footer className="pp-end"><nav aria-label="Site links">
+      <a href="/">Home</a><a href="/pricing">Pricing</a>{doc.path !== '/compare' && <a href="/compare">Compare</a>}<a href="/docs">API docs</a><a href="/legal/terms">Terms</a><a href="/legal/privacy">Privacy</a>
+    </nav></footer>
+  </div>
+}
+
+/** The page's link-preview picture (scripts/price-cards.mjs photographs it at 1200 x 630): its heading and caption alone,
+ *  on the room's dark, with the wordmark. */
+export function PriceCard({ doc }: { doc: PageDoc }) {
+  return <div className="pp pp-card"><div className="pp-card-in">
+    <Heading doc={doc} />
+    {doc.answer.slice(0, 1).map((text, i) => <p key={i} className="pp-caption"><Run text={text} /></p>)}
+    <p className="pp-card-mark"><NightmailWordmark /></p>
+  </div></div>
+}
