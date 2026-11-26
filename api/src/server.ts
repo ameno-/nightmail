@@ -10,7 +10,7 @@ import { closeAfterRefusal, nodeLogFacetLane, nodeRuntime } from './adapters/nod
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
 import { clientIpHeader, clientNetworkHeader, legacyClientIpHeaders } from './brand.js';
-import { isMissingComparePage, isMissingDocsPage, isMissingLegalPage, isPublicPage, renamedDocsPage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isMissingLegalPage, isPublicPage, movedPage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext, snsIngress } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -87,8 +87,9 @@ try {
     return assets(c, async () => {
       const response = await pages(c, async () => {
         const shell = await dashboard(c, next);
-        // An operation's reference page under its old name moves to the new one (site-index.ts, RENAMED_OPERATIONS).
-        const renamed = renamedDocsPage(c.req.path);
+        // An operation's reference page under its old name moves to the new one (site-index.ts, RENAMED_OPERATIONS), and
+        // /alternatives to /compare (movedPage).
+        const renamed = movedPage(c.req.path);
         if (shell && renamed) { c.res = new Response(null, { status: 301, headers: { location: renamed + new URL(c.req.url).search, 'cache-control': 'public, max-age=3600' } }); return; }
         // A comparison, an operation or a legal document with no page of its own is not found, and a signed-in screen stays
         // out of search, as on the Worker (src/worker.ts, site-index.ts).

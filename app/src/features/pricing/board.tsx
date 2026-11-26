@@ -244,7 +244,7 @@ export function BoardEnd({ comparison: c }: { comparison?: Comparison | null }) 
         <Terms floor={null} />
         <ul className="price-facts">{c.rows.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
         <p className="price-note cb-read"><ReadOn sources={shownSources(sourcesOf(c), c.offer)} /></p>
-        {ownPages(c.slug).map(path => <p key={path} className="price-note cb-read">Every {c.vendor} plan, and what a month costs at each size: <Link to={path}>{c.vendor} pricing</Link>.</p>)}
+        {ownPages(c.slug).filter(path => path.startsWith('/pricing/')).map(path => <p key={path} className="price-note cb-read">Every {c.vendor} plan, and what a month costs at each size: <Link to={path}>{c.vendor} pricing</Link>.</p>)}
       </> : <p className="price-note">Monthly billing, list prices before tax, no promotions: each vendor’s cheapest plan that holds your numbers. <CheckedPages offers={OFFERS} />.</p>}
       <p className="price-note">Product names belong to their owners and only identify their products. Nightmail isn’t affiliated with them.</p>
     </section>

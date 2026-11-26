@@ -101,7 +101,7 @@ export function sessionLikely() {
   } catch { return selectedAccount() !== null }
 }
 /** Pages a visitor can read without an account. A query string isn't evidence of a session. */
-export const asksOnlyIfLikely = (path: string) => path === '/' || /^\/(?:docs|compare|legal|pricing)(?:\/|$)/.test(path)
+export const asksOnlyIfLikely = (path: string) => path === '/' || /^\/(?:docs|compare|legal|pricing)(?:\/|$)|^\/alternatives\//.test(path)
 
 /** A WebSocket URL on this origin for this tab's account and workspace. A browser's WebSocket can't send the headers every
  *  other request carries, so the API reads them from the query for its sockets (the campaign room). */

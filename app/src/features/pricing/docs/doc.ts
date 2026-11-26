@@ -29,6 +29,8 @@ export type Doc = PageDoc & {
   cardWords: { lines: [string, string]; caption: string }
   focus: WorkspaceFocus
   about: { name: string; url: string }
+  /** The services a page's table lists, in its order: its structured data's ItemList (an alternatives page). */
+  items?: { name: string; url: string }[]
   llms: string
 }
 
@@ -90,5 +92,6 @@ export function docGraph(doc: Doc): object[] {
       about: { '@type': 'SoftwareApplication', name: doc.about.name, url: doc.about.url }, mentions: { '@id': url('/#app') },
       citation: pagesOf(doc.cited).map(source => source.url) },
     ...doc.questions.length ? [faqPage(page, doc.questions)] : [],
+    ...doc.items ? [{ '@type': 'ItemList', '@id': `${page}#list`, numberOfItems: doc.items.length, itemListElement: doc.items.map((item, i) => ({ '@type': 'ListItem', position: i + 1, name: item.name, url: item.url })) }] : [],
   ]
 }

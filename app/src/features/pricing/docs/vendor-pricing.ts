@@ -4,6 +4,7 @@ import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, qu
 import { billAt, middle, perSize, priceTable, verdictHeading, verdictOf } from '../page/comparison.ts'
 import { factsSection, rowLines } from '../page/facts.ts'
 import { comparisonQuestions } from '../questions.ts'
+import { ALTERNATIVES_VENDORS } from './registry.ts'
 import { plain, type Doc, type Question, type Section, type Text } from './doc.ts'
 
 // A vendor's pricing page (/pricing/<slug>, "SendGrid pricing"): the verdict, Get started, and one table, what the vendor
@@ -181,9 +182,10 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
     `${vendor} pricing, read ${day}: every plan, ${from}. ${oursShort}.`,
     `${vendor} pricing, read ${day}: every plan and its price, ${from}, and what a month costs at each size.`,
   ], 160, 140)
-  // On the page, the vendor's own other page and the calculator; the other vendors' pricing pages in the copy's More.
+  // On the page, the vendor's own other pages and the calculator; the other vendors' pricing pages in the copy's More.
   const related = [
     { title: c.title, path: c.path, line: `${vendor} and ${productName} at every size ${vendor} prices, side by side.` },
+    ...ALTERNATIVES_VENDORS.includes(c.slug) ? [{ title: `${vendor} alternatives`, path: `/alternatives/${c.slug}`, line: `${productName} and the services nearest ${vendor} in price, at three sizes.` }] : [],
     { title: 'Price calculator', path: '/pricing', line: `What ${productName} costs at your own numbers.` },
   ]
   const others = pricingPages.filter(other => other.slug !== c.slug).map(other => ({ title: `${other.vendor} pricing`, path: `/pricing/${other.slug}`, line: `What ${other.vendor} costs, plan by plan.` }))
