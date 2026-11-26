@@ -125,10 +125,24 @@ const deliver: JobHandler = async (runtime, payload, job) => {
  * so the message goes to the configured webhook only; a refusal throws a retryable error, and so does a timeout
  * (retryDatabaseFailures), so the job that posts it runs again. Neither the URL nor the message is logged.
  */
+/** Slack answered a post, but not with a 2xx: its status, and for a 429 how many seconds it asked us to wait (retryAfterSeconds, from Retry-After). */
+export class SlackRefused extends ApiError {
+  constructor(code: string, readonly status: number, retryAfter: number | null) {
+    super(503, code, `Slack rejected the alert with HTTP ${status}.`, undefined, true);
+    if (retryAfter !== null) this.retryAfterSeconds = retryAfter;
+  }
+}
+/** Retry-After as seconds from now: a number of seconds or an HTTP date; null when absent or unreadable. */
+const retryAfter = (header: string | null) => {
+  if (!header) return null;
+  const seconds = /^\d+$/.test(header.trim()) ? Number(header.trim()) : (Date.parse(header) - Date.now()) / 1000;
+  return Number.isFinite(seconds) ? Math.max(0, Math.ceil(seconds)) : null;
+};
+/** Posts a message to a Slack webhook. No answer within timeoutMs rejects with fetch's TimeoutError: Slack may have taken it. */
 export async function postSlack(url: string, message: Record<string, unknown>, code = 'REPUTATION_ALERT_FAILED', timeoutMs = 10000) {
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(message), redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
   await response.body?.cancel();
-  if (!response.ok) throw new ApiError(503, code, `Slack rejected the alert with HTTP ${response.status}.`, undefined, true);
+  if (!response.ok) throw new SlackRefused(code, response.status, response.status === 429 ? retryAfter(response.headers.get('retry-after')) : null);
 }
 const lineText: Record<string, string> = { complaints: 'spam complaints', screen: 'content-screen rejections', bounces: 'hard bounces' };
 /** A first-party (exempt) workspace crossed a pause line: Nightmail did not hold it, so a person has to look. */

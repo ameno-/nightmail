@@ -33612,11 +33612,21 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await jobsOf()).map(job => job.alert).sort(), (await outbox()).map(alert => alert.id).sort());
       assert.deepEqual((await jobsOf()).map(job => job.id).sort(), (await outbox()).map(alert => `abuse-alert:${alert.id}`).sort(), 'Keyed by the alert: queued once.');
       const posts: { url: string; init: RequestInit }[] = [];
-      let answer = 500;
+      // The fake Slack: an answer (a status), "slow" (it takes the post but answers after the timeout: fetch rejects with
+      // TimeoutError) or "limited" (a 429 asking to come back in two minutes).
+      let answer: number | 'slow' | 'limited' = 500;
       const realFetch = globalThis.fetch;
-      globalThis.fetch = (async (url: string, init: RequestInit) => { posts.push({ url: String(url), init }); return new Response(null, { status: answer }); }) as typeof fetch;
-      const run = async (alert: Json, attempts = 1) => { try { await abuseAlertJobs['abuse.alert']!(runtime, { alertId: alert.id }, { id: `abuse-alert:${alert.id}`, workspaceId: 'platform', attempts }); return 'done'; }
+      globalThis.fetch = (async (url: string, init: RequestInit) => {
+        posts.push({ url: String(url), init });
+        if (answer === 'slow') throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        return answer === 'limited' ? new Response(null, { status: 429, headers: { 'retry-after': '120' } }) : new Response(null, { status: answer });
+      }) as typeof fetch;
+      const handle = (alert: Json, attempts: number) => abuseAlertJobs['abuse.alert']!(runtime, { alertId: alert.id }, { id: `abuse-alert:${alert.id}`, workspaceId: 'platform', attempts });
+      const run = async (alert: Json, attempts = 1) => { try { await handle(alert, attempts); return 'done'; }
         catch (error) { return error instanceof JobDeferred ? 'deferred' : (error as { code?: string }).code ?? 'error'; } };
+      // A deferral: in how many minutes, and whether the try it used is given back.
+      const deferral = async (alert: Json, attempts = 1) => { try { await handle(alert, attempts); return 'done'; }
+        catch (error) { if (!(error instanceof JobDeferred)) throw error; return [Math.round((Date.parse(error.availableAt) - Date.now()) / 60_000), error.keepAttempts]; } };
       const warnings = t.mock.method(console, 'warn', () => {});
       try {
         const [review, high] = await outbox();
@@ -33642,9 +33652,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await db.query(`UPDATE abuse_alerts SET status='stored',sent_at=NULL,claimed_at=NULL WHERE id=$1`, [high!.id]);
         answer = 503;
         assert.deepEqual([await run(high!, MAX_ATTEMPTS), (await db.query('SELECT status,error FROM abuse_alerts WHERE id=$1', [high!.id])).rows[0]], ['ABUSE_ALERT_FAILED', { status: 'failed', error: 'HTTP_503' }]);
+        // Slack slow once (it took the post but answered after the timeout): unknown, never refused. It keeps its place and
+        // gets one more try five minutes later, spending no try; that one is accepted. Two posts, and the alert is sent.
+        const reset = () => db.query(`UPDATE abuse_alerts SET status='stored',sent_at=NULL,claimed_at=NULL,error=NULL,attempts=0,timeouts=0 WHERE id=$1`, [high!.id]);
+        const later = () => db.query(`UPDATE abuse_alerts SET claimed_at=claimed_at-interval '5 minutes' WHERE id=$1`, [high!.id]);
+        const state = async () => (await db.query('SELECT status,error,timeouts,claimed_at IS NOT NULL AS placed FROM abuse_alerts WHERE id=$1', [high!.id])).rows[0];
+        await reset(); let before = posts.length; answer = 'slow';
+        assert.deepEqual([await deferral(high!), posts.length - before, await state()], [[5, true], 1, { status: 'stored', error: 'TIMEOUT', timeouts: 1, placed: true }]);
+        assert.equal(await run(high!), 'deferred', 'Within two minutes of its post: in flight, never posted beside it.');
+        await later(); answer = 200;
+        assert.deepEqual([await run(high!), posts.length - before, await state()], ['done', 2, { status: 'sent', error: null, timeouts: 1, placed: true }]);
+        // Slack slow every time: two posts and never a third, even on the job's last try; it reads unconfirmed, not failed.
+        await reset(); before = posts.length; answer = 'slow';
+        assert.equal(await run(high!), 'deferred'); await later();
+        assert.deepEqual([await run(high!, MAX_ATTEMPTS), await run(high!, MAX_ATTEMPTS), posts.length - before, await state()], ['done', 'done', 2, { status: 'unconfirmed', error: 'TIMEOUT', timeouts: 2, placed: true }]);
+        // A 429 that says when to come back: the job waits exactly that long, holding no worker and spending no try, even
+        // on its last; the place goes back. A 429 without Retry-After is a refusal like any other (above).
+        await reset(); before = posts.length; answer = 'limited';
+        assert.deepEqual([await deferral(high!, MAX_ATTEMPTS), posts.length - before, await state()], [[2, true], 1, { status: 'stored', error: 'HTTP_429', timeouts: 0, placed: false }]);
         // A post still in flight (claimed under two minutes ago: a run whose lease lapsed mid-post) is never posted beside it.
         await db.query(`UPDATE abuse_alerts SET status='stored',claimed_at=now() WHERE id=$1`, [high!.id]);
-        assert.deepEqual([await run(high!), posts.length], ['deferred', 5]);
+        before = posts.length;
+        assert.deepEqual([await run(high!), posts.length - before], ['deferred', 0]);
         assert.ok(warnings.mock.calls.every(call => !/hooks\.slack|T0\/B0|blocks/.test(String(call.arguments[0]))), 'Neither the webhook nor the message is logged.');
       } finally { globalThis.fetch = realFetch; warnings.mock.restore(); }
 
@@ -33801,8 +33830,50 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.match(await run(burst.at(-1)!), /^deferred /);
       } finally { globalThis.fetch = realFetch; runtime.config.abuseSlackWebhookUrl = undefined; }
 
-      // The platform's own accounts raise nothing: a cluster of workspaces billed as exempt (staff, or made free by an
-      // operator) is scored as any other and stays in the Operator area, without an alert; one with any other account in it is raised.
+      // An alert that reached nobody (stale or failed) covers nothing: the cluster is raised again. Only one that went out
+      // or may still go out does. Three ways an alert goes stale before its post:
+      const staleOf = async (id: string) => (await db.query('SELECT status,stale_reason FROM abuse_alerts WHERE id=$1', [id])).rows[0];
+      const queued = async (id: string) => (await db.query(`SELECT count(*)::int AS n FROM jobs WHERE id=$1`, [`abuse-alert:${id}`])).rows[0].n;
+      // 1. Its cluster drops below its level before the post (the next run's sweep marks it), then comes back.
+      const dropped = await group('dropback'); await h.hourly();
+      const droppedCluster = (await clusterOf(dropped[0]!)).id, [droppedFirst] = await alertsOf(droppedCluster);
+      await standing(dropped[0]!, 'ok'); await rescore(); assert.equal((await clusterOf(dropped[0]!)).band, 'watch');
+      await standing(dropped[0]!, 'warn'); await rescore();
+      const droppedAgain = (await alertsOf(droppedCluster)).find(a => a.id !== droppedFirst!.id);
+      assert.deepEqual([await staleOf(droppedFirst!.id), droppedAgain?.band, droppedAgain?.status, await queued(droppedAgain!.id)],
+        [{ status: 'stale', stale_reason: 'band_dropped' }, 'review', 'stored', 1], 'Back at review: raised again, and queued to post.');
+      // 2. It expires unposted (a burst held it a day), then the cluster gains a member.
+      const expiring = await group('expiring'); await h.hourly();
+      const expiringCluster = (await clusterOf(expiring[0]!)).id;
+      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '25 hours' WHERE cluster_id=$1`, [expiringCluster]);
+      const [expiredFirst] = await alertsOf(expiringCluster);
+      expiring.push(await member('expiring-3', 'fp_expiring')); await h.hourly();
+      assert.deepEqual([await staleOf(expiredFirst!.id), (await alertsOf(expiringCluster)).map(a => [a.band, a.kind, a.status])],
+        [{ status: 'stale', stale_reason: 'expired' }, [['review', 'new', 'stale'], ['review', 'grew', 'stored']]]);
+      // 3. Its cluster is merged into an older one that held only accounts (two people who signed in from one network and
+      // browser with addresses at one company: no workspace), in the same run that raises the merged cluster: the alert of the cluster that is gone names every
+      // workspace, and covers none.
+      const accountsOnly = [await h.user('merge-a', 'sub-merge-a'), await h.user('merge-b', 'sub-merge-b')];
+      await h.signIn('sub-merge-a', 'a@merge-shared.example', '198.51.100.11', 'signed_in'); await h.signIn('sub-merge-b', 'b@merge-shared.example', '198.51.100.12', 'signed_in'); await h.hourly();
+      const older = (await clusterOf(accountsOnly[0]!)).id;
+      await db.query(`UPDATE abuse_clusters SET first_at=now()-interval '1 day' WHERE id=$1`, [older]);
+      const mergeUsers = [await h.user('merge-1', 'sub-merge-1'), await h.user('merge-2', 'sub-merge-2')];
+      const merging = [await h.workspace('merge-1', [mergeUsers[0]!]), await h.workspace('merge-2', [mergeUsers[1]!])];
+      for (const workspace of merging) await payment(workspace, 'fp_merge');
+      await standing(merging[0]!, 'warn'); await h.hourly();
+      const mergedAway = (await clusterOf(merging[0]!)).id, [mergedAlert] = await alertsOf(mergedAway);
+      assert.deepEqual([mergedAlert?.band, mergedAlert?.status], ['review', 'stored']);
+      await db.query(`SELECT billing_post($1,'dispute',$2,$3,$4,'{}','stripe')`, [merging[1], unique('dispute'), '-1000000', '0']); await rescore();
+      assert.deepEqual((await alertsOf(mergedAway)).map(a => a.band), ['review', 'high']);
+      await h.signIn('sub-merge-1', 'm1@merge-shared.example', '198.51.100.13', 'signed_in'); await h.hourly();
+      assert.deepEqual([(await clusterOf(merging[0]!)).id, (await db.query('SELECT count(*)::int AS n FROM abuse_clusters WHERE id=$1', [mergedAway])).rows[0].n], [older, 0], 'Merged into the older cluster.');
+      const merged = await alertsOf(older);
+      assert.deepEqual([merged.map(a => [a.band, a.status]), await queued(merged[0]!.id)], [[['high', 'stored']], 1], 'The merged cluster is raised.');
+      await sweepAlerts(runtime);
+      assert.deepEqual((await Promise.all((await alertsOf(mergedAway)).map(a => staleOf(a.id)))), [{ status: 'stale', stale_reason: 'cluster_gone' }, { status: 'stale', stale_reason: 'cluster_gone' }]);
+
+      // Staff's own accounts raise nothing: a cluster of workspaces with staff's first-party exemption is scored as any
+      // other and stays in the Operator area, without an alert; one with any other account in it is raised.
       const own = [await member('own-1', 'fp_own'), await member('own-2', 'fp_own')];
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=ANY($1)', [own]);
       await standing(own[0]!, 'warn'); await h.hourly();
@@ -33819,6 +33890,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO platform_operators(user_id,role,reason) SELECT user_id,'operator:read','abuse fixture: staff test account' FROM workspace_members WHERE workspace_id=$1 AND role='owner'`, [staffOwned[1]]);
       await standing(staffOwned[0]!, 'warn'); await h.hourly();
       assert.deepEqual(await alertsOf((await clusterOf(staffOwned[0]!)).id), []);
+      // Customers an operator made free (billing mode exempt) are customers: their cluster is raised like any other.
+      const free = [await member('free-1', 'fp_free'), await member('free-2', 'fp_free')];
+      for (const workspace of free) await db.query(`INSERT INTO billing_accounts(workspace_id,mode) VALUES ($1,'exempt') ON CONFLICT (workspace_id) DO UPDATE SET mode='exempt'`, [workspace]);
+      await standing(free[0]!, 'warn'); await h.hourly();
+      assert.deepEqual((await alertsOf((await clusterOf(free[0]!)).id)).map(a => a.band), ['review'], 'Made free by an operator: still raised.');
+      // A skipped cluster is logged with its ID, so an operator can find which one and why.
+      const logged = t.mock.method(console, 'log', () => {}), info = t.mock.method(console, 'info', () => {});
+      try {
+        const ownMore = await member('own-3', 'fp_own'); await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [ownMore]); await h.hourly();
+        const lines = [...logged.mock.calls, ...info.mock.calls].map(call => String(call.arguments[0])).filter(line => line.includes('ABUSE_ALERT_OWN_ACCOUNTS'));
+        assert.ok(lines.some(line => line.includes(`"cluster":"${ownCluster}"`)), lines.join('\n'));
+      } finally { logged.mock.restore(); info.mock.restore(); }
     });
   });
   test('abuse monitoring: mail that reaches no one outside its workspace (Nightmail\'s own test and setup emails, campaign tests, mail to its own members) is never fingerprinted and the built-in domain is nobody\'s sending domain, so new workspaces do not cluster on onboarding; a value that became common links nobody, even through a link written while it was rare; a waitlist refusal counts only when it repeats', async t => {
@@ -44241,9 +44324,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, supportAiToday: SUPPORT_AI.dailyLineUsd - 0.01 } }), []);
     assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, supportAiToday: over } }), [`support-ai-cost warning ${over}: $${over.toFixed(2)} since midnight UTC, past the $${SUPPORT_AI.dailyLineUsd.toFixed(2)} daily line.`]);
     // Abuse alerts that should have gone out and have not, and the hourly abuse job out of time three runs in a row (health-thresholds.ts ABUSE).
-    assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: { late: 0, failed: 0, expired: 0, high: 0 }, abuseBehind: { runs: 2, cuts: ['signIns:time'] } } }), []);
-    assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: { late: 1, failed: 1, expired: 1, high: 1 }, abuseBehind: { runs: 3, cuts: ['signIns:time', 'clusters:time'] } } }),
-      ['abuse-alerts-undelivered warning 3: 3 not delivered (1 high): 1 unposted over 60 minutes, 1 refused, 1 expired unposted.', 'abuse-monitor-behind warning 3: the hourly job ran out of time 3 runs in a row; last stopped: `signIns:time`, `clusters:time`.']);
+    // Abuse alerts that need a look: a warning; critical while a high alert is unposted over an hour. The monitor behind:
+    // a sign-in waiting over two hours to be read (how far behind, in words), or the job out of time three runs in a row.
+    const abuse = (undelivered: { late: number; failed: number; expired: number; high: number; unconfirmed: number }, behind: { runs: number; cuts: string[]; signInsWaiting: number; signInsBehindSeconds: number | null }) =>
+      lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: undelivered, abuseBehind: behind } });
+    assert.deepEqual(abuse({ late: 0, failed: 0, expired: 0, high: 0, unconfirmed: 0 }, { runs: 2, cuts: ['signIns:time'], signInsWaiting: 3, signInsBehindSeconds: 7_000 }), []);
+    assert.deepEqual(abuse({ late: 0, failed: 0, expired: 0, high: 0, unconfirmed: 0 }, { runs: 0, cuts: [], signInsWaiting: 0, signInsBehindSeconds: null }), []);
+    assert.deepEqual(abuse({ late: 1, failed: 0, expired: 0, high: 0, unconfirmed: 1 }, { runs: 0, cuts: [], signInsWaiting: 112, signInsBehindSeconds: 98_190 }),
+      ['abuse-alerts-undelivered warning 2: 2 not delivered: 1 unposted over 60 minutes, 1 posted but unconfirmed (Slack didn\'t answer; check the channel).',
+        'abuse-monitor-behind warning 98190: sign-ins are 27.3 h behind: 112 waiting to be read, the oldest for 27.3 h.']);
+    assert.deepEqual(abuse({ late: 1, failed: 1, expired: 1, high: 1, unconfirmed: 0 }, { runs: 3, cuts: ['signIns:time', 'clusters:time'], signInsWaiting: 2, signInsBehindSeconds: 600 }),
+      ['abuse-alerts-undelivered critical 3: 3 not delivered (1 high, unposted): 1 unposted over 60 minutes, 1 refused, 1 expired unposted.', 'abuse-monitor-behind warning 600: the hourly job ran out of time 3 runs in a row (last stopped: `signIns:time`, `clusters:time`).']);
   });
 
   test('MX health: warnings stay on Health; critical opens, reminders and long recoveries are single plain Slack lines; short flaps stay quiet across ticks; operator and self-hosted access', async t => {

@@ -6,7 +6,7 @@ import { operatorContext, recordAudit } from './audit.js';
 import { ApiError, errors, json, log, notFound, response, security, type App, type JobHandler } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { operatorActor } from './operator.js';
-import { postSlack } from './reputation-alerts.js';
+import { postSlack, SlackRefused } from './reputation-alerts.js';
 
 // Abuse monitoring, part 3: the alert outbox and its review. When a cluster first reaches a level a person should look
 // at (review or high), climbs a level or gains a member there, one alert is stored with its Slack message, and one job
@@ -15,8 +15,11 @@ import { postSlack } from './reputation-alerts.js';
 // time. Not more than ALERTS_AN_HOUR posts of each level in any hour, each level counted on its own: a review alert
 // never takes a high one's place, and what waits posts when a place frees, while it still needs a look.
 // One that no longer needs a look (its cluster is gone or below its level, someone reviewed it, a day went by) is marked
-// stale, with why, and never posted late. A cluster made only of the platform's own accounts raises none (ownAccounts).
-// What should have gone out and has not (late, failed or expired unposted) is a Health warning (health.ts).
+// stale, with why, and never posted late; an alert that never reached anyone (stale or failed) covers nothing, so the
+// cluster is raised again. A post Slack doesn't answer in time is tried once more, never a third time (Slack may
+// have taken it): at most two posts for one alert. A cluster made only of staff's own accounts raises none (ownAccounts).
+// What should have gone out and has not (late, failed, expired unposted, or posted unconfirmed) is a Health warning,
+// critical while a high alert waits (health.ts).
 // Operators read every alert in the Operator area, and review one from its cluster's page: Watch
 // (reviewed, keep tracking: raised again only at a higher level) or Dismiss (not abuse: raised again only with a member
 // or a reason it did not have). Pause is there too, on each workspace.
@@ -77,13 +80,14 @@ export function slackCard(publicUrl: string, alert: { cluster: string; band: 're
   };
 }
 /**
- * A workspace the platform knows is its own: the platform's workspace, one billed as exempt (staff, or made free by an
- * operator: the scorer's own "exempt" plan, abuse-clusters.ts planOf), or one an operator owns.
+ * A workspace that is staff's own: the platform's workspace, one with staff's first-party exemption (exempt_hosted_quotas,
+ * set only from the staff script), or one an operator owns. A customer an operator made free (billing mode exempt) is
+ * still a customer: not this.
  */
-const ownWorkspace = (id: SQL, platform: string | undefined) => sql`EXISTS (SELECT FROM workspaces w WHERE w.id=${id} AND (w.exempt_hosted_quotas OR billing_position(w.id)->>'mode'='exempt'
+const ownWorkspace = (id: SQL, platform: string | undefined) => sql`EXISTS (SELECT FROM workspaces w WHERE w.id=${id} AND (w.exempt_hosted_quotas
   OR w.id=${platform ?? null}::text OR EXISTS (SELECT FROM workspace_members m JOIN platform_operators o ON o.user_id=m.user_id WHERE m.workspace_id=w.id AND m.role='owner')))`;
 /**
- * Whether every member of a cluster is the platform's own: each workspace one of its own (ownWorkspace), each account an
+ * Whether every member of a cluster is staff's own: each workspace one of its own (ownWorkspace), each account an
  * operator or a member only of its own workspaces. Any other member (a customer's account or workspace, a sign-in that
  * was never admitted) makes it a cluster to raise, whatever else is in it. Nothing about the score changes.
  */
@@ -97,8 +101,9 @@ const JOB = 'abuse.alert', PLATFORM = 'platform';
 const jobId = (alert: SQL) => sql`'abuse-alert:'||${alert}`;
 /**
  * Stores an alert for a cluster's change, with what its workspaces sent this week, and queues the job that posts it, in
- * one statement, unless the cluster is only the platform's own accounts (ownAccounts: logged, never stored) or one
- * already covers it:
+ * one statement, unless the cluster is only staff's own accounts (ownAccounts: logged with its ID, never stored) or one
+ * already covers it. Only an alert that went out (sent, or posted unconfirmed) or may still go out (stored and still
+ * needing a look) covers anything; a stale or failed one reached nobody:
  * - an alert for the cluster at this level in the last seven days;
  * - alerts at this level or above in the last seven days that named every one of its workspaces;
  * - a Watch on the cluster, or on an alert that named all its members, at this level or above;
@@ -109,10 +114,12 @@ export async function noteAlert(runtime: Hosted, change: ClusterChange) {
   const kind = alertFor(change), band = change.band;
   if (!kind || (band !== 'review' && band !== 'high')) return null;
   const id = `aal_${crypto.randomUUID().replaceAll('-', '').slice(0, 24)}`, keys = sql.param(change.keys), codes = sql.param(change.reasons.map(reason => reason.code));
-  const workspaces = sql.param(change.workspaces.map(workspace => `workspace:${workspace}`)), atLeast = sql`(a.band=${band}::text OR a.band='high')`, recent = sql`a.created_at>now()-interval '7 days' AND a.review IS DISTINCT FROM 'dismiss'`;
+  const workspaces = sql.param(change.workspaces.map(workspace => `workspace:${workspace}`)), atLeast = sql`(a.band=${band}::text OR a.band='high')`;
+  const covering = sql`(a.status IN ('sent','unconfirmed') OR (a.status='stored' AND (SELECT ${staleReason} FROM (VALUES (1)) one(x) LEFT JOIN abuse_clusters c ON c.id=a.cluster_id) IS NULL))`;
+  const recent = sql`a.created_at>now()-interval '7 days' AND a.review IS DISTINCT FROM 'dismiss' AND ${covering}`;
   return bounded(runtime, async tx => {
     const { rows: [own] } = await tx.execute<{ own: boolean }>(sql`SELECT ${ownAccounts(sql`${keys}`, runtime.config.platformDomainWorkspace)} AS own`);
-    if (own?.own) { log('info', { code: 'ABUSE_ALERT_OWN_ACCOUNTS', band, members: change.keys.length }); return null; }
+    if (own?.own) { log('info', { code: 'ABUSE_ALERT_OWN_ACCOUNTS', cluster: change.id, band, members: change.keys.length }); return null; }
     const { rows: [sent] } = await tx.execute<{ emails: string; bounced: string; complained: string }>(sql`SELECT coalesce(sum(accepted),0)::text AS emails,coalesce(sum(bounced),0)::text AS bounced,coalesce(sum(complained),0)::text AS complained
       FROM sending_metrics_hourly WHERE workspace_id=ANY(${sql.param(change.workspaces)}::text[]) AND hour>now()-interval '7 days'`);
     const payload = slackCard(runtime.config.publicUrl, { cluster: change.id, band, score: change.score, kind, accounts: change.accounts, reasons: change.reasons, workspaces: change.workspaces,
@@ -132,6 +139,12 @@ export async function noteAlert(runtime: Hosted, change: ClusterChange) {
 }
 /** Posts in any hour, each level counted on its own: a burst of review alerts never holds up a high one. */
 export const ALERTS_AN_HOUR = { review: 3, high: 10 } as const;
+/** A post's answer may take this long; past it, whether Slack took the post is unknown. */
+const POST_TIMEOUT_MS = 10_000;
+/** After an unanswered post, the one more try waits this long (Slack is slow now). There is never a third. */
+const AFTER_TIMEOUT_MS = 5 * 60_000;
+/** The longest a 429's Retry-After is followed for one wait. */
+const RETRY_AFTER_MOST_S = 3600;
 /** How long an alert may wait to be posted: past it, it is stale ('expired'), never posted late. */
 const FRESH = sql`interval '1 day'`;
 export const STALE_REASONS = ['cluster_gone', 'band_dropped', 'reviewed', 'expired'] as const;
@@ -168,16 +181,20 @@ export async function sweepAlerts(runtime: Hosted) {
  * - In one transaction under one lock (every job of this type takes it, so two can never count the same free place):
  *   an alert already sent, stale or failed is left as it is; one that no longer needs a look is marked stale; without a
  *   webhook it is marked failed (NO_WEBHOOK); one whose post is in flight (claimed under 2 minutes ago, a post times out
- *   in 5 seconds) waits for it; at its level's hourly limit the job waits (JobDeferred) until the oldest post of that
+ *   in POST_TIMEOUT_MS) waits for it; at its level's hourly limit the job waits (JobDeferred) until the oldest post of that
  *   level is an hour old; with alerts ahead of it in line (inLine) for the places left, it waits for them to take theirs.
  *   Otherwise it takes a place (claimed_at) and the post goes out after the commit. So which alerts go out in an hour
  *   and which wait is the same however their jobs are ordered: the oldest first, the ID breaking a tie.
- * - Accepted (2xx): marked sent. Refused (a 5xx, a 429, a timeout, an unreachable webhook): its place is given back and
- *   the job retries (jobs.ts: 15 s, 1, 4, 16 minutes, then hourly), MAX_ATTEMPTS tries in all, the last marking it
- *   failed. A retry finds a sent alert and posts nothing.
- * - Posted twice only if Slack accepted a post and the "sent" write after it was lost (a crash in between, or a timeout
- *   after Slack took it): Slack's incoming webhooks take no idempotency key. Never because of a redeploy, an
- *   overlapping run or a refused post.
+ * - Accepted (2xx): marked sent. Refused (Slack answered 4xx or 5xx) or unreachable (no connection): its place is given
+ *   back and the job retries (jobs.ts: 15 s, 1, 4, 16 minutes, then hourly), MAX_ATTEMPTS tries in all, the last
+ *   marking it failed; a 429 with Retry-After waits exactly that long instead, holding no worker and spending no try.
+ * - Unanswered (no answer in POST_TIMEOUT_MS): Slack may have taken it, so it is never treated as refused. It keeps its
+ *   place and is tried once more after AFTER_TIMEOUT_MS; a second unanswered post marks it unconfirmed (posted, perhaps
+ *   twice, never again; Health counts it so someone looks at the channel). A missed alert is worse than a doubled one.
+ * - So one alert is posted at most twice: two unanswered posts, or one unanswered post and one accepted. Also twice if
+ *   Slack accepted a post and the "sent" write after it was lost (a crash in between): Slack's incoming webhooks take
+ *   no idempotency key. Never because of a redeploy, an overlapping run or a refused post. A retry finds a sent alert
+ *   and posts nothing.
  */
 const deliver: JobHandler = async (runtime, payload, job) => {
   const id = typeof payload.alertId === 'string' && /^aal_[0-9a-f]{24}$/.test(payload.alertId) ? payload.alertId : null;
@@ -207,13 +224,25 @@ const deliver: JobHandler = async (runtime, payload, job) => {
   if (!decision) return;
   // Waiting is not a try: the attempts its refused posts used are kept.
   if ('wait' in decision) { log('info', { code: 'ABUSE_ALERT_WAITING', until: decision.wait }); throw new JobDeferred(decision.wait, undefined, true); }
-  try { await postSlack(url!, decision.post as Record<string, unknown>, 'ABUSE_ALERT_FAILED', 5000); }
+  try { await postSlack(url!, decision.post as Record<string, unknown>, 'ABUSE_ALERT_FAILED', POST_TIMEOUT_MS); }
   catch (error) {
-    // The place goes back; the last try marks the alert failed (its job fails too, which Health counts as well).
-    const status = error instanceof ApiError ? /HTTP (\d+)/.exec(error.message)?.[1] : undefined, last = job.attempts >= MAX_ATTEMPTS;
-    const code = status ? `HTTP_${status}` : error instanceof ApiError ? error.code : 'UNREACHABLE';
+    if (!(error instanceof ApiError) && error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+      // Unanswered: it keeps its place, and gets one more try after a pause; the second unanswered post is the last.
+      const { rows: [after] } = await runtime.db.execute<{ status: string }>(sql`UPDATE abuse_alerts SET timeouts=timeouts+1,attempts=attempts+1,error='TIMEOUT',
+        status=CASE WHEN timeouts+1>=2 THEN 'unconfirmed' ELSE status END,sent_at=CASE WHEN timeouts+1>=2 THEN now() ELSE sent_at END
+        WHERE id=${id} AND status='stored' RETURNING status`);
+      log('warn', { code: after?.status === 'unconfirmed' ? 'ABUSE_ALERT_UNCONFIRMED' : 'ABUSE_ALERT_TIMEOUT' });
+      if (after?.status === 'stored') throw new JobDeferred(new Date(Date.now() + AFTER_TIMEOUT_MS).toISOString(), undefined, true);
+      return;
+    }
+    // Refused or unreachable: the place goes back; the last try marks the alert failed (its job fails too). A 429 that
+    // says when to come back is followed exactly, without spending a try.
+    const refused = error instanceof SlackRefused ? error : null;
+    const pause = refused?.status === 429 && refused.retryAfterSeconds !== undefined ? Math.min(Math.max(refused.retryAfterSeconds, 1), RETRY_AFTER_MOST_S) : null;
+    const last = pause === null && job.attempts >= MAX_ATTEMPTS, code = refused ? `HTTP_${refused.status}` : error instanceof ApiError ? error.code : 'UNREACHABLE';
     await runtime.db.execute(sql`UPDATE abuse_alerts SET claimed_at=NULL,attempts=attempts+1,error=${code.slice(0, 40)},status=CASE WHEN ${last} THEN 'failed' ELSE status END WHERE id=${id} AND status='stored'`);
-    log('warn', { code: 'ABUSE_ALERT_FAILED', reason: code, last });
+    log('warn', { code: 'ABUSE_ALERT_FAILED', reason: code, last, ...(pause !== null && { retryAfter: pause }) });
+    if (pause !== null) throw new JobDeferred(new Date(Date.now() + pause * 1000).toISOString(), undefined, true);
     throw error instanceof ApiError ? error : new ApiError(503, 'ABUSE_ALERT_FAILED', 'The alert could not be posted; it will be retried.', undefined, true);
   }
   await runtime.db.execute(sql`UPDATE abuse_alerts SET status='sent',sent_at=now(),attempts=attempts+1,error=NULL WHERE id=${id} AND status='stored'`);
@@ -222,7 +251,7 @@ export const abuseAlertJobs: Record<string, JobHandler> = { [JOB]: retryDatabase
 
 const Review = z.object({ action: z.enum(['watch', 'dismiss']), at: z.string(), by: z.string().nullable().describe("The operator's sign-in address, while their account exists.") });
 const Alert = z.object({ id: z.string(), clusterId: z.string(), band: z.enum(['review', 'high']), score: z.number().int(), kind: z.enum(['new', 'raised', 'grew']), workspaces: z.number().int(),
-  status: z.enum(['stored', 'sent', 'failed', 'stale']).describe('stale: no longer needed a look before it was posted (staleReason), so it never was.'), staleReason: z.enum(STALE_REASONS).nullable(), attempts: z.number().int(), createdAt: z.string(), sentAt: z.string().nullable(), payload: z.unknown().describe('The Slack message as it is, or would be, posted.'),
+  status: z.enum(['stored', 'sent', 'failed', 'stale', 'unconfirmed']).describe('stale: no longer needed a look before it was posted (staleReason), so it never was. unconfirmed: Slack did not answer its post in time, twice; it may be in the channel, once or twice, and is not posted again.'), staleReason: z.enum(STALE_REASONS).nullable(), attempts: z.number().int(), createdAt: z.string(), sentAt: z.string().nullable(), payload: z.unknown().describe('The Slack message as it is, or would be, posted.'),
   review: Review.nullable().describe('watch: reviewed, raised again only at a higher level. dismiss: not abuse, raised again only with a member or a reason it did not have.') }).openapi('OperatorAbuseAlert');
 const alertColumns = sql`a.id,a.cluster_id AS "clusterId",a.band,a.score,a.kind,a.workspaces,a.status,a.stale_reason AS "staleReason",a.attempts,${utc(sql`a.created_at`)} AS "createdAt",
   CASE WHEN a.sent_at IS NOT NULL THEN ${utc(sql`a.sent_at`)} END AS "sentAt",a.payload,

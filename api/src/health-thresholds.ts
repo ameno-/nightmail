@@ -218,7 +218,8 @@ export const SUPPORT_AI = { dailyLineUsd: 50, remindMinutes: 24 * 60 } as const;
 /**
  * Abuse monitoring (src/abuse.ts, src/abuse-alerts.ts). An alert is late when it is still unposted an hour after it was
  * stored: its job posts it within minutes, or waits for its level's hourly limit (a burst), so an hour means the channel
- * is behind or refusing. The hourly job is behind when it ran out of time three runs in a row: one slow run is a busy
- * hour, three is scoring that no longer keeps up.
+ * is behind or refusing; a high one late is critical. The monitor is behind when a sign-in has waited more than
+ * signInsBehindMinutes to be read (the hourly job reads each within the hour when it keeps up), or when the job ran out
+ * of time three runs in a row: one slow run is a busy hour, three is scoring that no longer keeps up.
  */
-export const ABUSE = { lateMinutes: 60, cutRuns: 3, remindMinutes: 24 * 60 } as const;
+export const ABUSE = { lateMinutes: 60, signInsBehindMinutes: 120, cutRuns: 3, remindMinutes: 24 * 60 } as const;

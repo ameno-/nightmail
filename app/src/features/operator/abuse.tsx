@@ -36,10 +36,12 @@ const clusterColumns: Column<AbuseCluster>[] = [
   { ...def(clusterColumnDefs, 'changed'), render: row => <At value={row.changedAt} />, cardRender: row => `changed ${when(row.changedAt)}` },
 ]
 const kindText: Record<AbuseAlert['kind'], string> = { new: 'New', raised: 'Risk raised', grew: 'New member' }
-// Stored: its post to Slack is queued (or no webhook is set). Stale: it no longer needed a look before it was posted, so it never was; why stays shown.
-const statusText: Record<Exclude<AbuseAlert['status'], 'stale'>, string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed' }
+// Stored: its post to Slack is queued, the one thing here still waiting on us (amber), or no webhook is set. Stale: it
+// no longer needed a look before it was posted, so it never was; why stays shown. Not confirmed: Slack didn't answer
+// either of its two posts, so it may be in the channel (amber, never Sent's green). Failed: Slack refused it (red).
+const statusText: Record<Exclude<AbuseAlert['status'], 'stale'>, string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed', unconfirmed: 'Not confirmed' }
 const staleText: Record<NonNullable<AbuseAlert['staleReason']>, string> = { cluster_gone: 'Stale: cluster gone', band_dropped: 'Stale: risk dropped', reviewed: 'Stale: reviewed', expired: 'Stale: expired' }
-const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'neutral', sent: 'success', failed: 'danger', stale: 'neutral' }
+const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'warning', sent: 'success', failed: 'danger', stale: 'neutral', unconfirmed: 'warning' }
 const deliveryText = (row: AbuseAlert, posting: boolean) => row.status === 'stale' ? staleText[row.staleReason ?? 'expired'] : row.status !== 'stored' ? statusText[row.status] : posting ? 'Queued' : 'Not posted'
 const reviewText: Record<AbuseReview['action'], string> = { watch: 'Watched', dismiss: 'Dismissed' }
 // When, in a tooltip; who, as a masked address where it shows (never in a tooltip, which can't mask it).
@@ -94,6 +96,7 @@ function Alerts() {
     {alerts.hasNextPage && <Button className="op-more" loading={alerts.isFetchingNextPage} onClick={() => void alerts.fetchNextPage()}>Load more</Button>}
     {alerts.isError && alerts.data && <Alert tone="danger"><ErrorText error={alerts.error} /></Alert>}
     {shown && <Dialog open onOpenChange={next => { if (!next) setShown(null) }} title="Slack card" footer={<><Button onClick={() => setShown(null)}>Close</Button><Link className="ui-button ui-button--primary ui-button--md" to={`/operator/abuse/${shown.clusterId}`}>Open cluster</Link></>}>
+      {shown.status === 'unconfirmed' && <Alert tone="warning">Slack didn’t answer either post in time, so this card may be in the channel once or twice, or not at all. Check the channel.</Alert>}
       <SlackPreview card={shown.payload} />
     </Dialog>}
   </>

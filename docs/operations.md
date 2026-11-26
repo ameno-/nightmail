@@ -310,20 +310,22 @@ With `DATABASE_DISK_GB` set: 75% of disk is a warning; 90% is critical. PlanetSc
 
 ### abuse-alerts-undelivered
 An abuse alert (review or high) that should have reached the operators' channel has not: still unposted an hour after it
-was stored, refused by Slack on its last try, or expired unposted (a day went by while it still needed a look). A
-warning; the alert is in Operator → Abuse either way.
+was stored, refused by Slack on its last try, expired unposted (a day went by while it still needed a look), or posted
+but unconfirmed (Slack didn't answer either of its two posts in time: it may be in the channel once, twice or not at
+all, so look). A warning; **critical while a high alert is unposted**. The alert is in Operator → Abuse either way.
 
 **An agent checks first**
 1. Health: the counts and how many are high.
 2. `SELECT band,status,attempts,error,stale_reason,created_at FROM abuse_alerts WHERE created_at>now()-interval '2 days' ORDER BY created_at DESC;`
 3. `error` NO_WEBHOOK: neither `ABUSE_SLACK_WEBHOOK_URL` nor `OPERATOR_SLACK_WEBHOOK_URL` is bound. HTTP_4xx: the webhook was
-   revoked. Unposted with no error: the `abuse.alert` jobs (`SELECT status,attempts,last_error FROM jobs WHERE type='abuse.alert' ORDER BY created_at DESC LIMIT 20;`),
+   revoked. TIMEOUT: Slack was slow (status `unconfirmed` after the second). Unposted with no error: the `abuse.alert` jobs (`SELECT status,attempts,last_error FROM jobs WHERE type='abuse.alert' ORDER BY created_at DESC LIMIT 20;`),
    or a burst waiting for its level's hourly limit (3 review, 10 high).
 
 ### abuse-monitor-behind
-The hourly abuse job ran out of time three runs in a row (`abuse_state.cut_runs`): some of what it reads (sign-ins,
-payments, sampled mail, clusters) waits for the next run, so scores lag. The finding names the stages the last run
-stopped; each run's `ABUSE_HOURLY` log line has every stage's time, and each stop an `ABUSE_STEP_CUT` line.
+Abuse monitoring is behind: a sign-in has waited more than two hours to be read (the finding says how long, and how
+many wait), or the hourly abuse job ran out of time three runs in a row (`abuse_state.cut_runs`). Either way some of
+what it reads waits for later runs, so scores lag. The finding names the stages the last run stopped; each run's
+`ABUSE_HOURLY` log line has every stage's time, and each stop an `ABUSE_STEP_CUT` line.
 
 **An agent checks first**
 1. `SELECT last_run,cut_runs,cursors FROM abuse_state;`: which stage, and how far behind its cursor is.

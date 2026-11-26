@@ -1108,7 +1108,7 @@ export async function seed(fx) {
     ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=excluded.quantity`);
   // The messages as src/abuse-alerts.ts builds them: a level and its mark, counts, reasons in fixed words, workspace IDs
   // and a link to the cluster. The oldest was watched by Dana; two stored by one run (at one instant) wait for their
-  // post, high first; four went stale before they were posted, one for each reason.
+  // post, high first; four went stale before they were posted, one for each reason; one failed, one is unconfirmed.
   const card = (head, why, band = head.startsWith('High') ? 'high' : 'review', cluster = abuseCluster) => ({ text: head, unfurl_links: false, unfurl_media: false, blocks: [
     { type: 'section', text: { type: 'mrkdwn', text: [`${band === 'high' ? ':rotating_light:' : ':mag:'} *${head}*`, '• *Who:* 2 workspaces: `ws_fresh`, `ws_new`', `• *Why:* ${why}`, '• *Sent in 7 days:* 4,200 emails, 1.4% bounced, 0.05% complaints'].join('\n') } },
     { type: 'actions', elements: [{ type: 'button', action_id: 'review', style: band === 'high' ? 'danger' : 'primary', text: { type: 'plain_text', text: 'Review in Operator', emoji: false }, url: `${fx.origin}/operator/abuse/${cluster}` }] }] });
@@ -1129,6 +1129,9 @@ export async function seed(fx) {
   await alert(6, abuseWatch, 'review', 50, 'grew', 'Review risk 50: 2 related accounts (new member)', 'one network; a sender on warning', 'stale', 'band_dropped', 30 * hours);
   await alert(7, abuseCluster, 'review', 60, 'grew', 'Review risk 60: 3 related accounts (new member)', 'the same payment card', 'stale', 'reviewed', 40 * hours, 'dismiss');
   await alert(8, abuseCluster, 'high', 80, 'new', 'High risk 80: 3 related accounts', 'the same payment card; near-identical mail', 'stale', 'expired', 50 * hours);
+  // Slack refused one on every try (red), and didn't answer either post of another (amber, never Sent's green).
+  await alert(9, abuseCluster, 'review', 65, 'grew', 'Review risk 65: 3 related accounts (new member)', 'the same payment card', 'failed', null, 4 * hours);
+  await alert('a', abuseCluster, 'high', 90, 'raised', 'High risk 90: 3 related accounts (risk raised)', 'the same payment card; near-identical mail; disputed payments', 'unconfirmed', null, 2 * hours);
   // Operator · Health: what a minute tick wrote (api/src/health.ts) on a bad afternoon, and the alerts it holds: a
   // queue and a job type behind, a pile of failed jobs, a campaign that will take twelve hours, a 45-second request.
   // Synthetic like the abuse rows: the fixture runs no job runner, so nothing overwrites it.
