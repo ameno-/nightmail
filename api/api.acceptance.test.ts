@@ -11978,7 +11978,7 @@ describe('Hosted MCP OAuth and tools', () => {
             assert.deepEqual(fine(await act(mine.token, { conversationId: held, action: 'sendHeld', messageId: keep })).message.viaAgent, true);
             // An agent's report has nobody to reply to.
             const report = conversation();
-            await db.query("INSERT INTO support_conversations(id, channel, verification, mode, workspace_id) VALUES ($1, 'agent_feedback', 'credential', 'unverified', $2)", [report]);
+            await db.query("INSERT INTO support_conversations(id, channel, verification, mode, workspace_id) VALUES ($1, 'agent_feedback', 'credential', 'unverified', $2)", [report, acme]);
             refused(await act(mine.token, { conversationId: report, action: 'reply', text: 'Thanks.' }), 'SUPPORT_AGENT_FEEDBACK');
 
             // The hourly allowance, counted from the trail: past it, refused, nothing sent; the person's own dashboard reply isn't counted.
