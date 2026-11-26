@@ -16,5 +16,6 @@ export function parseListRiskLines(raw: unknown): ListRiskLines | null {
 }
 
 /** The job a launch queues in its own transaction: a marketing campaign to a list. */
-export const queueListRisk = (workspaceId: string, campaignId: string, reviewId: string, listId: string) => sql`INSERT INTO jobs (id, workspace_id, type, payload)
-  VALUES (${'list-risk:' + reviewId}, ${workspaceId}, 'audience.listRisk', ${JSON.stringify({ workspaceId, campaignId, reviewId, listId })}::jsonb) ON CONFLICT (id) DO NOTHING`;
+// A minute after the launch: never ahead of the campaign's own first job, and the list hardly changes in a minute.
+export const queueListRisk = (workspaceId: string, campaignId: string, reviewId: string, listId: string) => sql`INSERT INTO jobs (id, workspace_id, type, payload, available_at)
+  VALUES (${'list-risk:' + reviewId}, ${workspaceId}, 'audience.listRisk', ${JSON.stringify({ workspaceId, campaignId, reviewId, listId })}::jsonb, now() + interval '1 minute') ON CONFLICT (id) DO NOTHING`;
