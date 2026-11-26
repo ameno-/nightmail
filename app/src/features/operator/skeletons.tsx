@@ -281,7 +281,7 @@ export type GlassBoardFill = { tile: (key: string) => GlassTileFill; funnel: (ke
 export const glassTiles = [
   ['sent', 'Sent · 24 h'], ['minute', 'Per minute'], ['delivered', 'Delivered'], ['bounced', 'Bounced'], ['complained', 'Complained'],
   ['signups', 'Sign-ups · 24 h'], ['places', 'Open places'], ['received', 'Received · 24 h'], ['queued', 'Queued'], ['ramp', 'On the ramp'],
-  ['standing', 'Paused senders'], ['builtin', 'Built-in domains'], ['visitors', 'Visitors today'], ['support', 'Support AI · 7 d'], ['screened', 'Screened · 24 h'],
+  ['standing', 'Paused senders'], ['builtin', 'Built-in domains'], ['visitors', 'Visitors today'], ['support', 'Support · 7 d'], ['screened', 'Screened · 24 h'],
   ['classifiers', 'Classifiers agree'], ['api', 'API · 24 h'], ['errors', 'API errors'], ['latency', 'API latency'], ['health', 'Health'],
 ] as const
 export const glassFunnel = [['signedUp', 'Signed up'], ['domainAdded', 'Added a domain'], ['domainVerified', 'Verified it'], ['builtinReady', 'Built-in ready'], ['keyCreated', 'Created a key'], ['firstSend', 'Sent mail']] as const
