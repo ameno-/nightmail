@@ -9349,9 +9349,12 @@ describe('Hosted MCP OAuth and tools', () => {
           [unique('email'), acme, REGION, owner.email, JSON.stringify([`support@${supportDomain}`]), sentProviderId]);
         const selfSentMsg = await mail(owner.email, { rfcId: `${sentProviderId}@email.amazonses.com` });
         const selfSentReg = ok(await register(conversation(), { kind: 'email', messageId: selfSentMsg }), 201);
-        assert.equal(selfSentReg.mode, 'pending_signin');
+        // Its DMARC pass is real, but mail through Nightmail itself (or looping) never gets a general answer while it waits for a claim.
+        assert.deepEqual([selfSentReg.mode, selfSentReg.generalAnswer], ['pending_signin', false]);
         const loopMsg = await mail(owner.email, { headers: [{ name: 'X-Nightmail-Loop', value: 'v1.1.tok' }] });
-        assert.equal(ok(await register(conversation(), { kind: 'email', messageId: loopMsg }), 201).mode, 'pending_signin');
+        const loopReg = ok(await register(conversation(), { kind: 'email', messageId: loopMsg }), 201);
+        assert.deepEqual([loopReg.mode, loopReg.generalAnswer], ['pending_signin', false]);
+        assert.deepEqual((await db.query('SELECT general_answer FROM support_email_signins WHERE conversation_id = ANY($1)', [[selfSentReg.id, loopReg.id]])).rows.map(r => r.general_answer), [false, false]);
         // Scope reflects live dashboard session presence for chat tokens.
         assert.equal(ok(await stamped(chatted, 'GET', '/v1/support/scope')).user.activeSession, true);
         for (const done of [owned.id, chatted]) ok(reply(await platform.closeConversation(done)));
@@ -9994,6 +9997,26 @@ describe('Hosted MCP OAuth and tools', () => {
         const id = conversation();
         await db.query(`INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', $2, 'none', 'unverified')`, [id, address]);
         return id;
+      };
+      /**
+       * A support address of its own (set it in NIGHTMAIL_SUPPORT_ADDRESS_IDS to use it), and an email to it as ingest
+       * stores one: from an address, with its DMARC verdict, automatic or not, received `minutes` ago.
+       */
+      const supportAddress = async () => {
+        const box = `mbx_${hex().slice(0, 32)}`, domainName = `claim-${hex().slice(0, 10)}.example`, domain = unique('mdom'), thread = unique('thread');
+        await db.query("INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status) VALUES ($1, $2, $1, $3, $4, 'active')", [domain, home, domainName, REGION]);
+        await db.query('INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $2, $3, $4)', [box, home, domain, `support@${domainName}`]);
+        await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [thread, home]);
+        const store = async (from: string, dmarc: string, o: { automated?: boolean; minutes?: number } = {}) => {
+          const messageId = `msg_${hex().slice(0, 32)}`, to = `support@${domainName}`, rfcId = `${messageId}@example.invalid`;
+          await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, envelope_to, verdicts, headers, "to", text, automated, sent_at, received_at, message_id)
+            VALUES ($1, $2, 'inbound', $3, $4, 'My bounces', $5, '[]', $6, $7, $8, 'Why are my bounces up?', $9, now(), now() - make_interval(mins => $10::int), $11)`,
+            [messageId, home, thread, REGION, from, JSON.stringify({ dmarc, dkim: 'PASS', spf: 'PASS', virus: 'PASS' }), JSON.stringify([{ name: 'From', value: `<${from}>` }, { name: 'To', value: to }, { name: 'Date', value: new Date().toUTCString() },
+              { name: 'Message-ID', value: `<${rfcId}>` }]), JSON.stringify([{ name: null, address: to }]), o.automated ?? false, o.minutes ?? 0, rfcId]);
+          await db.query("INSERT INTO mailbox_messages(mailbox_id, message_id, workspace_id, thread_id, direction, received_at, reply_author_verified) VALUES ($1, $2, $3, $4, 'inbound', now(), $5)", [box, messageId, home, thread, dmarc === 'PASS']);
+          return messageId;
+        };
+        return { box, store };
       };
       const messages = async (id: string) => (await db.query('SELECT id, seq, author, text, delivery, staff_user_id FROM support_messages WHERE conversation_id = $1 ORDER BY seq', [id])).rows;
       // The support site: every request to it is recorded and answered; nothing else leaves the fixture.
@@ -10670,6 +10693,197 @@ describe('Hosted MCP OAuth and tools', () => {
           const [next] = await due();
           assert.equal(next?.subject, `${(await db.query('SELECT pending_address FROM support_conversations WHERE id = $1', [waiting])).rows[0].pending_address} got no reply`);
           await sent(next);
+        });
+
+        await t.test('13b an email waiting on a claim: its sign-in reply is no reply, so No reply sent fires 10 minutes on until an answer actually reaches them; the general answer or a ticket with its staff email ends it; forged mail, mail the answering limits held, and automatic mail are owed nothing, get no staff email and no ticket, until a claim', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const row = async (id: string) => ok(await send('GET', `${inbox}?view=all&limit=1&q=${id}`, session(reader))).data[0];
+          const { readGlass } = await import('./src/glass.js'), counted = async () => (await readGlass(runtime)).support.noReply;
+          const due = async () => ok(reply(await platform.staffMail())).data as Json[];
+          let sends = 0;
+          const sent = async (mail: Json) => { sends++; return ok(reply(await platform.staffMailSent(mail.key, { threadId: mail.threadId ?? `thr_claim_${sends}`, messageId: `msg_claim_${sends}` }))); };
+          const later = () => db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'; UPDATE support_staff_threads SET last_sent_at = last_sent_at - interval '2 hours', opened_at = opened_at - interval '2 hours'");
+          // What earlier cases left in Needs you is emailed first, so this case reads only its own.
+          for (let i = 0; i < 30; i++) { const batch = await due(); if (!batch.length) break; for (const mail of batch) await sent(mail); await later(); }
+          assert.deepEqual(await due(), []);
+
+          // A support address, and an account whose address it is that no sign-in proved a mailbox: a DMARC pass from it
+          // binds nobody but passes the sender checks a general answer needs; a failure from it is forged as far as anyone knows.
+          const { box, store: storeFrom } = await supportAddress();
+          const owner = await sessionFixture(t), address = `uma-${hex().slice(0, 8)}@example.invalid`;
+          await db.query('UPDATE nightmail_users SET email = $2, email_verified = true, mailbox_proved = NULL, mailbox_proved_at = NULL WHERE id = $1', [owner.userId, address]);
+          const store = (dmarc: string, o: { automated?: boolean; minutes?: number } = {}) => storeFrom(address, dmarc, o);
+          /** An email as the support platform takes one: registered, then mirrored (it, then the sign-in reply) as written `minutes` ago. */
+          const waiting = async (dmarc: string, minutes: number) => {
+            const messageId = await store(dmarc), id = conversation();
+            const registered = ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'email', messageId } })), 201);
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Why are my bounces up?', source: messageId, at: at(minutes) },
+              { id: msg(), author: 'system', kind: 'waiting', text: 'Sent the sign-in reply', at: at(minutes) }])));
+            return { id, messageId, registered };
+          };
+          const configured = runtime.config.support!.addressIds;
+          runtime.config.support!.addressIds = [box];
+          try {
+            // Glass's count moves with it (read right around each change: other cases' conversations age meanwhile).
+            let before = await counted();
+            const answerable = await waiting('PASS', 12);
+            assert.equal(await counted() - before, 1, 'Glass counts it.');
+            const forged = await waiting('FAIL', 12), recent = await waiting('PASS', 6);
+            assert.deepEqual([answerable.registered.mode, answerable.registered.generalAnswer, forged.registered.mode, forged.registered.generalAnswer], ['pending_signin', true, 'pending_signin', false],
+              'Registration says which one gets a general answer if nobody claims it.');
+            assert.deepEqual((await db.query('SELECT conversation_id, general_answer FROM support_email_signins WHERE conversation_id = ANY($1) ORDER BY general_answer DESC', [[answerable.id, forged.id]])).rows.map(r => [r.conversation_id, r.general_answer]),
+              [[answerable.id, true], [forged.id, false]]);
+            // The sign-in reply alone is no reply: 10 minutes on, No reply sent fires. Forged mail is owed nothing.
+            const fired = await row(answerable.id);
+            assert.deepEqual([fired.needsYou?.reasons, fired.needsYou?.urgent, Math.round((Date.now() - Date.parse(fired.needsYou?.since)) / 60_000)], [['no_reply'], true, 12]);
+            assert.deepEqual([(await row(forged.id)).needsYou, (await row(recent.id)).needsYou], [null, null], 'Forged: owed nothing. Under 10 minutes: not yet.');
+            // The answering turn reads no account: nobody is bound, so every stamped read is refused.
+            for (const path of ['/v1/support/scope', '/v1/support/context', '/v1/support/domains']) error(reply(await platform.request(answerable.id, 'GET', path)), 403);
+            // A draft that was held, or an answer that failed to send, reaches nobody: still owed.
+            ok(reply(await platform.mirrorMessages(answerable.id, [{ id: msg(), author: 'agent', kind: 'held', text: 'Bounces come from old lists.', delivery: 'held', reason: 'gate', at: at(4) },
+              { id: msg(), author: 'agent', kind: 'reply', text: 'Bounces come from old lists.', delivery: 'failed', at: at(3) }])));
+            assert.deepEqual((await row(answerable.id)).needsYou?.reasons, ['failed', 'no_reply']);
+            // The general answer that went ends it.
+            before = await counted();
+            ok(reply(await platform.mirrorMessages(answerable.id, [{ id: msg(), author: 'agent', kind: 'reply', text: 'Bounces come from old lists. I can’t see your account from this email.', delivery: 'sent', at: at(2) }])));
+            assert.equal(await counted() - before, -1);
+            assert.equal((await row(answerable.id)).needsYou, null);
+
+            // Mail the answering limits held at the claim wait's end: the support platform's 'unanswered' entry, and it is owed nothing until its claim.
+            const capped = await waiting('PASS', 30);
+            ok(reply(await platform.mirrorMessages(capped.id, [{ id: msg(), author: 'system', kind: 'unanswered', text: 'No general answer: over the answering limits.', source: capped.messageId, at: at(22) }])));
+            assert.equal((await row(capped.id)).needsYou, null);
+            // Forged mail claimed: owed a reply from the claim (here 11 minutes ago, nothing since), not from when it arrived.
+            await db.query("UPDATE support_email_signins SET user_id = $2, signed_in_at = now() - interval '11 minutes' WHERE conversation_id = $1", [forged.id, owner.userId]);
+            const claimed = await row(forged.id);
+            assert.deepEqual([claimed.needsYou?.reasons, Math.round((Date.now() - Date.parse(claimed.needsYou?.since)) / 60_000)], [['no_reply'], 11]);
+            await db.query("UPDATE support_email_signins SET user_id = NULL, signed_in_at = NULL WHERE conversation_id = $1", [forged.id]);
+            // The other path to a person: the agent couldn't answer without the account, filed a ticket and said so.
+            const ticketed = await waiting('PASS', 12), ticket = ticketId();
+            ok(reply(await platform.mirrorState(ticketed.id, { subject: 'My bounces', ticket: { id: ticket, type: 'account', severity: 'P3', brief: { title: 'Bounces up', summary: 'They ask why their bounces rose; nobody claimed the email.', ask: 'Why are my bounces up?', recommendation: 'Check their bounces and reply.' } } })));
+            ok(reply(await platform.mirrorMessages(ticketed.id, [{ id: msg(), author: 'agent', kind: 'reply', text: `I’ve passed this to the team as ${ticket}.`, delivery: 'sent', at: at(4) }])));
+            assert.deepEqual((await row(ticketed.id)).needsYou?.reasons, ['ticket'], 'Answered, and its ticket needs staff.');
+            // Automatic mail nobody answered: never a conversation, and never "Unanswered email to support".
+            await store('PASS', { automated: true, minutes: 31 });
+
+            // Across the window: one staff email, for the ticket; none for the forged, held or automatic mail, and no ticket for them.
+            const mails = await due(), about = (id: string) => mails.filter(m => (m.text as string).includes(`/support/${id}`));
+            assert.deepEqual([mails.length, about(ticketed.id).length], [1, 1], mails.map(m => m.subject).join(' | '));
+            assert.ok(!mails.some(m => (m.subject as string).startsWith('Unanswered email to support')));
+            assert.deepEqual((await db.query('SELECT id, ticket_id FROM support_conversations WHERE id = ANY($1) ORDER BY id', [[forged.id, capped.id, answerable.id, recent.id]])).rows.map(r => r.ticket_id), [null, null, null, null]);
+            for (const mail of mails) await sent(mail);
+            assert.deepEqual(await due(), []);
+            // Settled for the cases after this one: the recent one answered, and all of them done.
+            ok(reply(await platform.mirrorMessages(recent.id, [{ id: msg(), author: 'agent', kind: 'reply', text: 'Bounces come from old lists.', delivery: 'sent', at: at(1) }])));
+            for (const id of [answerable.id, forged.id, recent.id, capped.id, ticketed.id]) ok(await send('POST', `${inbox}/${id}/done`, keyed(operator)));
+          } finally { runtime.config.support!.addressIds = configured; }
+        });
+
+        await t.test('13c signed in as A, writing from B, an address with no account whose mail passes the sender checks: A\u2019s claim gets 403 and claims nothing; B is owed an answer, waiting or replying from B, and No reply sent clears only when it goes; a reply from another address C in the thread joins nothing and fires nothing', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const row = async (id: string) => ok(await send('GET', `${inbox}?view=all&limit=1&q=${id}`, session(reader))).data[0];
+          const due = async () => ok(reply(await platform.staffMail())).data as Json[];
+          const { box, store } = await supportAddress();
+          // A: signed in, but the session proves no mailbox (as tonight). B and C: addresses no account has.
+          const a = await sessionFixture(t);
+          await db.query('UPDATE nightmail_sessions SET verified_email = NULL WHERE user_id = $1', [a.userId]);
+          const b = `bea-${hex().slice(0, 8)}@example.invalid`, c = `cy-${hex().slice(0, 8)}@example.invalid`;
+          const configured = runtime.config.support!.addressIds;
+          runtime.config.support!.addressIds = [box];
+          try {
+            const first = await store(b, 'PASS'), id = conversation();
+            const registered = ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'email', messageId: first } })), 201);
+            assert.deepEqual([registered.mode, registered.generalAnswer], ['non_member', true], 'Its sender passed the checks: answered in general, no sign-in needed.');
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Why are my bounces up?', source: first, at: at(12) }])));
+            // A's claim: refused before anything is read, and nothing changes.
+            const wakesBefore = wakes.length;
+            error(await send('POST', `/v1/support-conversations/${id}/claim`, session(a), { messageId: first }), 403, 'MAILBOX_SIGN_IN_REQUIRED');
+            assert.deepEqual([(await row(id)).customer, wakes.length - wakesBefore], [null, 0]);
+            assert.equal((await db.query("SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.claim' AND target_id = $1", [id])).rows[0].n, 0);
+            // Waiting: owed an answer 10 minutes on.
+            assert.deepEqual((await row(id)).needsYou?.reasons, ['no_reply']);
+            // Replying from B: the same conversation, still owed (since the first message), and passing the checks too.
+            const again = await store(b, 'PASS');
+            assert.deepEqual(ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'email', messageId: again } }))).generalAnswer, true);
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Any news?', source: again, at: at(5) }])));
+            assert.equal(Math.round((Date.now() - Date.parse((await row(id)).needsYou?.since)) / 60_000), 12, 'The clock runs from the first unanswered message.');
+            // A held draft is no answer; the one that goes is.
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'agent', kind: 'held', text: 'Bounces come from old lists.', delivery: 'held', reason: 'gate', at: at(2) }])));
+            assert.deepEqual((await row(id)).needsYou?.reasons, ['no_reply']);
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'agent', kind: 'reply', text: 'Bounces come from old lists; your DKIM record is missing a part.', delivery: 'sent', at: at(1) }])));
+            assert.equal((await row(id)).needsYou, null);
+            // C replies in the same thread: never part of B's conversation, which doesn't change.
+            const fromC = await store(c, 'FAIL'), messages = (await db.query('SELECT count(*)::int AS n FROM support_messages WHERE conversation_id = $1', [id])).rows[0].n;
+            error(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'email', messageId: fromC } })), 409, 'SUPPORT_CONVERSATION_SENDER');
+            assert.deepEqual([(await db.query('SELECT count(*)::int AS n FROM support_messages WHERE conversation_id = $1', [id])).rows[0].n, (await row(id)).needsYou], [messages, null]);
+            // Its own conversation (where the support platform takes it): it fails the checks, so after its sign-in reply it is owed nothing, and nothing goes to staff.
+            const own = conversation(), ownReg = ok(reply(await platform.registerConversation({ conversationId: own, evidence: { kind: 'email', messageId: fromC } })), 201);
+            assert.deepEqual([ownReg.mode, ownReg.generalAnswer], ['unverified', false]);
+            ok(reply(await platform.mirrorMessages(own, [{ id: msg(), author: 'customer', text: 'Answer me instead.', source: fromC, at: at(30) }, { id: msg(), author: 'system', kind: 'waiting', text: 'Sent the sign-in reply', at: at(30) }])));
+            assert.equal((await row(own)).needsYou, null);
+            const mails = await due();
+            assert.ok(!mails.some(m => (m.text as string).includes(`/support/${id}`) || (m.text as string).includes(`/support/${own}`)), mails.map(m => m.subject).join(' | '));
+            assert.deepEqual((await db.query('SELECT ticket_id FROM support_conversations WHERE id = ANY($1)', [[id, own]])).rows.map(r => r.ticket_id), [null, null]);
+            let sends = 0;
+            for (const mail of mails) ok(reply(await platform.staffMailSent(mail.key, { threadId: mail.threadId ?? `thr_13c_${++sends}`, messageId: `msg_13c_${++sends}` })));
+            for (const done of [id, own]) ok(await send('POST', `${inbox}/${done}/done`, keyed(operator)));
+          } finally { runtime.config.support!.addressIds = configured; }
+        });
+
+        await t.test('13d answer me by email instead: an email that failed verification, from an address with no account, released from its sign-in link is due at once on the support platform\u2019s list and owed a reply from the release until the answer goes; once per conversation; nothing after an automatic answer or for what isn\u2019t waiting', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const row = async (id: string) => ok(await send('GET', `${inbox}?view=all&limit=1&q=${id}`, session(reader))).data[0];
+          const due = async (id?: string) => (ok(reply(await platform.generalAnswers(id))).data as Json[]).map(d => [d.conversationId, d.messageId]);
+          const { releaseGeneralAnswer } = await import('./src/support-conversations.js');
+          const release = (id: string, messageId: string) => runtime.db.transaction(tx => releaseGeneralAnswer(tx, id, messageId));
+          const { box, store } = await supportAddress();
+          const sender = `rhys-${hex().slice(0, 8)}@example.invalid`;
+          const configured = runtime.config.support!.addressIds;
+          runtime.config.support!.addressIds = [box];
+          try {
+            // Two emails that failed verification, from an address no account has: each got its sign-in reply, and is owed nothing.
+            const first = await store(sender, 'FAIL'), second = await store(sender, 'FAIL'), id = conversation();
+            const registered = ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'email', messageId: first } })), 201);
+            assert.deepEqual([registered.mode, registered.generalAnswer], ['unverified', false]);
+            ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'email', messageId: second } })));
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'What is my balance?', source: first, at: at(40) }, { id: msg(), author: 'system', kind: 'waiting', text: 'Sent the sign-in reply', at: at(40) },
+              { id: msg(), author: 'customer', text: 'Hello?', source: second, at: at(30) }, { id: msg(), author: 'system', kind: 'waiting', text: 'Sent the sign-in reply', at: at(30) }])));
+            assert.equal((await row(id)).needsYou, null);
+            assert.ok(!(await due()).some(([c]) => c === id));
+            // Nothing for an email that isn't waiting here.
+            const closed = conversation(), elsewhere = await store(sender, 'FAIL');
+            ok(reply(await platform.registerConversation({ conversationId: closed, evidence: { kind: 'email', messageId: elsewhere } })), 201);
+            ok(reply(await platform.closeConversation(closed)));
+            assert.deepEqual([await release(id, `msg_${hex().slice(0, 32)}`), await release(conversation(), first), await release(closed, elsewhere), await release(id, 'msg_x')], ['not_waiting', 'not_waiting', 'not_waiting', 'not_waiting']);
+            // Pressed from the second email's link: due at once, on the binding's list (all of it, and this conversation's).
+            assert.equal(await release(id, second), 'released');
+            assert.deepEqual([(await due()).filter(([c]) => c === id), await due(id)], [[[id, second]], [[id, second]]]);
+            assert.deepEqual(await due(conversation()), []);
+            // Both emails are owed a reply from the release (here 11 minutes ago, nothing since), not from when they arrived.
+            await db.query("UPDATE support_email_signins SET general_answer_requested_at = now() - interval '11 minutes' WHERE conversation_id = $1 AND message_id = $2", [id, second]);
+            const owed = await row(id);
+            assert.deepEqual([owed.needsYou?.reasons, Math.round((Date.now() - Date.parse(owed.needsYou?.since)) / 60_000)], [['no_reply'], 11]);
+            // Once per conversation: pressing again, from either email's link, does nothing new.
+            assert.deepEqual([await release(id, second), await release(id, first)], ['already_released', 'already_released']);
+            // A held draft is no answer; the general answer that goes ends it, and it leaves the list.
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'agent', kind: 'held', text: 'Your balance is answered in Help.', delivery: 'held', reason: 'gate', at: at(2) }])));
+            assert.deepEqual([(await row(id)).needsYou?.reasons, await due(id)], [['no_reply'], [[id, second]]]);
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'agent', kind: 'reply', text: 'Balances and keys are in the dashboard; sign in and press Help.', delivery: 'sent', at: at(1) }])));
+            assert.deepEqual([(await row(id)).needsYou, await due(id)], [null, []]);
+            // After an automatic answer: an email from an account's address that didn't bind, answered in general when nobody claimed it.
+            const owner = await sessionFixture(t), address = `una-${hex().slice(0, 8)}@example.invalid`;
+            await db.query('UPDATE nightmail_users SET email = $2, email_verified = true, mailbox_proved = NULL, mailbox_proved_at = NULL WHERE id = $1', [owner.userId, address]);
+            const answeredMail = await store(address, 'PASS'), answered = conversation();
+            assert.equal(ok(reply(await platform.registerConversation({ conversationId: answered, evidence: { kind: 'email', messageId: answeredMail } })), 201).mode, 'pending_signin');
+            ok(reply(await platform.mirrorMessages(answered, [{ id: msg(), author: 'customer', text: 'Why are my bounces up?', source: answeredMail, at: at(12) }, { id: msg(), author: 'system', kind: 'waiting', text: 'Sent the sign-in reply', at: at(12) },
+              { id: msg(), author: 'agent', kind: 'reply', text: 'Bounces come from old lists.', delivery: 'sent', at: at(4) }])));
+            assert.equal(await release(answered, answeredMail), 'already_answered');
+            assert.deepEqual(await due(answered), []);
+            for (const done of [id, answered]) ok(await send('POST', `${inbox}/${done}/done`, keyed(operator)));
+          } finally { runtime.config.support!.addressIds = configured; }
         });
 
         await t.test('14 send the held answer from the email: its link opens a confirm step showing exactly what would go, and only an operator\u2019s Approve sends it, as Send does; one a newer reply overtook is refused; one that needs a fresh reply is never proposed', async () => {

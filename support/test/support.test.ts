@@ -169,8 +169,10 @@ export class SupportConversation extends Conversation {
     if (unavailable.delete(input.messageId)) throw new Error('fixture: unavailable');
     return super.enqueueInbound(input);
   }
-  async fixture({ expire, tick, age, unavailable: id, route, fail, ageActions, actionsDue, spend }) {
+  async fixture({ expire, tick, age, unavailable: id, route, fail, ageActions, actionsDue, spend, claimWait }) {
     const sql = this.ctx.storage.sql, has = name => sql.exec('SELECT 1 FROM sqlite_master WHERE name=?', name).toArray().length > 0;
+    // The claim wait of an answer parked for a sign-in has passed (when it has one): its check is due now.
+    if (claimWait) sql.exec("UPDATE _support_work SET due_at = 1, result = CASE WHEN json_extract(result, '$.challengedAt') IS NULL THEN result ELSE json_set(result, '$.challengedAt', 1) END WHERE id = ?", claimWait);
     if (ageActions) sql.exec('UPDATE _support_actions SET created_at = created_at - ?', ageActions);
     if (actionsDue) sql.exec('UPDATE _support_actions SET next_check_at = 0');
     if (id) unavailable.add(id);
@@ -2127,7 +2129,7 @@ describe('support Worker', () => {
     afterAll(() => instance?.dispose());
     type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
     type Run = { rows: Row[]; legacy: { message_id: string; state: string }[]; grant: boolean; alarm: number | null; before: number; meta: { closedAt: number | null } | null; actions: { id: string; state: string; attempts: number; next_check_at: number }[] };
-    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' | 'reply'; ageActions?: number; actionsDue?: boolean; spend?: number } = {}) {
+    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' | 'reply'; ageActions?: number; actionsDue?: boolean; spend?: number; claimWait?: string } = {}) {
       const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, ...options }) });
       assert.equal(res.status, 200);
       return await res.json() as Run;
@@ -2434,6 +2436,229 @@ describe('support Worker', () => {
       await eventually(async () => { const run = await drive(await conversationOf('thr_tk'), { tick: true }); return states(run)['answer:msg_tk_2'] === 'done' || undefined; });
       assert.equal(recorded.length, before, 'No model call after the ticket.');
       assert.equal((await replies('thr_tk', instance)).length, 1);
+    }, 180_000);
+
+    /** The line the Worker adds after a general answer to an email nobody claimed: plainly what it couldn't see, and how to continue. */
+    const unclaimedLine = (conversation: string, message: string) => `\n\nI can’t see your Nightmail account from this email, because I couldn’t confirm it came from the address it shows. If your question is about your account, sign in to Nightmail with the account for this address (an emailed sign-in link or Google works), then open this link and I’ll answer again from your account: https://dev.bane.mx/support/continue/${conversation}/${message}\n\nOr write to us from your account’s own email address.`;
+    const NO_OFFER_LINE = '\n\nI can’t see your Nightmail account from this email, because I couldn’t confirm it came from the address it shows. For anything else about your account, sign in to Nightmail and press Help: https://dev.bane.mx';
+    const VERIFIED_ANSWER = 'Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)';
+    /** An email from an account's address that binds nobody (the account spells it with a capital), its sign-in reply sent and its answer waiting for the claim. */
+    async function waitingOnClaim(user: string, address: string, message: string, thread: string) {
+      await fakeHook('/__account', { userId: user, email: address[0]!.toUpperCase() + address.slice(1), role: 'owner' }, instance);
+      await hook(message, thread, address);
+      const id = await conversationOf(thread);
+      await setInbox({ id, channel: 'email' });
+      const run = await drive(id, { tick: true });
+      assert.equal(states(run)[`answer:${message}`], 'parked', 'Its sign-in reply went, and its answer waits for the claim.');
+      return { id, run };
+    }
+    const sentKeys = async (thread: string) => (await replies(thread, instance)).map(c => c[5] as string).sort();
+    const ticketsOf = async (id: string) => (await (await db()).prepare('SELECT id FROM tickets WHERE conversation_id = ?').bind(id).all<{ id: string }>()).results.map(r => r.id);
+
+    test('an email waiting on a claim gets a general answer 8 minutes after its sign-in reply, with no account access, saying how to get one that can; a later claim gets exactly one follow-up from the account', async () => {
+      const { id, run: parked } = await waitingOnClaim('usr_uma', 'uma@acme.test', 'msg_uc_1', 'thr_uc');
+      const due = parked.rows.find(r => r.id === 'answer:msg_uc_1')!.due_at;
+      assert.ok(due >= parked.before + 8 * 60_000 - 1000 && due <= Date.now() + 8 * 60_000, 'Next looked at when the claim wait ends.');
+      // A check before then: nothing more.
+      let run = await drive(id, { expire: 'answer:msg_uc_1', tick: true });
+      assert.equal(states(run)['answer:msg_uc_1'], 'parked');
+      assert.deepEqual(await sentKeys('thr_uc'), ['reply-msg_uc_1:signin']);
+      // Unclaimed at the end of the wait: a general answer, the Worker's line after it.
+      const from = recorded.length, calls = (await fakeCalls(instance)).length;
+      run = await drive(id, { claimWait: 'answer:msg_uc_1', tick: true });
+      assert.equal(states(run)['answer:msg_uc_1'], 'done');
+      const general = (await replies('thr_uc', instance)).find(c => c[5] === 'reply-msg_uc_1');
+      assert.deepEqual([general?.[3].text, general?.[3].to], [GENERAL_ANSWER + unclaimedLine(id, 'msg_uc_1'), ['uma@acme.test']]);
+      // No account access: only the general tools, no person or account in the turn, and nothing read but whether it was claimed (refused: nobody is bound).
+      const turn = recorded.slice(from).filter(r => about(r, 'A support email arrived'));
+      assert.ok(turn.length && turn.every(r => offered(r).join() === EMAIL_TOOLS), 'No account tool is offered.');
+      assert.ok(turn.every(r => { const b = JSON.stringify(r.body); return b.includes('general answers only') && !b.includes('<account read=') && !b.includes('usr_uma') && !b.includes('Uma@acme.test') && !b.includes('Acme Prod'); }));
+      assert.ok(about(turn[0]!, 'Nobody has confirmed this email signed in'), 'The turn knows why it answers in general.');
+      assert.deepEqual((await stampedCalls(id, calls, instance)).map(c => [c[3], c[1]]), [['GET', '/v1/support/scope']]);
+      // In the inbox: the sign-in reply asked them to act first (no reply), then the answer that reached them.
+      const box = await eventually(async () => { const b = await inboxOf(id); return b?.messages.some((m: any) => m.author === 'agent') ? b : undefined; });
+      assert.deepEqual(box.messages.map((m: any) => [m.author, m.kind ?? null]), [['customer', null], ['system', 'waiting'], ['agent', 'reply']]);
+      // Released from the sign-in link after that answer went ("Answer me by email instead"): nothing new.
+      await fakeHook('/__release', { conversationId: id, messageId: 'msg_uc_1' }, instance);
+      await wake(id);
+      run = await drive(id, { tick: true });
+      assert.deepEqual(await sentKeys('thr_uc'), ['reply-msg_uc_1', 'reply-msg_uc_1:signin'], 'Already answered: the release adds nothing.');
+      // The follow-up waits for the claim: a check without one sends nothing.
+      assert.equal(states(run)['answer:msg_uc_1:claimed'], 'parked');
+      run = await drive(id, { expire: 'answer:msg_uc_1:claimed', tick: true });
+      assert.deepEqual(await sentKeys('thr_uc'), ['reply-msg_uc_1', 'reply-msg_uc_1:signin']);
+      // Claimed: one follow-up from the account, to its address as the account stores it, told what already went.
+      assert.equal(await claim(id, 'msg_uc_1', 'usr_uma', instance), 200);
+      const told = recorded.length;
+      run = await drive(id, { expire: 'answer:msg_uc_1:claimed', tick: true });
+      assert.equal(states(run)['answer:msg_uc_1:claimed'], 'done');
+      const followup = (await replies('thr_uc', instance)).find(c => c[5] === 'reply-msg_uc_1:claimed');
+      assert.deepEqual([followup?.[3].text, followup?.[3].to], [VERIFIED_ANSWER, ['Uma@acme.test']]);
+      const asked = recorded.slice(told).find(r => about(r, 'A support email arrived'));
+      assert.ok(asked && about(asked, 'You already answered it in general') && about(asked, 'Bounces at Gmail usually come from old or mistyped addresses') && offered(asked).includes('bounce_reasons'), 'Read from the account, told what already went.');
+      // Claimed again and woken again: nothing more.
+      assert.equal(await claim(id, 'msg_uc_1', 'usr_uma', instance), 200);
+      await wake(id);
+      await drive(id, { tick: true });
+      assert.deepEqual(await sentKeys('thr_uc'), ['reply-msg_uc_1', 'reply-msg_uc_1:claimed', 'reply-msg_uc_1:signin']);
+    }, 180_000);
+
+    test('the same sender writing again while the first waits joins it: no second sign-in reply, the same deadline, one general answer to both; after that answer, a reply is answered at once; another address in the thread joins nothing and gets no answer', async () => {
+      const { id, run: parked } = await waitingOnClaim('usr_ula', 'ula@acme.test', 'msg_ur_1', 'thr_ur');
+      const deadline = parked.rows.find(r => r.id === 'answer:msg_ur_1')!.due_at;
+      // A reply from the same address while the first waits: it joins it.
+      await hook('msg_ur_2', 'thr_ur', 'ula@acme.test');
+      let run = await drive(id, { tick: true });
+      assert.deepEqual([states(run)['answer:msg_ur_2'], states(run)['answer:msg_ur_1']], ['done', 'parked']);
+      assert.equal(run.rows.find(r => r.id === 'answer:msg_ur_1')!.due_at, deadline, 'The clock runs from the first message: not reset.');
+      assert.deepEqual(await sentKeys('thr_ur'), ['reply-msg_ur_1:signin'], 'No second sign-in reply.');
+      // The claim wait ends: one general answer, written for both.
+      const from = recorded.length;
+      run = await drive(id, { claimWait: 'answer:msg_ur_1', tick: true });
+      const turn = recorded.slice(from).filter(r => about(r, 'A support email arrived'));
+      assert.ok(turn.length && about(turn[0]!, 'Unclaimed probe') && about(turn[0]!, 'Reply probe: and why does my DKIM fail?') && turn.every(r => offered(r).join() === EMAIL_TOOLS), 'The answer sees what they wrote since, with no account tool.');
+      assert.deepEqual(await sentKeys('thr_ur'), ['reply-msg_ur_1', 'reply-msg_ur_1:signin']);
+      assert.equal((await replies('thr_ur', instance)).find(c => c[5] === 'reply-msg_ur_1')?.[3].text, GENERAL_ANSWER + unclaimedLine(id, 'msg_ur_1'));
+      // After it went, a reply from the same address is answered in general at once, offering the first message's sign-in link; no new wait.
+      await hook('msg_ur_3', 'thr_ur', 'ula@acme.test');
+      run = await drive(id, { tick: true });
+      assert.equal(states(run)['answer:msg_ur_3'], 'done');
+      assert.deepEqual(await sentKeys('thr_ur'), ['reply-msg_ur_1', 'reply-msg_ur_1:signin', 'reply-msg_ur_3']);
+      const later = (await replies('thr_ur', instance)).find(c => c[5] === 'reply-msg_ur_3');
+      assert.deepEqual([later?.[3].text, later?.[3].replyToMessageId], [GENERAL_ANSWER + unclaimedLine(id, 'msg_ur_1'), 'msg_ur_3']);
+      assert.ok(!run.rows.some(r => r.id === 'answer:msg_ur_3:claimed'), 'One follow-up for the conversation, the first message’s.');
+      // Another address in the thread: a conversation of its own, where it fails the sender checks: its sign-in reply only, and nothing at the end of its wait.
+      const models = recorded.length;
+      await hook('msg_ur_c', 'thr_ur', 'cyd@else.test');
+      run = await drive(id, { tick: true });
+      assert.equal(states(run)['forward:msg_ur_c'], 'done');
+      const other = (await (await db()).prepare("SELECT id FROM conversations WHERE thread_id LIKE 'thr_ur#%'").first<{ id: string }>())!.id;
+      await setInbox({ id: other, channel: 'email' });
+      run = await drive(other, { tick: true });
+      run = await drive(other, { claimWait: 'answer:msg_ur_c', tick: true });
+      assert.equal(states(run)['answer:msg_ur_c'], 'parked');
+      const toOther = (await replies('thr_ur', instance)).filter(c => c[3].to[0] === 'cyd@else.test').map(c => c[5]);
+      assert.deepEqual(toOther, ['reply-msg_ur_c:signin'], 'No answer, only its sign-in reply.');
+      assert.equal(recorded.length, models, 'No model turn.');
+      assert.deepEqual([await ticketsOf(id), await ticketsOf(other)], [[], []]);
+      assert.ok(!(await inboxOf(id)).messages.some((m: any) => m.text?.includes('Other address probe')), 'It never joins the first sender’s conversation.');
+    }, 180_000);
+
+    test('an email that failed verification, from an address with no account, released from its sign-in link ("Answer me by email instead") gets the general-answers-only turn at once for everything waiting, though it asks for account data; pressing again does nothing new', async () => {
+      await hook('msg_rel_1', 'thr_rel', 'rhys@else.test');
+      const id = await conversationOf('thr_rel');
+      await setInbox({ id, channel: 'email' });
+      let run = await drive(id, { tick: true });
+      await hook('msg_rel_2', 'thr_rel', 'rhys@else.test');
+      run = await drive(id, { tick: true });
+      assert.deepEqual([states(run)['answer:msg_rel_1'], states(run)['answer:msg_rel_2']], ['parked', 'parked']);
+      assert.deepEqual(await sentKeys('thr_rel'), ['reply-msg_rel_1:signin', 'reply-msg_rel_2:signin']);
+      // Failing mail: its claim wait ends with nothing.
+      run = await drive(id, { claimWait: 'answer:msg_rel_1', tick: true });
+      assert.equal(states(run)['answer:msg_rel_1'], 'parked');
+      assert.deepEqual(await sentKeys('thr_rel'), ['reply-msg_rel_1:signin', 'reply-msg_rel_2:signin']);
+      // Released (Nightmail's due list, after the claim page's button) and woken: one general answer now, to both emails.
+      await fakeHook('/__release', { conversationId: id, messageId: 'msg_rel_1' }, instance);
+      const from = recorded.length, calls = (await fakeCalls(instance)).length;
+      await wake(id);
+      run = await drive(id, { tick: true });
+      assert.deepEqual([states(run)['answer:msg_rel_1'], states(run)['answer:msg_rel_2']], ['done', 'done']);
+      const sent = (await replies('thr_rel', instance)).find(c => c[5] === 'reply-msg_rel_1');
+      assert.deepEqual([sent?.[3].text, sent?.[3].to, sent?.[3].replyToMessageId], [GENERAL_ANSWER + NO_OFFER_LINE, ['rhys@else.test'], 'msg_rel_1'], 'To the conversation’s address, in its thread; no sign-in offered.');
+      // No account tools, no account reads, no account data: the model reached for four reads it wasn't offered, and none reached Nightmail.
+      const turn = recorded.slice(from).filter(r => about(r, 'A support email arrived'));
+      assert.ok(turn.length && turn.every(r => offered(r).join() === EMAIL_TOOLS), 'Only the general tools are offered.');
+      assert.ok(about(turn[0]!, 'Released probe: what is my balance') && about(turn[0]!, 'Released probe again'), 'Both emails, in one answer.');
+      assert.ok(turn.every(r => { const b = JSON.stringify(r.body); return b.includes('general answers only') && !b.includes('<account read='); }));
+      const reached = recorded.slice(from).flatMap(r => (r.body?.messages ?? []).flatMap(blocksOf)).filter((b: any) => b.type === 'tool_use').map((b: any) => b.name as string);
+      assert.ok(['account_context', 'list_domains', 'get_billing', 'bounce_reasons'].every(name => reached.includes(name)), reached.join());
+      assert.deepEqual((await stampedCalls(id, calls, instance)).map(c => c[1]).filter(path => path !== '/v1/support/scope'), [], 'No account read reached Nightmail (only whether it was claimed: refused, nobody is bound).');
+      assert.ok(!run.rows.some(r => r.id.endsWith(':claimed')), 'No follow-up: they asked to be answered by email.');
+      // Pressed again, woken again: nothing new.
+      await fakeHook('/__release', { conversationId: id, messageId: 'msg_rel_2' }, instance);
+      await wake(id);
+      await drive(id, { tick: true });
+      assert.deepEqual(await sentKeys('thr_rel'), ['reply-msg_rel_1', 'reply-msg_rel_1:signin', 'reply-msg_rel_2:signin']);
+      assert.deepEqual(await ticketsOf(id), []);
+    }, 180_000);
+
+    test('an email claimed within the 8 minutes gets its one answer from the account, and no general answer', async () => {
+      const { id } = await waitingOnClaim('usr_una', 'una@acme.test', 'msg_uc_early', 'thr_uc_early');
+      assert.equal(await claim(id, 'msg_uc_early', 'usr_una', instance), 200);
+      let run = await drive(id, { expire: 'answer:msg_uc_early', tick: true });
+      assert.equal(states(run)['answer:msg_uc_early'], 'done');
+      run = await drive(id, { claimWait: 'answer:msg_uc_early', tick: true });
+      await drive(id, { tick: true });
+      assert.deepEqual(await sentKeys('thr_uc_early'), ['reply-msg_uc_early', 'reply-msg_uc_early:signin']);
+      assert.equal((await replies('thr_uc_early', instance)).find(c => c[5] === 'reply-msg_uc_early')?.[3].text, VERIFIED_ANSWER);
+      assert.ok(!run.rows.some(r => r.id === 'answer:msg_uc_early:claimed'), 'No follow-up waits.');
+    }, 180_000);
+
+    test('an unclaimed email the agent can’t answer without the account gets a ticket and an answer naming it; a claim after it adds no follow-up and no note', async () => {
+      const { id } = await waitingOnClaim('usr_ulla', 'ulla@acme.test', 'msg_uc_tk', 'thr_uc_tk');
+      const run = await drive(id, { claimWait: 'answer:msg_uc_tk', tick: true });
+      const [ticket, ...more] = await ticketsOf(id);
+      const sent = (await replies('thr_uc_tk', instance)).find(c => c[5] === 'reply-msg_uc_tk');
+      assert.ok(ticket && !more.length && sent?.[3].text.includes(`passed it to the Nightmail team as ${ticket}`) && sent[3].text.endsWith(NO_OFFER_LINE) && !sent[3].text.includes('/support/continue/'), sent?.[3].text);
+      assert.ok(!run.rows.some(r => r.id === 'answer:msg_uc_tk:claimed'), 'The team has it: no follow-up waits.');
+      assert.equal((await eventually(async () => (await inboxOf(id))?.state?.ticket))?.id, ticket, 'Its ticket reaches staff through the inbox.');
+      assert.equal(await claim(id, 'msg_uc_tk', 'usr_ulla', instance), 200);
+      await wake(id);
+      await drive(id, { tick: true });
+      assert.deepEqual(await sentKeys('thr_uc_tk'), ['reply-msg_uc_tk', 'reply-msg_uc_tk:signin']);
+      assert.deepEqual(await ticketsOf(id), [ticket], 'No note or second ticket.');
+    }, 180_000);
+
+    test('forged and automatic mail get no 8-minute answer, no ticket and no model turn: forged mail keeps only its sign-in reply until a claim, automatic mail gets nothing', async () => {
+      // An account's address without a DMARC pass: it fails the sender checks a general answer needs.
+      await fakeHook('/__account', { userId: 'usr_ursa', email: 'Ursa@acme.test', role: 'owner' }, instance);
+      await hook('msg_uc_forged', 'thr_uc_forged', 'ursa@acme.test');
+      const forged = await conversationOf('thr_uc_forged');
+      await setInbox({ id: forged, channel: 'email' });
+      let run = await drive(forged, { tick: true });
+      assert.equal(states(run)['answer:msg_uc_forged'], 'parked');
+      const from = recorded.length;
+      for (let i = 0; i < 3; i++) run = await drive(forged, { claimWait: 'answer:msg_uc_forged', tick: true });
+      assert.equal(states(run)['answer:msg_uc_forged'], 'parked', 'Still waiting for its claim.');
+      assert.deepEqual(await sentKeys('thr_uc_forged'), ['reply-msg_uc_forged:signin']);
+      assert.equal(recorded.length, from, 'No model turn.');
+      assert.deepEqual(await ticketsOf(forged), []);
+      assert.ok(!(await inboxOf(forged)).messages.some((m: any) => m.author === 'agent' || m.kind === 'unanswered'));
+      // Automatic mail: read, never registered, never answered.
+      await hook('msg_uc_auto', 'thr_uc_auto', 'ugo@acme.test');
+      const auto = await conversationOf('thr_uc_auto');
+      await drive(auto, { tick: true });
+      run = await drive(auto, { claimWait: 'answer:msg_uc_auto', tick: true });
+      assert.deepEqual([states(run)['msg:msg_uc_auto'], states(run)['answer:msg_uc_auto']], ['done', undefined]);
+      assert.deepEqual(await sentKeys('thr_uc_auto'), []);
+      assert.ok(!(await fakeCalls(instance)).some(c => c[0] === 'registerConversation' && c[2]?.messageId === 'msg_uc_auto'));
+      assert.deepEqual(await ticketsOf(auto), []);
+      assert.equal(recorded.length, from);
+    }, 180_000);
+
+    test('an unclaimed email over the answering limits at 8 minutes gets nothing and no ticket, and the inbox owes it no reply; its claim still gets the one answer', async () => {
+      const { id } = await waitingOnClaim('usr_uri', 'uri@acme.test', 'msg_uc_cap', 'thr_uc_cap');
+      const d1 = await db(), today = new Date().toISOString().slice(0, 10);
+      // Today's general answers are used up.
+      await d1.prepare("INSERT INTO daily_counters (day, key, n) VALUES (?, 'global:turns:general', 1000000) ON CONFLICT (day, key) DO UPDATE SET n = excluded.n").bind(today).run();
+      try {
+        const from = recorded.length;
+        let run = await drive(id, { claimWait: 'answer:msg_uc_cap', tick: true });
+        assert.equal(states(run)['answer:msg_uc_cap'], 'parked', 'Back to waiting for its claim.');
+        assert.deepEqual(await sentKeys('thr_uc_cap'), ['reply-msg_uc_cap:signin'], 'No general answer, and no busy reply.');
+        assert.equal(recorded.length, from, 'No model turn.');
+        assert.deepEqual(await ticketsOf(id), [], 'No ticket.');
+        const marker = await eventually(async () => (await inboxOf(id))?.messages.find((m: any) => m.kind === 'unanswered'));
+        assert.deepEqual([marker?.author, marker?.source], ['system', 'msg_uc_cap'], 'The inbox learns it owes this email no reply until a claim.');
+        // Its claim wait is over: later checks never try a general answer again.
+        run = await drive(id, { claimWait: 'answer:msg_uc_cap', tick: true });
+        assert.deepEqual(await sentKeys('thr_uc_cap'), ['reply-msg_uc_cap:signin']);
+        assert.deepEqual(await ticketsOf(id), []);
+      } finally { await d1.prepare("DELETE FROM daily_counters WHERE key = 'global:turns:general'").run(); }
+      assert.equal(await claim(id, 'msg_uc_cap', 'usr_uri', instance), 200);
+      await drive(id, { expire: 'answer:msg_uc_cap', tick: true });
+      assert.deepEqual(await sentKeys('thr_uc_cap'), ['reply-msg_uc_cap', 'reply-msg_uc_cap:signin'], 'Claimed: answered from the account, once.');
+      assert.equal((await replies('thr_uc_cap', instance)).find(c => c[5] === 'reply-msg_uc_cap')?.[3].text, VERIFIED_ANSWER);
     }, 180_000);
 
     test('no one is left without a reply in chat either: the turn that files a ticket answers in the panel, naming it, and pauses nothing', async () => {

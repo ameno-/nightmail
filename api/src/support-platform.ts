@@ -31,6 +31,8 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['GET', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/state$/],
   ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/state$/],
   ['GET', /^\/v1\/operator\/support\/outbox$/],
+  // Emails whose sender asked to be answered by email instead (support-conversations.ts releaseGeneralAnswer).
+  ['GET', /^\/v1\/operator\/support\/general-answers$/],
   ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/messages\/msg_[a-z2-7]{16}\/delivery$/],
   // One path to a human (src/support-staff-mail.ts): the staff emails due, and each one sent.
   ['POST', /^\/v1\/operator\/support\/staff-mail$/],
@@ -87,7 +89,9 @@ export type HandoffCheck =
 /** How the support platform knows who a conversation is for: Nightmail checks each itself. */
 export type ConversationEvidence = { kind: 'handoff'; token: string } | { kind: 'email'; messageId: string };
 export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none';
-  status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean };
+  status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean;
+  /** Email only: the message passed the sender checks a general answer needs (support-conversations.ts emailEvidence). */
+  generalAnswer?: boolean };
 
 /** A transcript entry the support platform mirrors into the inbox (src/support-inbox.ts). Staff replies come from the inbox. */
 export type MirroredMessage = { id: string; author: 'customer' | 'agent' | 'system'; kind?: string | null; text: string; tools?: { label: string; ok: boolean }[]; attachments?: string[];
@@ -98,6 +102,8 @@ export type MirroredState = { subject?: string; ticket?: { id: string; type: str
 /** A conversation's inbox state as the support platform needs it: check agentState before every turn and every send. */
 export type InboxState = { id: string; status: 'open' | 'ticketed' | 'closed'; agentState: 'active' | 'paused'; pausedBy: 'staff' | 'ticket' | null; pausedAt: string | null;
   ticket: { id: string; type: string | null; severity: string | null; resolvedAt: string | null } | null; queuedReplies: number };
+/** An email whose sender asked, from its sign-in link, to be answered by email instead (support-conversations.ts releaseGeneralAnswer). */
+export type GeneralAnswerDue = { conversationId: string; messageId: string; requestedAt: string };
 /** A staff reply waiting for delivery. */
 export type OutboxReply = { id: string; conversationId: string; channel: 'chat' | 'email'; text: string; staffName: string | null; createdAt: string };
 
@@ -216,6 +222,11 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     inboxState: (conversationId: string) => call<InboxState>('GET', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/state`),
     /** The staff replies waiting for delivery (one conversation's, after its wake), oldest first. Staff can reply only while this is polled. */
     pullOutbox: (conversationId?: string) => call<{ data: OutboxReply[] }>('GET', `/v1/operator/support/outbox${conversationId === undefined ? '' : `?conversationId=${encodeURIComponent(String(conversationId))}`}`),
+    /**
+     * The conversations whose sender asked, from the sign-in link, to be answered by email instead (one conversation's,
+     * after its wake), oldest first: answer each in general, once, with no account access.
+     */
+    generalAnswers: (conversationId?: string) => call<{ data: GeneralAnswerDue[] }>('GET', `/v1/operator/support/general-answers${conversationId === undefined ? '' : `?conversationId=${encodeURIComponent(String(conversationId))}`}`),
     /** Record a staff reply's delivery: sent, or failed for good. */
     markDelivery: (conversationId: string, messageId: string, status: 'sent' | 'failed') =>
       call<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/messages/${encodeURIComponent(String(messageId))}/delivery`, { status }),

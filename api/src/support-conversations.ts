@@ -116,16 +116,17 @@ export const SIGNIN_DAYS = 7;
 const SENT_WITHIN_DAYS = 3;
 const Mode = z.enum(['member', 'non_member', 'pending_signin', 'unverified']);
 const Registered = z.object({
-  id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode.describe('member: reads the account by role; non_member: general answers; pending_signin and unverified: the same fixed reply, no model turn.'),
+  id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode.describe('member: reads the account by role; non_member: general answers; pending_signin and unverified: the same fixed reply with a sign-in for that message, then (generalAnswer, nobody claimed it in time) a general answer.'),
   verification: z.enum(['handoff', 'dmarc', 'signin', 'none']), status: z.enum(['open', 'ticketed', 'closed']),
   workspaceId: z.string().nullable().describe('The one workspace in scope: a chat’s, or the one an email narrowed to. Null: every membership.'),
   contentShared: z.boolean().describe('Whether the customer let support read message content (a chat, in its own workspace).'),
   created: z.boolean().describe('False when this registration repeated or added to an earlier one.'),
+  generalAnswer: z.boolean().optional().describe('Email only: whether this message passed the sender checks a general answer needs (a From that DMARC verified, not sent through Nightmail itself, not a replay). A message waiting for its sender\u2019s sign-in gets a general answer when nobody claims it only then.'),
 }).openapi('SupportConversationRegistration');
 type Row = { id: string; channel: 'chat' | 'email'; mode: z.infer<typeof Mode>; verification: RegisteredConversation['verification']; status: RegisteredConversation['status']; workspace_id: string | null;
   content_workspace_id: string | null; user_id: string | null; pending_address: string | null };
-const view = (row: Row, created: boolean): RegisteredConversation => ({ id: row.id, channel: row.channel, mode: row.mode, verification: row.verification, status: row.status,
-  workspaceId: row.workspace_id, contentShared: !!row.content_workspace_id, created });
+const view = (row: Row, created: boolean, generalAnswer?: boolean): RegisteredConversation => ({ id: row.id, channel: row.channel, mode: row.mode, verification: row.verification, status: row.status,
+  workspaceId: row.workspace_id, contentShared: !!row.content_workspace_id, created, ...generalAnswer === undefined ? {} : { generalAnswer } });
 const columns = sql`id, channel, mode, verification, status, workspace_id, content_workspace_id, user_id, pending_address`;
 /** The support platform's service binding, and nothing else: an operator's own session gets 403 too. */
 export const supportPlatformOnly = async (c: Ctx) => {
@@ -170,7 +171,9 @@ export function sameMailbox(a: string, b: string) {
  * - `non_member`: verified, but no such account, or one without a workspace (general answers);
  * - `pending_signin`: an account's address (up to case) that doesn't bind;
  * - `unverified`: anything else.
- * The last two get the same fixed reply, with a sign-in for this message (`signIn`). dkimAligned records whether a sole
+ * The last two get the same fixed reply, with a sign-in for this message (`signIn`). `generalAnswer`: the sender checks a
+ * general answer needs (`non_member`'s: verified, and not sent through Nightmail itself), which also decide whether a
+ * message waiting for its sign-in gets a general answer when nobody claims it. dkimAligned records whether a sole
  * signature of the From domain passed too.
  */
 async function emailEvidence(db: DbExecutor, addressIds: string[], messageId: string) {
@@ -220,14 +223,14 @@ async function emailEvidence(db: DbExecutor, addressIds: string[], messageId: st
       (SELECT count(*)::int FROM workspace_members wm WHERE wm.user_id = u.id) AS memberships
     FROM nightmail_users u WHERE u.email_verified AND lower(u.email) = ${from} LIMIT 2`);
   const owner = owners.length === 1 ? owners[0]! : null, exact = !!owner && sameMailbox(owner.email.trim(), written);
-  const eligible = verified && !selfSent && exact && owner!.proven && addressed;
+  const generalAnswer = verified && !selfSent, eligible = generalAnswer && exact && owner!.proven && addressed;
   const userId = eligible && owner!.memberships > 0 ? owner!.id : null;
-  const mode: Row['mode'] = userId ? 'member' : verified && !selfSent && (!owner || eligible) ? 'non_member' : owners.length ? 'pending_signin' : 'unverified';
-  return { from, threadId: m.thread_id, userId, mode, signIn: mode === 'pending_signin' || mode === 'unverified', verification: verified ? 'dmarc' as const : 'none' as const,
+  const mode: Row['mode'] = userId ? 'member' : generalAnswer && (!owner || eligible) ? 'non_member' : owners.length ? 'pending_signin' : 'unverified';
+  return { from, threadId: m.thread_id, userId, mode, signIn: mode === 'pending_signin' || mode === 'unverified', generalAnswer, verification: verified ? 'dmarc' as const : 'none' as const,
     rfcMessageId: m.rfc_message_id, evidence: { message: messageId, dmarc, dkimAligned, mailboxProven: !!owner?.proven, addressed, ...(selfSent ? { selfSent: true } : {}) } };
 }
-/** The same email again, for an account it already bound (a replay of a signed copy): it binds nobody, and asks for a sign-in. */
-const replayed = (found: NonNullable<Awaited<ReturnType<typeof emailEvidence>>>) => ({ ...found, userId: null, mode: 'pending_signin' as Row['mode'], signIn: true, evidence: { ...found.evidence, replayed: true } });
+/** The same email again, for an account it already bound (a replay of a signed copy): it binds nobody, asks for a sign-in, and gets no general answer meanwhile (it was answered once). */
+const replayed = (found: NonNullable<Awaited<ReturnType<typeof emailEvidence>>>) => ({ ...found, userId: null, mode: 'pending_signin' as Row['mode'], signIn: true, generalAnswer: false, evidence: { ...found.evidence, replayed: true } });
 
 /**
  * The sign-in one email waits for, as the person signed in may see or confirm it: the conversation an open email one with
@@ -244,6 +247,43 @@ async function signinFor(db: DbExecutor, conversationId: string, messageId: stri
     ${lock ? sql`FOR UPDATE OF s, si` : sql``}`);
   if (!target || target.address.toLowerCase() !== user.email.trim().toLowerCase() || (target.signed_by ?? user.userId) !== user.userId || (target.user_id ?? user.userId) !== user.userId) return null;
   return target;
+}
+
+/** What releaseGeneralAnswer did. */
+export type GeneralAnswerRelease = 'released' | 'already_answered' | 'already_released' | 'not_waiting';
+/** How long a release stays on the support platform's due list (GET /v1/operator/support/general-answers) unanswered. */
+const RELEASE_DUE = sql`interval '1 day'`;
+/**
+ * "Answer me by email instead": the sender of an email support couldn't verify, waiting for a sign-in that can't come
+ * (an address with no account, mail that fails the sender checks), opened the sign-in link emailed to the conversation's
+ * address and pressed it. That is the mailbox proof the sender checks couldn't give, so the conversation is due at once,
+ * without them, for the support platform's general-answers-only turn: no account tools, reads or data in the answer; a
+ * ticket and the staff email when it can't answer that way. The answer goes to the conversation's address, in its
+ * thread, and covers every email of theirs still waiting there. Once per conversation. In the caller's transaction (the
+ * row lock serializes presses); after it commits, wake the support platform (support-inbox.ts wakeSupport) as the claim
+ * does, and its sweep finds the release anyway (GET /v1/operator/support/general-answers).
+ * - released: due now; its waiting emails are owed a reply from now (No reply sent);
+ * - already_released: this conversation was released before;
+ * - already_answered: something already answered that email (the automatic general answer, a staff reply);
+ * - not_waiting: no such email waiting for a sign-in in an open email conversation (unknown, claimed, closed, or past SIGNIN_DAYS).
+ */
+export async function releaseGeneralAnswer(tx: DbExecutor, conversationId: string, messageId: string): Promise<GeneralAnswerRelease> {
+  if (!CONVERSATION_ID.test(conversationId) || !/^msg_[0-9a-f]{32}$/.test(messageId)) return 'not_waiting';
+  const { reached } = await import('./support-inbox.js');
+  const { rows: [row] } = await tx.execute<{ signed: boolean; released: boolean; answered: boolean }>(sql`SELECT si.signed_in_at IS NOT NULL AS signed,
+      EXISTS (SELECT FROM support_email_signins r WHERE r.conversation_id = s.id AND r.general_answer_requested_at IS NOT NULL) AS released,
+      EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = s.id AND ${reached}
+        AND (o.seq > email.seq OR (email.seq IS NULL AND o.created_at >= si.created_at))) AS answered
+    FROM support_conversations s JOIN support_email_signins si ON si.conversation_id = s.id AND si.message_id = ${messageId}
+    -- The email as the inbox holds it (absent while its mirror is behind: then whatever came after it was registered).
+    LEFT JOIN LATERAL (SELECT max(m.seq) AS seq FROM support_messages m WHERE m.conversation_id = s.id AND m.author = 'customer' AND m.source_message_id = si.message_id) email ON true
+    WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND si.created_at > now() - make_interval(days => ${SIGNIN_DAYS}::int)
+    FOR UPDATE OF s, si`);
+  if (!row || row.signed) return 'not_waiting';
+  if (row.released) return 'already_released';
+  if (row.answered) return 'already_answered';
+  await tx.execute(sql`UPDATE support_email_signins SET general_answer_requested_at = clock_timestamp() WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+  return 'released';
 }
 
 export function registerSupportConversations(app: App) {
@@ -322,8 +362,8 @@ export function registerSupportConversations(app: App) {
         if (first?.message_id !== messageId) found = replayed(found);
       }
       // A message that binds nobody is answered only once its sender confirms it signed in: recorded here, for the claim.
-      const challenge = (tx: DbExecutor) => found.signIn ? tx.execute(sql`INSERT INTO support_email_signins(conversation_id, message_id, address)
-        VALUES (${conversationId}, ${messageId}, ${found.from}) ON CONFLICT DO NOTHING`) : null;
+      const challenge = (tx: DbExecutor) => found.signIn ? tx.execute(sql`INSERT INTO support_email_signins(conversation_id, message_id, address, general_answer)
+        VALUES (${conversationId}, ${messageId}, ${found.from}, ${found.generalAnswer}) ON CONFLICT DO NOTHING`) : null;
       const { rows: [existing] } = await tx.execute<Row>(sql`SELECT ${columns} FROM support_conversations WHERE id = ${conversationId} FOR UPDATE`);
       if (!existing) {
         if (found.userId && await full(tx, found.userId)) throw limitReached('email');
@@ -332,7 +372,7 @@ export function registerSupportConversations(app: App) {
             VALUES (${conversationId}, 'email', ${found.threadId}, ${found.userId}, ${found.from}, ${found.verification}, ${JSON.stringify(found.evidence)}::jsonb, ${found.mode}) RETURNING ${columns}
           ), logged AS (${audit(sql`c`, details)}) SELECT * FROM c`);
         await challenge(tx);
-        return { row: row!, created: true };
+        return { row: row!, created: true, generalAnswer: found.generalAnswer };
       }
       if (existing.channel !== 'email') throw new ApiError(409, 'SUPPORT_CONVERSATION_EXISTS', 'That conversation is a chat, not an email conversation.');
       if (existing.status === 'closed') throw new ApiError(409, 'SUPPORT_CONVERSATION_CLOSED', 'That conversation is closed. Give the message a conversation of its own.');
@@ -342,7 +382,7 @@ export function registerSupportConversations(app: App) {
       if (existing.pending_address !== found.from) throw new ApiError(409, 'SUPPORT_CONVERSATION_SENDER', 'This message is from another sender. Give it a conversation of its own.');
       if (existing.user_id) {
         if (found.userId !== existing.user_id) throw new ApiError(409, 'SUPPORT_CONVERSATION_MISMATCH', 'This message does not bind the conversation’s account. Give it a conversation of its own.');
-        return { row: existing, created: false };
+        return { row: existing, created: false, generalAnswer: found.generalAnswer };
       }
       // Unbound so far: each message is judged on its own, and one that binds its sender's account binds the conversation.
       if (found.userId && await full(tx, found.userId)) throw limitReached('email');
@@ -351,10 +391,10 @@ export function registerSupportConversations(app: App) {
           WHERE id = ${conversationId} RETURNING ${columns}
         ), logged AS (${audit(sql`c`, details)}) SELECT * FROM c`);
       await challenge(tx);
-      return { row: row!, created: false };
+      return { row: row!, created: false, generalAnswer: found.generalAnswer };
     });
     log('info', { code: 'SUPPORT_CONVERSATION_REGISTERED', conversationId, channel: 'email', mode: outcome.row.mode, details });
-    return c.json(view(outcome.row, outcome.created), outcome.created ? 201 : 200);
+    return c.json(view(outcome.row, outcome.created, outcome.generalAnswer), outcome.created ? 201 : 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/conversations/{id}/close', operationId: 'operatorCloseSupportConversation',
@@ -365,6 +405,21 @@ export function registerSupportConversations(app: App) {
       WHERE id = ${c.req.valid('param').id} RETURNING id, closed_at::text`);
     if (!row) notFound('Support conversation');
     return c.json({ id: row!.id, status: 'closed' as const, closedAt: new Date(row!.closed_at).toISOString() }, 200);
+  });
+
+  const Released = z.object({ conversationId: z.string(), messageId: z.string(), requestedAt: z.string() }).openapi('SupportGeneralAnswerDue');
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'get', path: '/v1/operator/support/general-answers', operationId: 'operatorSupportGeneralAnswersDue',
+    description: 'The support platform\u2019s due list (the binding only): conversations whose sender asked, from the sign-in link, to be answered by email instead (releaseGeneralAnswer), still open and with nothing reaching them since, oldest first. Answer each in general, once, with no account access.',
+    request: { query: z.object({ conversationId: z.string().regex(CONVERSATION_ID).optional().describe('Only this conversation\u2019s (after its wake).') }) },
+    responses: { 200: response(z.object({ data: z.array(Released) })), ...errors } }), async c => {
+    await supportPlatformOnly(c);
+    const only = c.req.valid('query').conversationId ?? null, { reached } = await import('./support-inbox.js');
+    const { rows } = await c.env.db.execute<{ conversation_id: string; message_id: string; requested_at: string }>(sql`SELECT si.conversation_id, si.message_id, si.general_answer_requested_at::text AS requested_at
+      FROM support_email_signins si JOIN support_conversations s ON s.id = si.conversation_id
+      WHERE si.general_answer_requested_at > now() - ${RELEASE_DUE} AND s.status <> 'closed' AND (${only}::text IS NULL OR si.conversation_id = ${only})
+        AND NOT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = s.id AND o.created_at > si.general_answer_requested_at AND ${reached})
+      ORDER BY si.general_answer_requested_at, si.conversation_id LIMIT 50`);
+    return c.json({ data: rows.map(r => ({ conversationId: r.conversation_id, messageId: r.message_id, requestedAt: new Date(r.requested_at).toISOString() })) }, 200);
   });
 
   // ---------- the customer's own session ----------
@@ -409,7 +464,7 @@ export function registerSupportConversations(app: App) {
     return c.json({ id: conversationId, messageId, subject: target.subject?.slice(0, 200) ?? null, preview, receivedAt: target.received_at ? new Date(target.received_at).toISOString() : null }, 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/claim', operationId: 'claimSupportConversation',
-    description: `Confirm, signed in, that you wrote one email ${productName} support couldn’t verify: when your verified email is the address it came from, support answers that email, once, and the conversation is yours. Anyone else gets 404.`,
+    description: `Confirm, signed in, that you wrote one email ${productName} support couldn’t verify: when your verified email is the address it came from, support answers that email from your account, once (when it already sent a general answer, only what needed your account), and the conversation is yours. Anyone else gets 404.`,
     request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the sign-in link was for.') }).strict()) },
     responses: { 200: response(Claimed), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
