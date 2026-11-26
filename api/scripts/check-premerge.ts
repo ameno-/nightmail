@@ -281,9 +281,13 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     // Each vendor's pricing page (docs/), drawn from its data as the build draws it.
     "const docs = (await import('./src/features/pricing/pages.ts')).PRICE_PAGES.filter(p => p.doc).map(p => ({ path: p.path, html: at(p.path, h(view.PricePageView, { doc: p.doc })) }))",
     'const { OFFERS, comparisons, resendOverage, resendReceived } = compare',
-    "process.stdout.write(JSON.stringify({ calculator, boards, reach, docs, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
+    // Every form the pages write the days their prices were read in (docs/alternatives.ts, checkedOn), so the day check
+    // below is tested against the function itself.
+    "const { checkedOn } = await import('./src/features/pricing/docs/alternatives.ts')",
+    "const days = [['2026-11-25'], ['2026-11-25', '2026-11-26'], ['2026-11-30', '2026-12-01'], ['2026-12-31', '2027-01-01']].map(span => checkedOn(span))",
+    "process.stdout.write(JSON.stringify({ days, calculator, boards, reach, docs, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
   ].join('\n')
-  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; boards: { id: string; html: string }[]; docs: { path: string; html: string }[]; reach: { id: string; sizes: { size: number; sent: number; received: number; theirs: number | null }[] }[]; data: unknown }
+  type Rendered = { days: string[]; calculator: { input: Record<string, string>; path: string; html: string }[]; boards: { id: string; html: string }[]; docs: { path: string; html: string }[]; reach: { id: string; sizes: { size: number; sent: number; received: number; theirs: number | null }[] }[]; data: unknown }
   let out: Rendered | null = null
   try {
     out = JSON.parse(execFileSync('node', ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', script], { cwd: new URL('app/', root), encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] })) as Rendered
@@ -363,14 +367,18 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     // is the comparison's, page/comparison.ts, priceTable: the same billAt figures, unmarked so only Nightmail's column is
     // in its colour), the price and the free allowance are the billing code's, and its figures carry the day they were read
     // and the vendor's page. (That Nightmail costs less at each size in its table, the build checks: docs/vendor-pricing.ts.)
+    // The day a page's prices were read, in every form docs/alternatives.ts's checkedOn writes: a day ("25 Nov 2026"), a span
+    // in one month ("25–26 Nov 2026"), across months ("30 Nov to 1 Dec 2026") or years ("31 Dec 2026 to 1 Jan 2027").
+    // Tested against the function's own outputs, so the two can't drift; a page with no day still fails.
+    const DAY = String.raw`\d{1,2} [A-Z][a-z]{2} \d{4}`, CHECKED_DAYS = new RegExp(String.raw`checked (?:\d{1,2}–|\d{1,2} [A-Z][a-z]{2} to |${DAY} to )?${DAY}`, 'i')
+    for (const form of out.days) if (!new RegExp(`^${CHECKED_DAYS.source.replace(/^checked /, '')}$`).test(form)) fail('Price pages', `The day check doesn't accept "${form}", a form docs/alternatives.ts's checkedOn writes: update CHECKED_DAYS in scripts/check-premerge.ts.`, file)
+    if (CHECKED_DAYS.test('checked recently')) fail('Price pages', 'The day check accepts a page with no day.', file)
     for (const { path, html } of out.docs) {
       const page = text(html)
       checkFigures(path, html, 1)
       for (const term of terms.slice(0, 2)) if (!page.includes(term)) fail('Price pages', `${path} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
       // (An alternatives page links each service to its comparison, which names the pages read: docs/alternatives.ts.)
-      // (A day, or the span a page of several services was read over: "25 Nov 2026", "25–26 Nov 2026", "30 Nov to 1 Dec
-      // 2026": docs/alternatives.ts, checkedOn.)
-      if (!/checked \d{1,2}(?:–\d{1,2})?(?: \w{3} to \d{1,2})? \w{3} \d{4}/i.test(page) || !(path.startsWith('/alternatives/') ? /<a href="\/compare\/[a-z0-9-]+"/ : /<a href="https:\/\//).test(html)) fail('Price pages', `${path} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
+      if (!CHECKED_DAYS.test(page) || !(path.startsWith('/alternatives/') ? /<a href="\/compare\/[a-z0-9-]+"/ : /<a href="https:\/\//).test(html)) fail('Price pages', `${path} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${path} shows NaN, undefined or Infinity.`, file)
     }
     if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs, ${out.boards.length} comparison pages (each as a board and from its data) and ${out.docs.length} vendor pages (pricing and alternatives) match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
