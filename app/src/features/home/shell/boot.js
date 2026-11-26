@@ -23,13 +23,14 @@
     const entry = () => add('script', { type: 'module', src: set.entry, crossOrigin: '' })
     css.addEventListener('load', entry, { once: true }); css.addEventListener('error', entry, { once: true })
   }
-  // With the first screen off, its inlined CSS (a cut-down copy of the app's) and its first fonts' faces go once the app's
-  // stylesheet is in, before the app draws anything, so the app runs on its own stylesheet alone, as on a page with no
-  // first screen. (Where the first screen shows, the app's page takes over from it and keeps the faces it was drawn in.)
+  // With the first screen off, its inlined CSS (a cut-down copy of the app's) goes once the app's stylesheet is in, before
+  // the app draws anything, so the app runs on its own stylesheet. The first fonts' faces stay, as where the app takes over
+  // from the first screen: this page preloads those fonts and not the app's whole ones, which text drawn before they
+  // arrive would move for. They are the same fonts cut down, so a glyph is the same either way.
   if (!shell || !root || document.documentElement.dataset.shell === 'off') {
     if (shell) shell.remove()
     start()
-    const drop = () => document.querySelectorAll('style[data-shell-css], style[data-shell-fonts]').forEach(style => style.remove())
+    const drop = () => document.querySelectorAll('style[data-shell-css]').forEach(style => style.remove())
     sheet.addEventListener('load', drop, { once: true }); sheet.addEventListener('error', drop, { once: true })
     return
   }
