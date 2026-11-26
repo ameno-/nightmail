@@ -382,7 +382,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
       if (!CHECKED_DAYS.test(page) || !(!path.startsWith('/pricing/') ? /<a href="\/compare\/[a-z0-9-]+"/ : /<a href="https:\/\//).test(html)) fail('Price pages', `${path} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${path} shows NaN, undefined or Infinity.`, file)
     }
-    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs, ${out.boards.length} comparison pages (each as a board and from its data) and ${out.docs.length} pages of vendors and uses (pricing, alternatives, email for AI agents, email API prices) match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs, ${out.boards.length} comparison pages (each as a board and from its data) and ${out.docs.length} pages of vendors and uses (pricing, alternatives, email for AI agents, email API prices, free plans) match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
   }
 }
 

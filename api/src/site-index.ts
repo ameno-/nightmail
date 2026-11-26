@@ -19,7 +19,7 @@ export const isPublicPage = (pathname: string) => pathname === '/' || /^\/(?:pri
 
 /** The site's own pages at the top level that the build writes (app/price-pages.ts: the use-case pages, docs/agents.ts).
  *  The Worker serves them from the build's files, as it does the pages under isSitePage's directories. */
-export const SITE_ROOT_PAGES = ['/email-for-ai-agents', '/cheapest-email-api'];
+export const SITE_ROOT_PAGES = ['/email-for-ai-agents', '/cheapest-email-api', '/free-email-api'];
 /** One of those, or its address with a trailing slash (which the build's files answer with a redirect). */
 export const isSiteRootPage = (pathname: string) => SITE_ROOT_PAGES.some(page => pathname === page || pathname === `${page}/`);
 /** An address under the directories the build writes the site's own pages into (app/price-pages.ts): a comparison

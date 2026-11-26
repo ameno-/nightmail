@@ -14,6 +14,8 @@ const offer: Offer = {
   id: 'robotomail', vendor: 'Robotomail', name: 'Robotomail', pricing: ROBOTOMAIL, checked: CHECKED, unit: 'inboxes', ladder: 'complete',
   counts: 'mailboxes and received emails',
   plans: [
+    // Its Free plan (read on 26 Nov 2026), one mailbox with 10 sends and 10 receives a month: /free-email-api lists it.
+    { name: 'Free', tiers: [{ size: 1, cents: 0, sends: 10, receives: 10, source: readOn('2026-11-26')(LIMITS, '**Free:** $0 — 1 mailbox, 10 sends and 10 receives per month. Exchange mail only between your agent and your verified email address.') }] },
     { name: 'Starter', tiers: [{ size: 10, cents: 1_900, receives: 2_000, source: read(LIMITS, 'Starter: $19/month or $168/year — 10 mailboxes, 500 sends/day and 15,000 sends/month per mailbox, 2,000 receives/month per account, 1 custom domain, 10 GB storage.') }] },
     { name: 'Growth', tiers: [{ size: 50, cents: 7_900, receives: 20_000, source: read(LIMITS, 'Growth: $79/month or $708/year — 50 mailboxes, 1,000 sends/day and unlimited sends/month per mailbox, 20,000 receives/month per account, 5 custom domains, 25 GB storage.') }] },
     { name: 'Scale', tiers: [{ size: 200, cents: 19_900, source: read(LIMITS, 'Scale: $199/month or $1788/year — 200 mailboxes, 2,000 sends/day and unlimited sends/month per mailbox, unlimited receives/month per account, unlimited custom domains, 100 GB storage.') }] },

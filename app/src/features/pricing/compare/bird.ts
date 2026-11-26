@@ -38,7 +38,7 @@ export const bird: Entry = {
   lead: 'Bird charges every email from a monthly deposit, with no free sends on paid plans. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, Bird’s cheapest plan for the size: its monthly deposit or its emails at the plan’s rate, whichever is more (Email Startup, $15 and $0.40 per 1,000; Email Growth 100, $100 and $0.39). List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'Bird charges its paid plans from the first email.', read(PRICES, 'Paid plans include no free sends. Email is charged from the first send'), { shared: 'free' }),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'Bird’s Free plan includes 1,000 emails a month; its paid plans charge from the first email.', readOn('2026-11-26')(PRICES, 'Free: 1,000 emails / month included, subject to the published Free limit.'), { shared: 'free' }),
     fact('Inboxes at no charge', 'No charge per inbox.', 'Bird’s Email Startup includes 10 mailboxes and Growth 25.', read(PRICES, '| Mailboxes | 5 | 10 | 25 | 100 |')),
   ],
   // Bird's readers first see the API, the allowances and the inboxes.

@@ -1,4 +1,4 @@
-import { fact, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs UniOne (/compare/unione): a comparison's whole entry (prices.ts, Entry). Every figure was read on UniOne's
 // own pricing page on CHECKED: the Standard plan's sizes, and the rate for each 1,000 past each one.
@@ -45,6 +45,8 @@ export const uniOne: Entry = {
   lead: 'UniOne sells a monthly allowance of email and charges for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, UniOne’s cheapest Standard plan, or a smaller one plus its overage where that costs less. List prices before tax.',
   rows: [
+    // Its free trial, read on 26 Nov 2026: /free-email-api lists it (docs/free.ts).
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'UniOne’s free trial is four months of 6,000 emails a month, and needs a card.', readOn('2026-11-26')(UNIONE, 'Check out all our email delivery features with a four-month free trial. You\'ll get access to 6,000 monthly emails … A credit or debit card is required to activate the trial'), { shared: 'free' }),
     fact('Charged per email', 'Each email is charged as it’s sent, with no plan size to pick.', 'UniOne’s Standard plan starts at $6 a month for 10,000 emails.', read(UNIONE, 'Standard For 10,000 emails/month $6 / month 10 000 emails/month'), 'Pay for the emails you send, with no plan size to pick'),
   ],
   // UniOne's readers first see the API, the allowances and receiving.
