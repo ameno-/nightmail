@@ -1,5 +1,5 @@
 import type { Env } from './env.js';
-import { nightmailApi, platformBody, type OutboxReply } from './nightmail.js';
+import { nightmailApi, NightmailError, platformBody, type OutboxReply } from './nightmail.js';
 import { INTAKE, type Mailbox } from './intake.js';
 import { countToday, limits, overflowRow, resendNotices, today } from './limits.js';
 import { replay } from './replay.js';
@@ -12,7 +12,8 @@ import { log, logError } from './log.js';
 // answers, mail refused at the edge is kept as a row instead of vanishing, and each object mirrors its work items here
 // (work.ts). The cron sweep (every five minutes) reads it, never each object, to finish what an earlier step left:
 // unsent team notices, intake mail for an address configured since, tickets no team email or follow-up covers, answers
-// parked for their sender's sign-in (a claim's own wake can be lost), and the replay poller (replay.ts), which accepts
+// parked for their sender's sign-in (a claim's own wake can be lost), conversations whose sender asked to be answered by
+// email instead (the claim page's), and the replay poller (replay.ts), which accepts
 // mail no webhook delivered. It also pulls the staff inbox's replies (api/src/support-inbox.ts) and hands each to its
 // conversation: a wake does the same for one conversation at once, and pulling is what lets staff reply at all (they can
 // only while it happens). And it hands new agent feedback reports to the triage agent (triage.ts), before the staff
@@ -38,7 +39,7 @@ function accepted(env: Env, flow: Flow, object: string, messageId: string, threa
 }
 
 /** A message kept before any object: held for the digest, or blocked until its address is configured. */
-function edge(env: Env, flow: Flow, input: { messageId: string; threadId: string; state: 'held' | 'blocked'; reason: 'rate' | 'unconfigured' | 'replay_closed'; source: Source; detail?: object }) {
+function edge(env: Env, flow: Flow, input: { messageId: string; threadId: string; state: 'held' | 'blocked' | 'done'; reason: 'rate' | 'unconfigured' | 'replay_closed' | 'staff_reply'; source: Source; detail?: object }) {
   const now = Date.now();
   return env.DB.prepare(`INSERT INTO support_work (flow, object, id, kind, state, reason, source, message_id, thread_id, detail, created_at, updated_at)
     VALUES (?, '', ?, 'message', ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (flow, object, id) DO NOTHING`)
@@ -48,9 +49,19 @@ function edge(env: Env, flow: Flow, input: { messageId: string; threadId: string
 /**
  * Support mail into its thread's conversation (created on first use). The object stores the message and arms its alarm
  * before this returns, so once the ledger row is written the message can't be lost. False: D1 lost the thread's row.
+ *
+ * A reply to one of the staff emails (api/src/support-staff-mail.ts) is never a customer's email: Nightmail, which alone
+ * knows the staff threads and the sender's proof, makes a verified staff member's reply an internal note on its
+ * conversation and ignores any other. Either way it ends here, as a ledger row: no conversation, no answer, no model.
  */
 export async function acceptSupport(env: Env, input: { messageId: string; threadId: string; deliveryId: string; source: Source }) {
   const { messageId, threadId } = input, now = Date.now();
+  const staff = platformBody(await env.BANE.staffMailReply(messageId, env.TICKET_TO || null));
+  if (staff.reply) {
+    log(staff.notes ? 'info' : 'warn', { event: 'email', code: staff.notes ? 'STAFF_REPLY_NOTED' : 'STAFF_REPLY_IGNORED', notes: staff.notes, reason: staff.ignored ?? undefined });
+    await edge(env, 'support', { messageId, threadId, state: 'done', reason: 'staff_reply', source: input.source, detail: { notes: staff.notes, ignored: staff.ignored } }).run();
+    return true;
+  }
   let row = await env.DB.prepare('SELECT id FROM conversations WHERE thread_id = ?').bind(threadId).first<{ id: string }>();
   if (!row) {
     await env.DB.prepare("INSERT INTO conversations (id, channel, thread_id, created_at, updated_at) VALUES (?, 'email', ?, ?, ?) ON CONFLICT (thread_id) DO NOTHING").bind(newId('conv'), threadId, now, now).run();
@@ -98,7 +109,7 @@ export async function blockUnconfigured(env: Env, input: { messageId: string; th
 /** Every five minutes: each step on its own, so one failing never stops the others. */
 export async function sweep(env: Env, now = Date.now()) {
   const result: Record<string, number> = {};
-  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['triage', () => triageFeedback(env, now)], ['staffMail', () => staffMail(env)], ['staff', () => staffReplies(env)], ['signins', () => signinWakes(env, now)],
+  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['triage', () => triageFeedback(env, now)], ['staffMail', () => staffMail(env)], ['staff', () => staffReplies(env)], ['signins', () => signinWakes(env, now)], ['releases', () => releaseWakes(env)],
     ['replaySupport', () => replay(env, 'support', now)], ['replayIntake', () => replay(env, 'intake', now)]];
   for (const [name, step] of steps) {
     try { result[name] = await step(); }
@@ -126,6 +137,21 @@ async function signinWakes(env: Env, now: number) {
 }
 
 /**
+ * Conversations whose sender asked, from the sign-in link, to be answered by email instead (Nightmail's due list, the
+ * claim page's button): each woken, so it answers in general even when the page's own wake was lost. A conversation drops
+ * off the list once something reaches its sender.
+ */
+async function releaseWakes(env: Env) {
+  const due = platformBody(await env.BANE.generalAnswers()).data;
+  let n = 0;
+  for (const id of new Set(due.map(d => d.conversationId))) {
+    try { await env.CONVERSATION.get(env.CONVERSATION.idFromName(id)).wake(); n++; }
+    catch (error) { logError(error, { event: 'email', code: 'RELEASE_WAKE_FAILED' }, 'warn'); }
+  }
+  return n;
+}
+
+/**
  * One path to a human (api/src/support-staff-mail.ts): the staff emails Nightmail wrote, each sent from the support
  * address to the team (TICKET_TO, the one place it is kept) under its own key, then reported sent. A thread's first
  * email starts it; later ones reply in it under the same subject. A failed send is tried again on the next sweep, as
@@ -136,13 +162,20 @@ async function staffMail(env: Env) {
   const due = platformBody(await env.BANE.staffMail()).data, api = nightmailApi(env);
   let n = 0;
   for (const mail of due) {
+    let sent: { id: string; threadId: string };
     try {
-      const sent = mail.threadId && mail.replyToMessageId
+      sent = mail.threadId && mail.replyToMessageId
         ? await api.reply(mail.threadId, { replyToMessageId: mail.replyToMessageId, to: env.TICKET_TO, subject: mail.subject, text: mail.text, html: mail.html, addressId: env.SUPPORT_ADDRESS_ID }, mail.key)
         : await api.startThread({ to: [env.TICKET_TO], subject: mail.subject, text: mail.text, html: mail.html }, mail.key);
-      platformBody(await env.BANE.staffMailSent(mail.key, { threadId: sent.threadId, messageId: sent.id }));
-      n++;
-    } catch (error) { logError(error, { event: 'ticket', code: 'STAFF_MAIL_FAILED', key: mail.key }, 'warn'); }
+    } catch (error) {
+      // Each failed send is reported, with its error's code: after three, Glass shows the email as not sent until it goes.
+      logError(error, { event: 'ticket', code: 'STAFF_MAIL_FAILED', key: mail.key }, 'warn');
+      const code = error instanceof NightmailError && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'SEND_FAILED';
+      await env.BANE.staffMailFailed(mail.key, { code }).then(reply => platformBody(reply)).catch(failure => logError(failure, { event: 'ticket', code: 'STAFF_MAIL_FAILURE_UNREPORTED', key: mail.key }, 'warn'));
+      continue;
+    }
+    try { platformBody(await env.BANE.staffMailSent(mail.key, { threadId: sent.threadId, messageId: sent.id })); n++; }
+    catch (error) { logError(error, { event: 'ticket', code: 'STAFF_MAIL_SENT_UNREPORTED', key: mail.key }, 'warn'); }
   }
   return n;
 }

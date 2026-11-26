@@ -4627,7 +4627,7 @@ export const updateInboundDomain = <ThrowOnError extends boolean = false>(option
 /**
  * Check MX records now
  *
- * Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Never changes DNS or AWS.
+ * Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Hosted: also checks every receiving host of the domain again in the background within seconds, and keeps checking a host that waits for its MX for a while; read listReceivingHosts for each host’s status. Never changes DNS or AWS.
  */
 export const checkInboundDomain = <ThrowOnError extends boolean = false>(options: Options<CheckInboundDomainData, ThrowOnError>): RequestResult<CheckInboundDomainResponses, CheckInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<CheckInboundDomainResponses, CheckInboundDomainErrors, ThrowOnError>({
     security: [
