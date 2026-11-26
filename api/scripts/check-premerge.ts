@@ -359,12 +359,13 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
       if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${where} shows NaN, undefined or Infinity.`, file)
     }
-    // A vendor's pricing page: every Nightmail figure (the verdict's and each size's) is the billed price for the usage it
-    // is marked with, the price and the free allowance are the billing code's, and its figures carry the day they were read
+    // A vendor's pricing page: its verdict's Nightmail figure is the billed price for the usage it is marked with (its table
+    // is the comparison's, page/comparison.ts, priceTable: the same billAt figures, unmarked so only Nightmail's column is
+    // in its colour), the price and the free allowance are the billing code's, and its figures carry the day they were read
     // and the vendor's page. (That Nightmail costs less at each size in its table, the build checks: docs/vendor-pricing.ts.)
     for (const { path, html } of out.docs) {
       const page = text(html)
-      checkFigures(path, html, 3)
+      checkFigures(path, html, 1)
       for (const term of terms.slice(0, 2)) if (!page.includes(term)) fail('Price pages', `${path} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
       if (!/checked \d{1,2} \w{3} \d{4}/i.test(page) || !/<a href="https:\/\//.test(html)) fail('Price pages', `${path} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${path} shows NaN, undefined or Infinity.`, file)

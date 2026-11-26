@@ -1,6 +1,7 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { productName } from '../../../../../api/src/brand.ts'
-import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, nightmailBill, quote, sourcesOf, ucOf, type Comparison, type Plan, type Source, type Tier, type Usage } from '../prices.ts'
+import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, quote, sourcesOf, ucOf, type Comparison, type Plan, type Source, type Tier } from '../prices.ts'
+import { billAt, middle, perSize, priceTable, verdictHeading, verdictOf } from '../page/comparison.ts'
 import { comparisonQuestions } from '../questions.ts'
 import { plain, type Doc, type Question, type Section, type Text } from './doc.ts'
 
@@ -52,9 +53,6 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
   const paid = all.filter(p => p.tier.cents > 0), free = all.filter(p => p.tier.cents === 0)
   // A size in the vendor's own unit, and a usage as the page prices it: the assumption first, so no figure needs working out.
   const count = (n: number) => `${formatCount(n)} ${offer.unit}`, size = (n: number) => offer.unit === 'emails' ? `${count(n)} a month` : count(n)
-  const usage = (u: Usage) => m.per === 'contact' ? `${formatCount(u.contacts)} contacts sent ${m.sendsPerContact} emails each (${formatCount(u.sent)} emails a month)${m.seats > 1 ? `, with ${m.seats} teammates` : ''}`
-    : m.per === 'inbox' ? `${formatCount(u.inboxes ?? 0)} inboxes, each receiving ${m.receivedPerInbox} and sending ${m.sentPerInbox} emails a month`
-      : m.per === 'received' ? `${formatCount(u.received)} emails received a month` : `${formatCount(u.sent)} emails a month`
 
   // ---------------------------------------------------------------- the facts the page is made of
 
@@ -71,33 +69,27 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
   const freeSaid = c.rows.flatMap(row => row.source && row.short === 'Free every month' ? [{ text: row.note ?? row.text, source: row.source }] : [])
   const freeFacts = [...freePlans, ...freeSaid]
 
-  // Each size the vendor prices (the comparison's steps: the pre-merge check proves the vendor prices each one), as a buyer
-  // would pay it, with how: a plan, or a smaller plan plus its overage where that costs less.
+  // Each size the vendor prices (the comparison's steps: the pre-merge check proves the vendor prices each one), with both
+  // bills as the comparison's table shows them (page/comparison.ts, billAt) and how the vendor's is bought.
   const rows = c.steps.map(n => {
-    const u = c.use(n), q = quote(offer, u), ours = nightmailBill(u.sent, u.received)
-    if (q.kind !== 'price') throw new Error(`${c.slug}: ${vendor}’s page prices no plan at ${size(n)}, a step of its comparison (compare/${c.slug}.ts).`)
-    const cents = q.payg?.cents ?? q.cents
+    const b = billAt(c, n), q = quote(offer, b.u)
+    if (q.kind !== 'price' || b.theirsCents === null) throw new Error(`${c.slug}: ${vendor}’s page prices no plan at ${size(n)}, a step of its comparison (compare/${c.slug}.ts).`)
     // Ryan's rule (A294): the page says Nightmail costs less at every size in this table, so it must, at each one.
-    if (!(ours.uc < ucOf(cents))) throw new Error(`/pricing/${c.slug} would say Nightmail costs less than ${vendor} at ${size(n)}, and it doesn't (${ours.text} against ${money(cents)}): take the size out of the comparison's steps (compare/${c.slug}.ts).`)
-    const how = q.payg ? `${q.payg.plan.name} (${formatCount(q.payg.tier.size)} included) + ${formatCount(n - q.payg.tier.size)} more at ${money(q.payg.tier.overage!)} per 1,000`
-      : q.extra ? `${q.plan.name} + ${formatCount(q.extra)} ${q.tier.extra!.name}`
-        : q.tier.size !== (contacts ? u.contacts : n) ? `${q.plan.name} (${formatCount(q.tier.size)} included)` : q.plan.name
-    return { n, u, q, cents, ours, how }
+    if (!(b.oursUc < ucOf(b.theirsCents))) throw new Error(`/pricing/${c.slug} would say Nightmail costs less than ${vendor} at ${size(n)}, and it doesn't (${b.ours} against ${b.theirs}): take the size out of the comparison's steps (compare/${c.slug}.ts).`)
+    return { n, b, q }
   })
-  const open = rows.find(row => row.n === (contacts ? c.sizes[1]!.contacts : offer.unit === 'inboxes' ? c.sizes[1]!.inboxes : c.sizes[1]!.sent)) ?? rows[Math.floor(rows.length / 2)]!
-  // The verdict's size: the vendor's smallest paid plan, where Nightmail's bill isn't $0 (a $0 would need its reason
-  // beside it); else the size the comparison opens at.
-  const verdictAt = rows.find(row => row.n === start.tier.size && row.ours.uc > 0n && !(row.q.kind === 'price' && (row.q.payg || row.q.extra))) ?? open
+  const open = rows.find(row => row.n === middle(c)) ?? rows[Math.floor(rows.length / 2)]!
+  // The verdict's size: the vendor's smallest paid plan, bought without overage or extras, where Nightmail's bill isn't $0
+  // (a $0 would need its reason beside it); else the size the comparison opens at.
+  const verdictAt = rows.find(row => row.n === start.tier.size && row.b.oursUc > 0n && !(row.q.kind === 'price' && (row.q.payg || row.q.extra))) ?? open
 
   // ---------------------------------------------------------------- the answer, first
 
   const freeLine = freeFacts.map(fact => fact.text).join(' ')
-  // The verdict, Nightmail's line first as the comparisons' (page/comparison.ts): both bills for the same mail, the vendor's
-  // plan named; its caption, what they assume and the day read; and the same in a card's few words.
-  const at = `${m.per === 'contact' ? `Per ${count(verdictAt.n)} sent ${m.sendsPerContact} emails each${m.seats > 1 ? `, ${m.seats} teammates` : ''}` : m.per === 'email' ? `Per ${size(verdictAt.n)}, one recipient each` : `Per ${usage(verdictAt.u)}`}, list prices`
-  const h1: Doc['h1'] = [[`${productName} `, { ours: verdictAt.ours.text, sent: verdictAt.u.sent, received: verdictAt.u.received }, '.'], [`${vendor} ${verdictAt.how} ${money(verdictAt.cents)}.`]]
-  const caption = `${at} · checked ${day.replaceAll(' ', '\u00a0')}`
-  const cardWords: Doc['cardWords'] = { lines: [`${productName} ${verdictAt.ours.text}.`, `${vendor} ${money(verdictAt.cents)}.`], caption: `Per ${contacts ? `${count(verdictAt.n)}, ${formatCount(verdictAt.u.sent)} emails a month` : size(verdictAt.n)}, checked ${day}.` }
+  // The verdict as a comparison's (page/comparison.ts): both bills, the vendor's without its plan (the table's marked row
+  // names it), and the size with the day read; the same in a card's few words.
+  const v = verdictOf(c, verdictAt.n), h1 = verdictHeading(c, v) as Doc['h1'], caption = v.at
+  const cardWords: Doc['cardWords'] = { lines: [`${productName} ${v.ours}.`, `${vendor} ${v.theirs}.`], caption: `${perSize(c, verdictAt.n)}, checked ${day}.` }
 
   // ---------------------------------------------------------------- the sections
 
@@ -129,14 +121,7 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
   const sizesTable: Section = {
     id: 'sizes', title: `What ${vendor} costs at each size`,
     blocks: [
-      { kind: 'table',
-        caption: [`${c.assume} Monthly billing, no promotions. ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${productName} costs less than ${vendor} at every size in this table. `, ...readAt(tableRead)],
-        // The comparisons' four columns (page/comparison.ts), which the renderer folds on a phone: the size, both bills, the plan.
-        head: [contacts ? 'Contacts' : 'Emails a month', productName, vendor, `${vendor} plan`],
-        numeric: [1, 2],
-        rows: rows.map(row => ({ mark: row === verdictAt, cells: [
-          [formatCount(row.n)], [{ ours: row.ours.text, sent: row.u.sent, received: row.u.received }], [money(row.cents)], [row.how],
-        ] })) },
+      priceTable(c, [`${c.assume} Monthly billing, no promotions. ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${productName} costs less than ${vendor} at every size in this table. `, ...readAt(tableRead)], verdictAt.n),
     ],
   }
   const sections: Section[] = [sizesTable]
@@ -162,7 +147,7 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
   ], 60)
   const from = `from ${money(start.tier.cents)} a month for ${count(start.tier.size)}`
   const freeShort = free.length ? `${free[0]!.plan.name} plan: $0 for ${count(free[0]!.tier.size)}` : freeSaid.length ? freeSaid[0]!.text.replace(/\.$/, '') : null
-  const oursShort = verdictAt === open ? `${productName} ${open.ours.text} at ${count(open.n)}, ${vendor} ${money(open.cents)}` : `${productName}: ${verdictAt.ours.text} for the same ${count(verdictAt.n)}`
+  const oursShort = verdictAt === open ? `${productName} ${open.b.ours} at ${count(open.n)}, ${vendor} ${open.b.theirs}` : `${productName}: ${verdictAt.b.ours} for the same ${count(verdictAt.n)}`
   const description = fitWords([
     ...freeShort ? [`${vendor} pricing, read ${day}: ${from}. ${freeShort}. ${oursShort}.`] : [],
     ...rateRange ? [`${vendor} pricing, read ${day}: ${from}, ${rateRange} per 1,000 past it. ${oursShort}.`] : [],
