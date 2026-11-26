@@ -119,7 +119,7 @@ function board(g: Glass): GlassBoardFill {
   const rows: Record<string, Record<string, GlassFill>> = {
     // The support AI's spend (api/src/support-ai-cost.ts): past the daily line, Health warns and Slack gets one card that day.
     ai: {
-      today: { hint: `${counts(ai.today)} · line at ${dollars(ai.line)}`, value: dollars(ai.today.costUsd), tone: ai.today.costUsd >= ai.line ? 'danger' : ai.today.costUsd >= ai.line / 2 ? 'warning' : undefined },
+      today: { hint: counts(ai.today), value: dollars(ai.today.costUsd), tone: ai.today.costUsd >= ai.line ? 'danger' : ai.today.costUsd >= ai.line / 2 ? 'warning' : undefined },
       week: { hint: counts(ai.week), value: dollars(ai.week.costUsd) },
       month: { hint: counts(ai.month), spark: ai.daily, value: dollars(ai.month.costUsd) },
       answered: { hint: `30 days · ${number(ai.answered)} answered`, value: ai.answered ? dollars(ai.month.costUsd / ai.answered) : '—' },
