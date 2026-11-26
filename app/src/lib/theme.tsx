@@ -50,6 +50,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
 }
 
+/** A fixed theme, for a page drawn at build time (features/legal/prerender.tsx): it reads no storage and switches nothing. */
+export function StaticTheme({ theme, children }: { theme: Theme; children: ReactNode }) {
+  return <ThemeContext.Provider value={{ theme, toggleTheme: () => {} }}>{children}</ThemeContext.Provider>
+}
+
 export function useTheme() {
   const context = useContext(ThemeContext)
   if (!context) throw new Error('ThemeProvider is required')

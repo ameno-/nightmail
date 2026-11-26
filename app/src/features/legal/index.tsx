@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, type MouseEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { EmptyState } from '../../components/ui'
@@ -10,9 +10,11 @@ import subprocessors from './content/subprocessors.md'
 import './legal.css'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { addresses, productName } from '../../../../api/src/brand'
+import { useShellTakeover } from '../../lib/shell-takeover'
 
 // Public pages, no sign-in: /legal and one page per document. The documents are Markdown in ./content, rendered to HTML
-// when the dashboard builds (app/legal-markdown.ts).
+// when the dashboard builds (app/legal-markdown.ts). Each page's own file paints it before this code (app/site-pages.ts,
+// prerender.tsx), for a visitor; this page takes the painted one's place (useShellTakeover).
 const documents = { terms, 'acceptable-use': acceptableUse, privacy, subprocessors } as const
 type Slug = keyof typeof documents
 const isSlug = (value: string | undefined): value is Slug => value !== undefined && Object.hasOwn(documents, value)
@@ -27,8 +29,12 @@ export function LegalPage() {
   const current = isSlug(doc) ? documents[doc] : null
   const title = doc === undefined ? 'Legal' : current?.title ?? 'Page not found'
   useEffect(() => { document.title = `${title} · ${productName.toLowerCase()}` }, [title])
-  // A new document opens at its top, or at the section its link names.
+  // A new document opens at its top, or at the section its link names; the page this one takes over from stays where the
+  // reader has scrolled it (it opened at that section itself).
+  const painted = useShellTakeover('page-shell', '#root .legal-page'), opened = useRef(false)
   useLayoutEffect(() => {
+    if (!opened.current && painted) { opened.current = true; return }
+    opened.current = true
     const target = location.hash ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null
     if (target) target.scrollIntoView({ block: 'start' })
     else window.scrollTo(0, 0)

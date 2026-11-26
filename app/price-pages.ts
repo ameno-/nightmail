@@ -1,11 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runnerImport, type Plugin, type Rollup } from 'vite'
+import { runnerImport, type Plugin } from 'vite'
 import { productName, publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
 import { CRAWL_DISALLOW } from '../api/src/site-index.ts'
-import { pruneCss, usedNames } from './critical-css.ts'
 import { linkCard, shareTitle, withCard } from './link-card.ts'
+import { appFiles, FIRST_FONTS, pageCss, paint } from './painted-page.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
 import { docProblems } from './src/features/pricing/docs/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
@@ -22,10 +22,8 @@ import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/read
 // - pricing.html and compare/<slug>.html, one for every comparison's entry (compare/index.ts): index.html with the
 //   page's own title, description, canonical address, link preview (its card, drawn here from its words: pages.ts,
 //   link-card.ts), Markdown twin and structured data, and the page itself painted from the HTML alone (prerender.tsx: the scene as the app first draws
-//   it, in #price-shell) with the CSS it needs inlined (critical-css.ts), so it shows before any of the app's code.
-//   The app's stylesheet and modules are out of the page: the homepage's boot script (home/shell/boot.js) starts them
-//   at the reader's first touch, key or scroll (a press held, and what they typed, carried over) or after 8 s, and the
-//   app's page then takes the painted one's place (index.tsx), with the inlined CSS. The Worker answers /pricing
+//   it, in #price-shell) with the CSS it needs inlined, so it shows before any of the app's code (painted-page.ts says
+//   how, and how the app's page takes the painted one's place, what the reader typed carried over). The Worker answers /pricing
 //   with pricing.html from the assets, compressed (api/src/worker.ts), and api/src/server.ts does the same on Node; an
 //   address under /compare/ with no page is not found.
 // - With the comparisons drawn from their data (verdict: every build but VITE_PRICE_PAGES=board, page/switch.ts), each
@@ -49,22 +47,6 @@ const prerenderModule = fileURLToPath(new URL('./src/features/pricing/prerender.
 const pagesModule = fileURLToPath(new URL('./src/features/pricing/page/prerender.tsx', import.meta.url))
 const pricingAt = fileURLToPath(new URL('./src/features/pricing/', import.meta.url))
 const bootScript = fileURLToPath(new URL('./src/features/home/shell/boot.js', import.meta.url))
-/** Over the app's own page until it takes over (index.tsx), and not at all at an address it doesn't show (theme.js,
- *  data-plain). Unseen until all of it has arrived (#root follows it): drawn while its HTML streams in, its rows grow as
- *  the rest of their tiles arrive. Chrome doesn't draw at all until then (<link rel="expect">, below); this keeps it
- *  still in browsers that ignore that. The rest is the app's stylesheet, cut down (it has no visibility:visible to show
- *  through). */
-const SHELL_CSS = '#price-shell{position:absolute;top:0;left:0;z-index:2147483000;width:100%}html[data-shell=off] #price-shell{display:none}body:not(:has(>#root)) #price-shell{visibility:hidden}'
-/** The first fonts (public/fonts/*-basic.woff2, features/pricing/fonts/README.md): the app's, cut down to these
- *  characters, and preloaded. The painted page knows only these (its CSS leaves out the app's own faces of those
- *  families: WHOLE_FACES), so it fetches nothing else; once the app's stylesheet is in, they still serve these
- *  characters (defined after its faces) and the whole fonts only the others. */
-const BASIC = 'U+0020-007E,U+00A0,U+00A9,U+00AB,U+00AE,U+00B7,U+00BB,U+00D7,U+2010-2027,U+2030,U+2039-203A,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+FEFF,U+FFFD'
-/** What public/theme.js may set on <html> before the first paint, which the page's CSS may select. */
-const THEME_ATTRIBUTES = ['data-theme', 'data-shell', 'data-member', 'data-overview-panel', 'style']
-const WHOLE_FACES = /@font-face\{font-family:(?:Inter|OpenTUI Mono|"Inter"|"OpenTUI Mono");[^}]*\}/g
-const FIRST_FONTS = [{ family: 'Inter', file: 'inter-basic.woff2', weight: '100 900' }, { family: 'OpenTUI Mono', file: 'opentui-regular-basic.woff2', weight: '400' }, { family: 'OpenTUI Mono', file: 'opentui-bold-basic.woff2', weight: '700' }]
-
 export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFiles' | 'structuredData'> = readable, verdict = false): Plugin {
   let publicDir = '', root = ''
   return {
@@ -88,11 +70,10 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       if (!origin) return this.error('The price pages need index.html\'s og:image, to name their own address beside it.')
 
       // The app's files, out of the page (the boot script starts them), and the CSS the price pages load.
-      let template = source
-      const take = (pattern: RegExp) => { const found = [...template.matchAll(pattern)].map(match => match[1]!); template = template.replace(pattern, ''); return found }
-      const entry = take(/\s*<script type="module" crossorigin src="([^"]+)"><\/script>/g), preload = take(/\s*<link rel="modulepreload" crossorigin href="([^"]+)">/g), styles = take(/\s*<link rel="stylesheet" crossorigin href="([^"]+)">/g)
-      if (entry.length !== 1 || styles.length !== 1 || !template.includes('<div id="root"></div>')) return this.error('index.html is not shaped as the price pages expect: one entry module and one stylesheet, and #root.')
-      const css = [...new Set([styles[0]!.slice(1), ...pageCss(bundle, ['/features/pricing/index.tsx', '/features/pricing/board-page.tsx'])])].map(file => {
+      const files = appFiles(source)
+      if (!files) return this.error('index.html is not shaped as the price pages expect: one entry module and one stylesheet, and #root.')
+      const { template } = files
+      const css = [...new Set([files.css.slice(1), ...pageCss(bundle, ['/features/pricing/index.tsx', '/features/pricing/board-page.tsx'])])].map(file => {
         const asset = bundle[file]
         if (asset?.type !== 'asset') this.error(`The price pages' stylesheet ${file} isn't in the bundle.`)
         return String((asset as { source: string | Uint8Array }).source)
@@ -106,9 +87,7 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       // wall behind it, the phone's or the wide window's (board.css).
       const wall = { phone: fileOf('pricing/board/wall-828.avif'), wide: fileOf('pricing/board/wall-1920.avif') }
       const boot = `/${this.getFileName(this.emitFile({ type: 'asset', name: 'home-boot.js', source: readFileSync(bootScript) }))}`
-      const fonts = FIRST_FONTS.map(font => ({ ...font, url: `/fonts/${font.file}` }))
-      for (const font of fonts) if (!existsSync(resolve(publicDir, font.url.slice(1)))) return this.error(`public${font.url} is missing (features/pricing/fonts/README.md makes it).`)
-      const faces = fonts.map(font => `@font-face{font-family:'${font.family}';src:url(${font.url}) format('woff2');font-style:normal;font-weight:${font.weight};font-display:swap;unicode-range:${BASIC}}`).join('')
+      for (const font of FIRST_FONTS) if (!existsSync(resolve(publicDir, font.url.slice(1)))) return this.error(`public${font.url} is missing (features/pricing/fonts/README.md makes it).`)
       const moondust = { x1: fileOf('pricing/board/moondust-384.avif'), x2: fileOf('pricing/board/moondust-768.avif') }
       const { module: prerender } = await runnerImport<typeof import('./src/features/pricing/prerender.tsx')>(prerenderModule, { root, configFile: false, logLevel: 'error' })
       // With the new look: the pages drawn from their data, the CSS they load in the app (page/view.tsx: page.css and the
@@ -116,7 +95,7 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       // (The vendors' pricing pages, docs/, are drawn so in every build.)
       const drawn = verdict || PRICE_PAGES.some(page => page.doc) ? {
         render: (await runnerImport<typeof import('./src/features/pricing/page/prerender.tsx')>(pagesModule, { root, configFile: false, logLevel: 'error' })).module.renderPage,
-        css: [...new Set([styles[0]!.slice(1), ...pageCss(bundle, ['/features/pricing/page/view.tsx'])])].map(file => {
+        css: [...new Set([files.css.slice(1), ...pageCss(bundle, ['/features/pricing/page/view.tsx'])])].map(file => {
           const asset = bundle[file]
           if (asset?.type !== 'asset') this.error(`The price pages' stylesheet ${file} isn't in the bundle.`)
           return String((asset as { source: string | Uint8Array }).source)
@@ -155,37 +134,21 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
           if (robots && !html.includes('<meta name="robots"')) set(/(<meta charset="UTF-8" \/>)/, '\n    <meta name="robots" content="noindex" />')
           const body = drawn.render(doc, withSet).replace(/\/src\/features\/home\/tv\/crt\/scene\.webp/g, drawn.scene)
           set(/(<link rel="manifest" href="\/site.webmanifest" \/>)/, `\n    <script type="application/ld+json">${jsonLd(page === hubPage ? hubData(page, doc) : withCrumbs(words.structuredData(page), page, doc))}</script>`)
-          html = html.replace(/\s*<link rel="preload" href="\/fonts\/[^"]+" as="font" type="font\/woff2" crossorigin \/>/g, '')
-          set(/(<script src="\/theme.js"><\/script>)/, [
-            ...fonts.map(font => `<link rel="preload" href="${font.url}" as="font" type="font/woff2" crossorigin />`),
-            ...withSet ? [`<link rel="preload" href="${drawn.scene}" as="image" fetchpriority="high" />`] : [],
-          ].map(line => `\n    ${line}`).join(''))
-          set(/(<script src="\/theme.js")(?=><\/script>)/, ' data-plain=""')
           // Painted as a visitor sees it, as the boards are (#price-shell), and the app's page takes over from it at the
           // reader's first touch, key or scroll (page/pricing.tsx): its Get started then signs in, or says Join the
           // waitlist, or is Open dashboard.
-          set(/(<\/title>)/, '\n    <link rel="expect" href="#root" blocking="render" />')
-          set(/(<\/title>)/, `\n    <style data-shell-css>${SHELL_CSS}${pruneCss(drawn.css, usedNames(html + body, THEME_ATTRIBUTES)).replace(WHOLE_FACES, '')}</style>\n    <style>${faces}</style>`)
-          html = html.replace('<div id="root"></div>', `<div id="price-shell">${body}</div>\n    <div id="root"></div>\n    <script src="${boot}" defer data-shell="price-shell" data-press="button" data-wait="none" data-keep=".boot-loader, .price-page, .pp" data-css="${styles[0]}" data-preload="${preload.join(' ')}" data-entry="${entry[0]}"></script>`)
+          html = paint(html, { shell: 'price-shell', body, css: drawn.css, preloads: withSet ? [`<link rel="preload" href="${drawn.scene}" as="image" fetchpriority="high" />`] : [], keep: '.boot-loader, .price-page, .pp', boot, files })
           this.emitFile({ type: 'asset', fileName: file, source: html })
           continue
         }
         // The page, painted, with what it needs to show: its CSS, its first picture, and its structured data.
         const shell = prerender.renderShell(page)
         set(/(<link rel="manifest" href="\/site.webmanifest" \/>)/, `\n    <script type="application/ld+json">${jsonLd(words.structuredData(page))}</script>`)
-        html = html.replace(/\s*<link rel="preload" href="\/fonts\/[^"]+" as="font" type="font\/woff2" crossorigin \/>/g, '')
-        set(/(<script src="\/theme.js"><\/script>)/, [
-          ...fonts.map(font => `<link rel="preload" href="${font.url}" as="font" type="font/woff2" crossorigin />`),
+        html = paint(html, { shell: 'price-shell', body: shell, css, keep: '.boot-loader, .price-page', boot, files, preloads: [
           `<link rel="preload" as="image" imagesrcset="${moondust.x1} 1x, ${moondust.x2} 2x" type="image/avif" fetchpriority="high" />`,
           `<link rel="preload" href="${wall.phone}" as="image" type="image/avif" media="(max-width: 640px)" />`,
           `<link rel="preload" href="${wall.wide}" as="image" type="image/avif" media="(min-width: 641px)" />`,
-        ].map(line => `\n    ${line}`).join(''))
-        set(/(<script src="\/theme.js")(?=><\/script>)/, ' data-plain=""')
-        // Nothing is drawn until the whole painted page has arrived (#root follows it): over a slow connection a page drawn
-        // while its HTML streams in grows as each row's rest arrives (Chrome; other browsers ignore it).
-        set(/(<\/title>)/, '\n    <link rel="expect" href="#root" blocking="render" />')
-        set(/(<\/title>)/, `\n    <style data-shell-css>${SHELL_CSS}${pruneCss(css, usedNames(html + shell, THEME_ATTRIBUTES)).replace(WHOLE_FACES, '')}</style>\n    <style>${faces}</style>`)
-        html = html.replace('<div id="root"></div>', `<div id="price-shell">${shell}</div>\n    <div id="root"></div>\n    <script src="${boot}" defer data-shell="price-shell" data-press="button" data-wait="none" data-keep=".boot-loader, .price-page" data-css="${styles[0]}" data-preload="${preload.join(' ')}" data-entry="${entry[0]}"></script>`)
+        ] })
         this.emitFile({ type: 'asset', fileName: file, source: html })
       }
       for (const { file, source } of words.markdownFiles()) this.emitFile({ type: 'asset', fileName: file, source })
@@ -204,22 +167,6 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
  *  the homepage's. */
 export const priceFirstFiles = (files: string[]) => [/^assets\/(?:moondust-\d+|wall-\d+|lamp)-[\w-]+\.(?:avif|webp)$/, /^assets\/(?:pricing|board-page|machines)-[\w-]+\.(?:js|css)$/]
   .flatMap(pattern => files.filter(name => pattern.test(name)))
-
-/** The stylesheets the chunks of these modules load, theirs and their imports'. */
-function pageCss(bundle: Rollup.OutputBundle, modules: string[]) {
-  const css = new Set<string>(), seen = new Set<string>()
-  const visit = (chunk: Rollup.OutputChunk) => {
-    if (seen.has(chunk.fileName)) return
-    seen.add(chunk.fileName)
-    for (const file of chunk.viteMetadata?.importedCss ?? []) css.add(file)
-    for (const name of chunk.imports) { const next = bundle[name]; if (next?.type === 'chunk') visit(next) }
-  }
-  for (const module of modules) {
-    const chunk = Object.values(bundle).find((item): item is Rollup.OutputChunk => item.type === 'chunk' && !!item.facadeModuleId?.endsWith(module))
-    if (chunk) visit(chunk)
-  }
-  return [...css]
-}
 
 /** With the comparisons' new look (page/switch.ts), the app's price pages: App.tsx's import of features/pricing is
  *  page/pricing.tsx (a comparison and /compare drawn from their data, the calculator as before), as the television homepage

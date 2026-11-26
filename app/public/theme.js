@@ -29,12 +29,18 @@
   try { if (localStorage.getItem('nightmail.dashboard-ready')) root.dataset.member = '' } catch {}
 })()
 
-// A price page's painted first screen (app/price-pages.ts) shows its plain address: with a query (other than utm_*) or
-// the hash its script tag names (data-plain), the app draws it instead, from the start (home/shell/boot.js).
+// A painted page (app/painted-page.ts: the price pages, the legal pages) shows its plain address: with a query (other
+// than utm_*) or the hash its script tag names (data-plain), the app draws it instead, from the start (home/shell/boot.js).
+// A page painted for visitors (data-members: the legal pages) is the app's from the start too where this browser has
+// signed in, as far as data/live.ts sessionLikely can tell, so a member gets the app exactly as before.
 ;(() => {
-  const plain = document.currentScript?.dataset.plain
-  if (plain === undefined) return
-  if ([...new URLSearchParams(location.search).keys()].some(name => !name.startsWith('utm_')) || (plain && location.hash === plain)) document.documentElement.dataset.shell = 'off'
+  const set = document.currentScript?.dataset
+  if (set?.plain === undefined) return
+  if ([...new URLSearchParams(location.search).keys()].some(name => !name.startsWith('utm_')) || (set.plain && location.hash === set.plain)) document.documentElement.dataset.shell = 'off'
+  if (set.members === undefined) return
+  let hint = null, likely = false
+  try { hint = localStorage.getItem('nightmail.session'); likely = hint === 'in' || (hint === null && (localStorage.getItem('nightmail.dashboard-ready') !== null || sessionStorage.getItem('nightmail.account') !== null)) } catch {}
+  if (likely) document.documentElement.dataset.shell = 'off'
 })()
 
 ;(() => {

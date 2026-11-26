@@ -12,18 +12,26 @@
 ;(() => {
   const me = document.currentScript, set = me.dataset, root = document.getElementById('root')
   const shell = document.getElementById(set.shell || 'home-shell'), keep = set.keep || '.boot-loader, .fac-page'
-  let started = false
+  let started = false, sheet = null
   const add = (tag, props, before = null) => document.head.insertBefore(Object.assign(document.createElement(tag), props), before)
   const start = () => {
     if (started) return
     started = true
     // The stylesheet and the modules download side by side; the entry runs once the stylesheet is in.
-    const css = add('link', { rel: 'stylesheet', href: set.css, crossOrigin: '' }, document.querySelector('style[data-shell-css]'))
+    const css = sheet = add('link', { rel: 'stylesheet', href: set.css, crossOrigin: '' }, document.querySelector('style[data-shell-css]'))
     for (const href of (set.preload || '').split(' ').filter(Boolean)) add('link', { rel: 'modulepreload', href, crossOrigin: '' })
     const entry = () => add('script', { type: 'module', src: set.entry, crossOrigin: '' })
     css.addEventListener('load', entry, { once: true }); css.addEventListener('error', entry, { once: true })
   }
-  if (!shell || !root || document.documentElement.dataset.shell === 'off') { if (shell) shell.remove(); start(); return }
+  // With the first screen off, its inlined CSS (a cut-down copy of the app's) goes once the app's stylesheet is in, before
+  // the app draws anything, so the app runs on its own stylesheet alone, as on a page with no first screen.
+  if (!shell || !root || document.documentElement.dataset.shell === 'off') {
+    if (shell) shell.remove()
+    start()
+    const drop = () => document.querySelectorAll('style[data-shell-css]').forEach(style => style.remove())
+    sheet.addEventListener('load', drop, { once: true }); sheet.addEventListener('error', drop, { once: true })
+    return
+  }
 
   shell.addEventListener('click', event => {
     // Only a press a person made is held for the app: a click a script dispatched is not.

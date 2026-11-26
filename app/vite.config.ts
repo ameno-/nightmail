@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig, loadEnv, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { MAX_RULES, withFileRules } from './asset-headers.ts'
-import { renderLegal } from './legal-markdown.ts'
+import { legalMarkdown } from './legal-markdown.ts'
 import { homeFirstFiles, homeShell } from './home-shell.ts'
 import { televisionFirstFiles, televisionHome } from './home-tv.ts'
 import { priceFirstFiles, pricePages, verdictApp } from './price-pages.ts'
@@ -50,16 +50,6 @@ const fileHeaders = (homeFirst: (files: string[]) => string[]): Plugin => {
       if (uncached.length) this.warn(`${uncached.length} files have no cache rule and revalidate on every load (Cloudflare reads ${MAX_RULES} rules, and a rule needs a plain file name): ${uncached.join(', ')}`)
     },
   }
-}
-
-// The legal pages' Markdown becomes { title, description, updated, effective, html, headings } at build time
-// (legal-markdown.ts), so the page ships HTML and no Markdown parser.
-const legalMarkdown: Plugin = {
-  name: 'nightmail:legal-markdown',
-  transform(source, id) {
-    if (!id.endsWith('.md')) return null
-    return { code: `export default ${JSON.stringify(renderLegal(source, id))}`, map: null }
-  },
 }
 
 // The commit a build was made from, recorded with each UI note (features/ui-notes). Only that lazy chunk reads it.
@@ -148,7 +138,7 @@ export default defineConfig(({ command, mode }) => {
     define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha), 'import.meta.env.VITE_DESIGN_SHEET': JSON.stringify(process.env.VITE_DESIGN_SHEET ?? '') },
     // (The homepage's station kit is inlined whatever its size: it is one lazily loaded stylesheet, features/home/machines.tsx.)
     build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)) } } },
-    plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(tv ? televisionFirstFiles : homeFirstFiles), publicOrigin, brandedBootScript(), publicBeacon, ...tv ? televisionHome() : [homeShell()], pricePages(tv ? televisionWords : undefined, VERDICT_PAGES), ...VERDICT_PAGES ? [verdictApp()] : [], sitePages(), inlineScriptsKept()],
+    plugins: [slimReactEmail, legalMarkdown(), react(), fileHeaders(tv ? televisionFirstFiles : homeFirstFiles), publicOrigin, brandedBootScript(), publicBeacon, ...tv ? televisionHome() : [homeShell()], pricePages(tv ? televisionWords : undefined, VERDICT_PAGES), ...VERDICT_PAGES ? [verdictApp()] : [], sitePages(), inlineScriptsKept()],
     server: {
       host: '127.0.0.1', port: 5173, strictPort: true,
       proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json', '/internal'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),
