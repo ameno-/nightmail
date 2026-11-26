@@ -7,7 +7,7 @@
 // are priced on /email-for-ai-agents instead. No imports: prices.ts reads it.
 
 /** The vendors with a pricing page, by their comparison's slug (compare/index.ts), in the order the pages list them. */
-export const PRICING_VENDORS: readonly string[] = ['sendgrid', 'resend', 'mailchimp']
+export const PRICING_VENDORS: readonly string[] = ['sendgrid', 'resend', 'mailchimp', 'mailgun', 'postmark', 'mailjet', 'brevo', 'mandrill']
 
 /** The pages a vendor has besides its comparison, by its slug. */
 export const ownPages = (slug: string) => PRICING_VENDORS.includes(slug) ? [`/pricing/${slug}`] : []
