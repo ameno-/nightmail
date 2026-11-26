@@ -30,8 +30,8 @@ export function docProblems(): string[] {
   for (const doc of DOCS) {
     if (doc.searchTitle.length > 60) problems.push(`${doc.path}'s title is over 60 characters: ${doc.searchTitle}`)
     if (doc.description.length < 140 || doc.description.length > 160) problems.push(`${doc.path}'s description isn't 140 to 160 characters (${doc.description.length}): ${doc.description}`)
-    if (!doc.sources.length) problems.push(`${doc.path} cites no source.`)
-    if (/\b(?:cheapest|best) (?:email|transactional|api|provider|service|option|choice|alternative|way to send)|Nightmail[^.]*\b(?:cheapest|best)\b/i.test([doc.searchTitle, doc.description, JSON.stringify([doc.h1, doc.answer, doc.summary, doc.cardWords, doc.sections, doc.questions, doc.llms])].join(' ')))
+    if (!doc.cited.length) problems.push(`${doc.path}'s table cites no source.`)
+    if (/\b(?:cheapest|best) (?:email|transactional|api|provider|service|option|choice|alternative|way to send)|Nightmail[^.]*\b(?:cheapest|best)\b/i.test([doc.searchTitle, doc.description, JSON.stringify([doc.h1, doc.answer, doc.cardWords, doc.sections, doc.copy, doc.llms])].join(' ')))
       problems.push(`${doc.path} says "cheapest" or "best": no page states either of Nightmail (Ryan, A294).`)
     if (/\bAmazon SES\b|\bBento\b/.test(JSON.stringify(doc))) problems.push(`${doc.path} names Amazon SES or Bento: pages compare only providers Nightmail costs less than (Ryan, A294).`)
   }

@@ -1,7 +1,7 @@
 // (With extensions: the build's config imports this file, through pages.ts and readable.ts.)
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
 import type { WorkspaceFocus } from '../../../../../api/src/workspace-focus.ts'
-import { linesOf, plain, type Block, type PageDoc, type Text } from '../page/shape.ts'
+import { linesOf, plain, type Block, type PageDoc, type Question, type Section, type Text } from '../page/shape.ts'
 import { dayOf, type Source } from '../prices.ts'
 import { faqPage } from '../questions.ts'
 
@@ -17,9 +17,13 @@ export type Doc = PageDoc & {
   /** The heading: the verdict's two lines, Nightmail's (its figure marked) and the vendor's. Under it, `answer`: one dated
    *  line with what they assume. */
   h1: [Text, Text]
-  /** The fuller answer, the figures an assistant would quote: the Markdown twin's opening lines after the verdict. On the
-   *  page they are in its first table. */
-  summary: Text[]
+  /** The pages the visible table's note links, with the day each was read (the page's own sources: its structured data's
+   *  citations). */
+  cited: Source[]
+  /** What only the Markdown copy carries, for assistants and crawlers: people get the verdict, Get started and one table
+   *  (Ryan: "headline, button, comparison underneath"). The vendor's plans, the questions with their answers, every page
+   *  read and the other pages of its kind, each fact once. */
+  copy: { sections: Section[]; questions: Question[]; sources: Source[]; related: PageDoc['related'] }
   /** The link-preview card's words (app/link-card.ts): two lines of at most 24 characters and a caption of at most 70. */
   cardWords: { lines: [string, string]; caption: string }
   focus: WorkspaceFocus
@@ -53,35 +57,36 @@ function block(b: Block): string {
   ].join('\n')].join('\n\n')
 }
 
-/** The page in Markdown (/<path>.md): its name, then the verdict, its caption and the fuller answer, every section, the
- *  questions, the sources and the small print, then the related pages under More (which llms-full.txt leaves out, as it
- *  does the comparisons'). */
+/** The page in Markdown (/<path>.md): its name, the verdict and its caption, the page's table, then what only the copy
+ *  carries (the plans, the questions, the sources), the small print, and the related pages under More (which
+ *  llms-full.txt leaves out, as it does the comparisons'). */
 export function docMarkdown(doc: Doc): string {
   const verdict = [...linesOf(doc.h1).flatMap((line, i) => [...i ? [' '] : [], ...line]), ' ', ...doc.answer.flatMap(line => line)]
   return [
     `# ${doc.title}`,
-    [verdict, ...doc.summary].map(paragraph => `> ${inline(paragraph).replaceAll('\u00a0', ' ')}`).join('\n>\n'),
+    `> ${inline(verdict).replaceAll('\u00a0', ' ')}`,
     `Canonical page: ${url(doc.path)}`,
-    ...doc.sections.flatMap(section => [`## ${section.title}`, ...section.blocks.map(block)]),
-    ...doc.questions.length ? ['## Questions', doc.questions.map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n')] : [],
+    ...[...doc.sections, ...doc.copy.sections].flatMap(section => [`## ${section.title}`, ...section.blocks.map(block)]),
+    ...doc.copy.questions.length ? ['## Questions', doc.copy.questions.map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n')] : [],
     '## Sources',
-    pagesOf(doc.sources).map(source => `- [${pageName(source.url)}](${source.url}), read ${dayOf(source.checked)}`).join('\n'),
+    pagesOf(doc.copy.sources).map(source => `- [${pageName(source.url)}](${source.url}), read ${dayOf(source.checked)}`).join('\n'),
     trademarks,
     '## More',
-    doc.related.map(page => `- [${page.title}](${twin(page.path)}): ${page.line}`).join('\n'),
+    [...doc.related, ...doc.copy.related].map(page => `- [${page.title}](${twin(page.path)}): ${page.line}`).join('\n'),
   ].join('\n\n') + '\n'
 }
 
 /** The page's own nodes for its JSON-LD (readable.ts adds the site's and the product's, price-pages.ts the breadcrumb):
- *  the page, with the day its figures were last read, what it is about and the pages it cites, and the questions it
- *  shows. Nothing it doesn't say: no offers, ratings or reviews for anyone. */
+ *  the page, with the day its figures were last read, what it is about and the pages its table cites, and an FAQPage
+ *  only for questions a visitor can see (a vendor's pricing page shows none). Nothing it doesn't say: no offers, ratings
+ *  or reviews for anyone. */
 export function docGraph(doc: Doc): object[] {
   const page = url(doc.path)
   return [
     { '@type': 'WebPage', '@id': page, url: page, name: doc.searchTitle, description: doc.description, inLanguage: 'en',
       isPartOf: { '@id': url('/#website') }, dateModified: doc.modified, breadcrumb: { '@id': `${page}#breadcrumb` },
       about: { '@type': 'SoftwareApplication', name: doc.about.name, url: doc.about.url }, mentions: { '@id': url('/#app') },
-      citation: pagesOf(doc.sources).map(source => source.url) },
+      citation: pagesOf(doc.cited).map(source => source.url) },
     ...doc.questions.length ? [faqPage(page, doc.questions)] : [],
   ]
 }

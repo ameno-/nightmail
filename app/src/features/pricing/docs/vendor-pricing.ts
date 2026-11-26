@@ -5,8 +5,10 @@ import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, ni
 import { comparisonQuestions } from '../questions.ts'
 import { plain, type Doc, type Question, type Section, type Text } from './doc.ts'
 
-// A vendor's pricing page (/pricing/<slug>, "SendGrid pricing"): what the vendor costs, plan by plan and at each size its
-// own page prices, made from its comparison's entry alone (compare/<slug>.ts): every plan, tier, rate, limit and free
+// A vendor's pricing page (/pricing/<slug>, "SendGrid pricing"): the verdict, Get started, and one table, what the vendor
+// costs at each size its own page prices beside Nightmail, with one note under it (Ryan: "headline, button, comparison
+// underneath"). Its plans, its free plan or trial, how each charges and the questions are in the Markdown copy only
+// (doc.copy), which assistants read. All of it is made from its comparison's entry alone (compare/<slug>.ts): every plan, tier, rate, limit and free
 // allowance it read, each with the vendor's page and the day, and Nightmail beside it. Nothing is typed: a figure is the
 // entry's or the billing code's, and every sentence about the vendor names where it was read. What the page says of
 // Nightmail against the vendor is one claim, scoped to the sizes in its table, which the build checks row by row
@@ -21,6 +23,16 @@ const link = (source: Pick<Source, 'url'>, text = host(source.url)) => ({ text, 
 const month = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' })
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 
+/** Where the page's table was read, in its note: each page once, with the day. */
+function readAt(sources: Source[]): Text {
+  const pages = [...new Map(sources.map(source => [source.url, source])).values()], days = [...new Set(pages.map(source => source.checked))]
+  const join = (i: number) => i === 0 ? '' : i === pages.length - 1 ? ' and ' : ', '
+  return days.length === 1 ? [`Read ${dayOf(days[0]!)} on `, ...pages.flatMap((source, i) => [join(i), link(source, label(source.url))]), '.']
+    : ['Read on ', ...pages.flatMap((source, i) => [join(i), link(source, label(source.url)), ` (${dayOf(source.checked)})`]), '.']
+}
+// (A page is named by its host and the last part of its path: "twilio.com/…/twi121--sendgrid-pricing-pdf-st1.pdf".)
+const label = (url: string) => { const parts = new URL(url).pathname.split('/').filter(Boolean); return host(url) + (parts.length > 1 ? `/…/${parts.at(-1)}` : parts.length ? `/${parts[0]}` : '') }
+
 /** Where a table's figures were read: each page and day once, with what was read there. */
 function readOn(read: { source: Source; what: string }[]): Text {
   const pages = new Map<string, { source: Source; what: Set<string> }>()
@@ -30,8 +42,6 @@ function readOn(read: { source: Source; what: string }[]): Text {
     pages.set(key, page)
   }
   const list = [...pages.values()], days = [...new Set(list.map(page => page.source.checked))]
-  // (A page is named by its host and the last part of its path: "twilio.com/…/twi121--sendgrid-pricing-pdf-st1.pdf".)
-  const label = (url: string) => { const parts = new URL(url).pathname.split('/').filter(Boolean); return host(url) + (parts.length > 1 ? `/…/${parts.at(-1)}` : parts.length ? `/${parts[0]}` : '') }
   return [days.length === 1 ? `Read ${dayOf(days[0]!)}: ` : 'Read ', ...list.flatMap(({ source, what }, i) => [
     i === 0 ? '' : i === list.length - 1 ? '; and ' : '; ', `${listOf([...what])} on `, link(source, label(source.url)), days.length === 1 ? '' : `, ${dayOf(source.checked)}`,
   ]), '.']
@@ -46,7 +56,6 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
   const usage = (u: Usage) => m.per === 'contact' ? `${formatCount(u.contacts)} contacts sent ${m.sendsPerContact} emails each (${formatCount(u.sent)} emails a month)${m.seats > 1 ? `, with ${m.seats} teammates` : ''}`
     : m.per === 'inbox' ? `${formatCount(u.inboxes ?? 0)} inboxes, each receiving ${m.receivedPerInbox} and sending ${m.sentPerInbox} emails a month`
       : m.per === 'received' ? `${formatCount(u.received)} emails received a month` : `${formatCount(u.sent)} emails a month`
-  const listed = [link({ url: offer.pricing }), ` on ${day}`]
 
   // ---------------------------------------------------------------- the facts the page is made of
 
@@ -77,30 +86,19 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
     return { n, u, q, cents, ours, how }
   })
   const open = rows.find(row => row.n === (contacts ? c.sizes[1]!.contacts : offer.unit === 'inboxes' ? c.sizes[1]!.inboxes : c.sizes[1]!.sent)) ?? rows[Math.floor(rows.length / 2)]!
-  const first = rows[0]!, last = rows.at(-1)!
   // The verdict's size: the vendor's smallest paid plan, where Nightmail's bill isn't $0 (a $0 would need its reason
   // beside it); else the size the comparison opens at.
   const verdictAt = rows.find(row => row.n === start.tier.size && row.ours.uc > 0n && !(row.q.kind === 'price' && (row.q.payg || row.q.extra))) ?? open
 
   // ---------------------------------------------------------------- the answer, first
 
-  const startLine = `${vendor}’s paid plans start at ${money(start.tier.cents)} a month for ${count(start.tier.size)} (${start.plan.name}${contacts && start.tier.sends ? `, ${formatCount(start.tier.sends)} emails a month` : ''}).`
-  const topLine = offer.beyond && offer.ladder === 'complete'
-    ? `The largest plan its page prices, ${top.plan.name} at ${count(largest)}, is ${money(top.tier.cents)} a month; above that: ${offer.beyond.text}.`
-    : `The largest size read here, ${size(largest)}, costs ${money(top.tier.cents)} a month on ${top.plan.name}.`
   const freeLine = freeFacts.map(fact => fact.text).join(' ')
-  const rateLine = rateRange ? `Past a paid plan’s emails, each 1,000 more costs ${rateRange}, by plan.` : ''
   // The verdict, Nightmail's line first as the comparisons' (page/comparison.ts): both bills for the same mail, the vendor's
   // plan named; its caption, what they assume and the day read; and the same in a card's few words.
   const at = `${m.per === 'contact' ? `Per ${count(verdictAt.n)} sent ${m.sendsPerContact} emails each${m.seats > 1 ? `, ${m.seats} teammates` : ''}` : m.per === 'email' ? `Per ${size(verdictAt.n)}, one recipient each` : `Per ${usage(verdictAt.u)}`}, list prices`
   const h1: Doc['h1'] = [[`${productName} `, { ours: verdictAt.ours.text, sent: verdictAt.u.sent, received: verdictAt.u.received }, '.'], [`${vendor} ${verdictAt.how} ${money(verdictAt.cents)}.`]]
   const caption = `${at} · checked ${day.replaceAll(' ', '\u00a0')}`
   const cardWords: Doc['cardWords'] = { lines: [`${productName} ${verdictAt.ours.text}.`, `${vendor} ${money(verdictAt.cents)}.`], caption: `Per ${contacts ? `${count(verdictAt.n)}, ${formatCount(verdictAt.u.sent)} emails a month` : size(verdictAt.n)}, checked ${day}.` }
-  const summary: Text[] = [
-    [`${startLine} ${topLine} List prices before tax, billed monthly, read on `, ...listed, '.'],
-    ...freeLine || rateLine ? [[[freeLine, rateLine].filter(Boolean).join(' ')]] : [],
-    [`${productName} costs less than ${vendor} at each of the ${rows.length} sizes priced below, from ${formatCount(first.n)} to ${size(last.n)}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month.`],
-  ]
 
   // ---------------------------------------------------------------- the sections
 
@@ -124,31 +122,34 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
         ...seated.length ? [[p.plan.seats ? p.plan.seats.count === null ? 'Unlimited' : formatCount(p.plan.seats.count) : '—']] : [],
       ] })) }],
   }
+  // Where the sizes' figures were read: the plans' prices, the rate past a plan where a size uses it, and the teammates
+  // where the size assumes some.
+  const tableRead = rows.flatMap(({ q }) => q.kind !== 'price' ? [] : [
+    q.tier.source, ...q.payg?.tier.overageSource ? [q.payg.tier.overageSource] : [], ...m.per === 'contact' && m.seats > 1 && q.plan.seats ? [q.plan.seats.source] : [],
+  ])
   const sizesTable: Section = {
     id: 'sizes', title: `What ${vendor} costs at each size`,
     blocks: [
       { kind: 'table',
-        caption: [`${c.assume} Billed monthly, no promotions; read on `, ...listed, '.'],
+        caption: [`${c.assume} Monthly billing, no promotions. ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${productName} costs less than ${vendor} at every size in this table. `, ...readAt(tableRead)],
         head: [contacts ? 'Contacts' : 'Emails a month', ...contacts ? ['Emails a month'] : [], productName, vendor, ...contacts ? [] : [`${vendor} per 1,000`], `${vendor} plan`],
         numeric: contacts ? [0, 1, 2, 3] : [0, 1, 2, 3],
         rows: rows.map(row => ({ mark: row === verdictAt, cells: [
           [formatCount(row.n)], ...contacts ? [[formatCount(row.u.sent)]] : [], [{ ours: row.ours.text, sent: row.u.sent, received: row.u.received }], [money(row.cents)],
           ...contacts ? [] : [[usd(ucOf(row.cents) * 1000n / BigInt(row.u.sent + row.u.received))]], [row.how],
         ] })) },
-      { kind: 'p', text: [`${productName} costs less than ${vendor} at every size in this table.`] },
     ],
   }
-  const sections: Section[] = [plansTable, sizesTable]
+  const sections: Section[] = [sizesTable]
 
   // ---------------------------------------------------------------- the questions, from the same facts
 
-  // What it costs and whether it's free, from the plans; the rest as its comparison's page asks them (questions.ts), word
-  // for word: at its middle size, whether Nightmail costs less at its large size, how each charges, what Nightmail has
-  // that it charges for or lacks, and what it has that Nightmail doesn't.
+  // For the Markdown copy: what it costs and whether it's free, from the plans; the rest as its comparison's page asks them
+  // (questions.ts), word for word: whether Nightmail costs less at its large size, how each charges, what Nightmail has
+  // that it charges for or lacks, and what it has that Nightmail doesn't. (Its middle size is a row of the table.)
   const where = `${host(offer.pricing)}, ${day}`, asked = comparisonQuestions(c), ask = (id: string) => asked.filter(item => item.id === id)
   const questions: Question[] = [
     { id: 'cost', question: `How much does ${vendor} cost?`, answer: `From ${money(start.tier.cents)} a month for ${count(start.tier.size)} (${start.plan.name}) to ${money(top.tier.cents)} for ${count(largest)} (${top.plan.name})${offer.beyond && offer.ladder === 'complete' ? `; above that, ${offer.beyond.text}` : ', the largest size read here'}. List prices before tax (${where}).` },
-    ...ask('price'),
     ...freeFacts.length ? [{ id: 'free', question: `Is ${vendor} free?`, answer: `${freeLine} Its paid plans start at ${money(start.tier.cents)} a month (${start.plan.name}). (${listOf([...new Set(freeFacts.map(fact => host(fact.source.url)))])}, ${dayOf(freeFacts.map(fact => fact.source.checked).sort().at(-1)!)}.)` }] : [],
     ...ask('less'), ...ask('charges'), ...ask('has'), ...ask('lacks'),
   ]
@@ -169,17 +170,20 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
     `${vendor} pricing, read ${day}: every plan, ${from}. ${oursShort}.`,
     `${vendor} pricing, read ${day}: every plan and its price, ${from}, and what a month costs at each size.`,
   ], 160, 140)
+  // On the page, the vendor's own other page and the calculator; the other vendors' pricing pages in the copy's More.
   const related = [
     { title: c.title, path: c.path, line: `${vendor} and ${productName} at every size ${vendor} prices, side by side.` },
-    ...pricingPages.filter(other => other.slug !== c.slug).map(other => ({ title: `${other.vendor} pricing`, path: `/pricing/${other.slug}`, line: `What ${other.vendor} costs, plan by plan.` })),
-    { title: `${productName} price calculator`, path: '/pricing', line: `What ${productName} costs at your own numbers.` },
+    { title: 'Price calculator', path: '/pricing', line: `What ${productName} costs at your own numbers.` },
   ]
+  const others = pricingPages.filter(other => other.slug !== c.slug).map(other => ({ title: `${other.vendor} pricing`, path: `/pricing/${other.slug}`, line: `What ${other.vendor} costs, plan by plan.` }))
   const doc: Doc = {
-    path, title: `${vendor} pricing`, searchTitle, description, h1, answer: [[caption]], summary, cardWords, sections, questions,
-    sources: sourcesOf(c), related, focus: c.focus, modified: lastChecked(c),
-    crumbs: [{ name: productName, path: '/' }, { name: 'Pricing', path: '/pricing' }, { name: `${vendor} pricing`, path }],
+    path, title: `${vendor} pricing`, searchTitle, description, h1, answer: [[caption]], cardWords, sections, questions: [],
+    // (The note under the table names its sources and the day, so the page's end doesn't list them again.)
+    sources: [], cited: tableRead, copy: { sections: [plansTable], questions, sources: sourcesOf(c), related: others },
+    related, focus: c.focus, modified: lastChecked(c),
+    crumbs: [{ name: productName, path: '/' }, { name: 'Pricing', path: '/pricing' }, { name: vendor, path }],
     about: { name: vendor, url: offer.pricing },
-    llms: `${plain(h1[0])} ${plain(h1[1])} ${caption.replaceAll('\u00a0', ' ')}. ${plain(summary[0]!)}`,
+    llms: `${plain(h1[0])} ${plain(h1[1])} ${caption.replaceAll('\u00a0', ' ')}. ${questions[0]!.answer}`,
   }
   return doc
 }
