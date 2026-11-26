@@ -131,6 +131,10 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
   type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; lease_fence: string; webhook: ClaimedWebhook | null;ingest:IngestInput|null;delete_binding:import('./provider-credentials.js').ReadyConnection|null };
   const jobFence = (job: Claimed) => and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), sql`${jobs.leaseUntil}=${job.lease_fence}::timestamptz`, typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
   const stripLoadFailures = (payload: Record<string, unknown>) => '_loadFailures' in payload ? (() => { const { _loadFailures: _, ...rest } = payload; return rest; })() : payload;
+  const writeJob = async (job: Claimed, started: number, statement: SQL) => {
+    if (job.type.startsWith('abuse.stage.')) return (await import('./abuse.js')).settleStage(runtime,job.type,started,statement);
+    return runtime.db.execute(statement);
+  };
   const settleError = async (job: Claimed, handlerPayload: Record<string, unknown>, error: unknown, settle: (update: SQLWrapper) => Promise<unknown>, claimMs: number, claimBatchSize: number, jobStarted: number) => {
     const fence = jobFence(job);
     const context = { event: 'job', jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
@@ -140,14 +144,14 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const refundedAttempts = Math.max(0, job.attempts - 1);
       const delay = Math.min(15 * 60_000, 15_000 * 4 ** (loadFailures - 1));
       const nextPayload = { ...handlerPayload, _loadFailures: loadFailures };
-      await runtime.db.update(jobs).set({ status: 'pending', attempts: refundedAttempts, leaseUntil: null, lastError: error.code, availableAt: new Date(Date.now() + delay).toISOString(), payload: nextPayload }).where(fence);
+      await writeJob(job,jobStarted,runtime.db.update(jobs).set({ status: 'pending', attempts: refundedAttempts, leaseUntil: null, lastError: error.code, availableAt: new Date(Date.now() + delay).toISOString(), payload: nextPayload }).where(fence).getSQL());
       log(loadFailures >= LOAD_ERROR_THRESHOLD ? 'error' : 'warn', { ...context, jobType: job.type, attempt: refundedAttempts, loadFailures, code: error.code, retryable: true, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
       return;
     }
     if (error instanceof JobDeferred) {
       // A successful polling turn breaks a streak of failures/evictions.
       const nextPayload = error.payload ?? (handlerPayload !== job.payload ? handlerPayload : undefined);
-      await runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: nextPayload } : {}) }).where(fence);
+      await writeJob(job,jobStarted,runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: nextPayload } : {}) }).where(fence).getSQL());
       log('info', { ...context, code: 'JOB_DEFERRED', availableAt: error.availableAt, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
       return;
     }
@@ -179,7 +183,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
     let records: SQL | undefined, settling = false;
     const settle = (update: SQLWrapper) => {
       settling = true;
-      return runtime.db.execute(records ? sql`WITH settled AS (${update.getSQL()} RETURNING id), ${records} SELECT 1` : update.getSQL());
+      return writeJob(job,jobStarted,records ? sql`WITH settled AS (${update.getSQL()} RETURNING id), ${records} SELECT 1` : update.getSQL());
     };
     const handlerPayload = stripLoadFailures(job.payload);
     try {
@@ -189,7 +193,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       if (!handler) throw new ApiError(500, 'JOB_HANDLER_MISSING', 'No handler is registered for this job type.');
       const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type === 'mailbox.reconcile' || job.type === 'operation.ses'
         ? await regionalRuntime(job.workspace_id) : { ...runtime, config: { ...runtime.config, workspaceId: job.workspace_id } };
-      await handler(ownerRuntime, handlerPayload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id, leaseFence: job.lease_fence,
+      await handler(ownerRuntime, handlerPayload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id, startedAt: jobStarted, leaseFence: job.lease_fence,
         webhook: job.webhook,ingest:job.ingest,deleteBinding:job.delete_binding, recordWithSettlement: ctes => { records = ctes; } });
       await settle(runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null, ...(handlerPayload !== job.payload ? { payload: handlerPayload } : {}) }).where(fence));
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });

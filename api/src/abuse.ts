@@ -645,10 +645,18 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
   return { items, added, cut: stopped };
 }
 
+// A cut needs time to make its singleton due again. Bound the queue's status write as
+// well as the fold; on an unavailable database the existing lease recovers the row.
+export async function settleStage(host: Hosted, type: string, started: number, statement: SQL) {
+  const stage = STAGES.find(s => type === 'abuse.stage.'+s);
+  const deadline = Math.min(Date.now()+STATEMENT_MS, started+(stage ? budgets[stage] : 0)+STATEMENT_MS);
+  return withStageConnection(host,deadline,db => bounded({ ...host, db, deadline },tx => tx.execute(statement)));
+}
+
 export const abuseStageJob: JobHandler = async (runtime,payload,job) => {
   const stage = STAGES.find(s => job.id==='abuse.stage.'+s);
   if (!stage) throw new Error('Unknown abuse stage');
-  const scoped = { ...runtime, lease: job.leaseFence, deadline: Date.now()+budgets[stage] };
+  const scoped = { ...runtime, lease: job.leaseFence, deadline: (job.startedAt ?? Date.now())+budgets[stage] };
   const result = await runAbuseStage(scoped,stage);
   if (result.cut) throw new JobDeferred(new Date().toISOString());
   // Do not lose a wake between the last empty read and generic job settlement.

@@ -33641,6 +33641,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await control.query("SELECT abuse_folded_at FROM nightmail_signin_attempts WHERE subject='slow-1'")).rows[0].abuse_folded_at,null);
         await control.query('DROP TRIGGER slow ON abuse_signals');
         assert.equal((await runAbuseStage(on(one),'signIns')).items,1);
+        // Settlement is part of a worker's hold too: leave the recoverable running lease
+        // if its status update is stalled. Its durable receipt must survive that recovery.
+        await seed(1,'settle-');
+        await control.query(`UPDATE jobs SET status='pending' WHERE type='abuse.stage.signIns';
+          CREATE TRIGGER slow_settle BEFORE UPDATE ON jobs FOR EACH ROW
+          WHEN (OLD.status='running' AND NEW.status='completed') EXECUTE FUNCTION slow_fold()`);
+        const settling = Date.now();
+        await assert.rejects(drainJobs(on(one),1,1,1000,'work'));
+        assert.ok(Date.now()-settling < 2500);
+        await control.query("DROP TRIGGER slow_settle ON jobs; UPDATE jobs SET lease_until=now()-interval '1 second' WHERE type='abuse.stage.signIns'");
+        assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+        assert.deepEqual((await control.query("SELECT seen FROM abuse_signals WHERE value=md5('settle-1')")).rows,[{seen:1}]);
         // A busy pool must not extend a five-second job by the pool's connection timeout.
         const pool = new pg.Pool({connectionString:FIXTURE_DATABASE_URL, max:1, options:'-c search_path='+schema+',public'});
         const held = await pool.connect();
