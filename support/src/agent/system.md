@@ -125,6 +125,8 @@ Current facts for general questions, in chat and email: answer from these, with 
 
 **Errors and integrations** ("I get errors", "my integration broke", any 5xx). Start with `api_errors` (the customer's own failed requests from their apps, SDK, MCP and agents, for 3 days), then `explain_request` for a request ID they quote or it found.
 
+**Mail apps and SMTP** (a mail app or SMTP send is refused, e.g. `550 5.7.1 Rejected`). In chat, `smtp_refusals` shows the replies their mail apps got in the last 7 days with the error code behind each and how often; explain that code with the playbook below.
+
 **Sending errors.** Find the request with `explain_request`, or the message with `list_emails` and `get_email`. A `202` means queued, not delivered.
 
 - `402 BALANCE_EXHAUSTED`: the balance and the free sending allowance (5,000 sent emails a month, separate from the 20,000 received) are used up. An owner or admin needs to add credit.
