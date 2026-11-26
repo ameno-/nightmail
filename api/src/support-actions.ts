@@ -30,7 +30,9 @@ const KINDS = {
   retry_inbound_delivery: { route: '/v1/inbound/webhooks/{id}/deliveries/{deliveryId}/retry', access: 'receiving', target: 'Delivery' },
   test_inbound_webhook: { route: '/v1/inbound/webhooks/{id}/test', access: 'receiving', target: 'Webhook' },
   redeliver_message: { route: '/v1/inbound/messages/{messageId}/redeliver', access: 'receiving', target: 'Message' },
-  pause_campaign: { route: '/v1/campaigns/{id}/pause', access: 'campaigns', target: 'Campaign' },
+  // The workspace's owner pauses its own campaign from support: an admin, whose own session may pause it in the dashboard,
+  // is offered no card for it (decision on #915), and an owner demoted since the proposal can't confirm it.
+  pause_campaign: { route: '/v1/campaigns/{id}/pause', access: 'campaigns', target: 'Campaign', owner: true },
 } as const;
 type Kind = keyof typeof KINDS;
 /** Open proposals per conversation, and how long one stays open. */
@@ -47,9 +49,10 @@ export const RUNNING_MINUTES = 5;
 /** A person's dashboard actor in a workspace, as a signed-in session gets it (account-login.ts accountSessionActor). */
 const personActor = (keyId: string, workspaceId: string, role: string, credential: 'dashboard' | 'support'): Actor =>
   ({ keyId, workspaceId, role, permissions: role === 'member' ? ['read', 'send'] : ['manage'], domains: [], credential });
-/** Why the change's public route refuses this actor, or null: its path guard (app.ts memberRefused), then its own check. */
+/** Why this actor may not make the change, or null: a kind marked owner, anyone but the owner; then the public route's path guard (app.ts memberRefused) and its own check. */
 function refusal(kind: Kind, a: Actor) {
   const { route, access } = KINDS[kind];
+  if ('owner' in KINDS[kind] && a.role !== 'owner') return new ApiError(403, 'PERMISSION_DENIED', 'From support, only the workspace’s owner can make this change. An owner or admin can still do it in the dashboard.');
   const allowed = !memberRefused(a, 'POST', route) && (access === 'webhooks' ? a.permissions.includes('manage') && !a.domains.length
     : access === 'receiving' ? actorMailAccess(a)?.admin === true : a.permissions.includes('manage') || a.permissions.includes('send'));
   return allowed ? null : new ApiError(403, 'PERMISSION_DENIED', 'This operation requires a workspace owner or admin.');

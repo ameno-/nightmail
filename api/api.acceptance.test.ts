@@ -9622,6 +9622,16 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await publicly(`/v1/campaigns/${campaign}/pause`), 409, 'CAMPAIGN_NOT_PAUSABLE');
         const twice = ok(await confirm((await propose(id, { kind: 'pause_campaign', campaignId: campaign })).id));
         assert.deepEqual([twice.status, twice.error], ['failed', { code: 'CAMPAIGN_NOT_PAUSABLE', message: 'This campaign is already paused.' }]);
+        // Only the workspace's owner pauses a campaign from support: an admin's conversation is offered no card for it, and an
+        // owner demoted to admin since the proposal can't confirm it (nor can anyone else, from any route: subtest 12).
+        const adminChat = await chat(deputy, shop);
+        error(await stamped(adminChat, 'POST', '/v1/support/actions', { kind: 'pause_campaign', campaignId: campaign }), 403, 'PERMISSION_DENIED');
+        const owners = await propose(id, { kind: 'pause_campaign', campaignId: campaign });
+        await db.query(`UPDATE workspace_members SET role = 'admin' WHERE workspace_id = $1 AND user_id = $2`, [shop, boss.userId]);
+        error(await confirm(owners.id), 403, 'PERMISSION_DENIED');
+        await db.query(`UPDATE workspace_members SET role = 'owner' WHERE workspace_id = $1 AND user_id = $2`, [shop, boss.userId]);
+        assert.equal(ok(await decline(owners.id)).status, 'declined');
+        ok(reply(await platform.closeConversation(adminChat)));
         // An inbound retry, a redelivery and a test of an inbound webhook, each as its route does.
         const retried = await inboundDelivery(live.id, 'failed'), finished = await inboundDelivery(live.id, 'delivered', received);
         assert.deepEqual(ok(await confirm((await propose(id, { kind: 'retry_inbound_delivery', webhookId: live.id, deliveryId: retried })).id)).result, { ok: true });
@@ -9900,13 +9910,14 @@ describe('Hosted MCP OAuth and tools', () => {
             { action: 'support.action', actor_type: 'support', actor_id: id, user_id: deputy.userId, internal: true, ticket_ref: id, workspace_id: shop, summary: { kind: 'recheck_receiving_host', domain: name, host: `in.${name}`, queued: true } }]);
         const timeline = async (conversation: string) => (await db.query(`SELECT details FROM support_events WHERE conversation_id = $1 AND kind = 'action' ORDER BY created_at, id`, [conversation])).rows.map(r => r.details);
         assert.deepEqual(await timeline(id), [{ kind: 'recheck_receiving_host', target: { type: 'receiving_host', id: host }, domain: name, host: `in.${name}`, queued: true }]);
-        // A domain's re-check takes its own turns: once now, then not again within the minute.
-        assert.equal(ok(await stamped(id, 'POST', `/v1/support/domains/${domainId}/verify`)).id, domainId);
+        // A domain's re-check takes its own turns: once now (the owner's), then not again within the minute.
+        const ownerChat = await chat(boss, shop);
+        assert.equal(ok(await stamped(ownerChat, 'POST', `/v1/support/domains/${domainId}/verify`)).id, domainId);
         error(await stamped(id, 'POST', `/v1/support/domains/${domainId}/verify`), 429, 'SUPPORT_ACTION_TOO_SOON');
-        assert.deepEqual((await timeline(id)).map(d => [d.kind, d.target.id]), [['recheck_receiving_host', host], ['verify_domain', domainId]]);
-        // After the minute, the host's turn is back.
+        assert.deepEqual([(await timeline(id)).map(d => [d.kind, d.target.id]), (await timeline(ownerChat)).map(d => [d.kind, d.target.id])], [[['recheck_receiving_host', host]], [['verify_domain', domainId]]]);
+        // After the minute, the host's turn is back (the owner's this time).
         await db.query(`UPDATE support_action_slots SET at = now() - interval '61 seconds' WHERE kind = 'recheck_receiving_host' AND target = $1`, [host]);
-        assert.equal(ok(await recheck(id)).id, host);
+        assert.equal(ok(await recheck(ownerChat)).id, host);
         // A forward's resend that its own code refuses (no permanent address to send from) records nothing and gives its turn back.
         const forward = `con_${hex().slice(0, 24)}`, theirForward = `con_${hex().slice(0, 24)}`, { encrypt } = await import('./src/operations.js');
         await db.query(`INSERT INTO mailbox_webhooks(id, workspace_id, type, key, encrypted_target, event_types, verified, expires_at, requested_at, request_from) VALUES
@@ -9915,14 +9926,23 @@ describe('Hosted MCP OAuth and tools', () => {
         await db.query(`UPDATE mailboxes SET kind = 'inbox' WHERE workspace_id = $1 AND kind <> 'inbox'`, [shop]);
         const resend = (conversation: string, target = forward) => stamped(conversation, 'POST', `/v1/support/receiving/forwards/${target}/resend`);
         for (let i = 0; i < 2; i++) error(await resend(id), 422, 'FORWARD_SENDER_REQUIRED');
-        assert.deepEqual([(await db.query(`SELECT count(*)::int AS n FROM support_action_slots WHERE kind = 'resend_forward' AND target = $1`, [forward])).rows[0].n, (await timeline(id)).length], [0, 3]);
+        assert.deepEqual([(await db.query(`SELECT count(*)::int AS n FROM support_action_slots WHERE kind = 'resend_forward' AND target = $1`, [forward])).rows[0].n, (await timeline(id)).length], [0, 1]);
+        // By email nothing changes: a conversation bound to the same admin by her own aligned mail takes no safe action and
+        // proposes nothing to staff, and nothing is charged, logged or recorded for it.
+        const mailed = await email(deputy.email), logged = (await reads(mailed.id)).length;
+        assert.equal(mailed.body.mode, 'member');
+        for (const [path, body] of [[`/v1/support/domains/${domainId}/verify`, undefined], [`/v1/support/receiving/hosts/${host}/recheck`, undefined], [`/v1/support/receiving/forwards/${forward}/resend`, undefined],
+          ['/v1/support/approvals', { kind: 'pause_sending', reason: 'They asked for sending to stop.' }]] as const)
+          error(await stamped(mailed.id, 'POST', `${path}?workspaceId=${shop}`, body as Json | undefined), 403, 'SUPPORT_CHAT_ONLY');
+        assert.deepEqual([(await reads(mailed.id)).length, (await timeline(mailed.id)).length], [logged, 0]);
+        ok(reply(await platform.closeConversation(mailed.id)));
         // A member's conversation reads none of them, and another workspace's host or forward is not found.
         const clerkChat = await chat(clerk, shop);
         error(await recheck(clerkChat), 404);
         error(await resend(clerkChat), 404);
         error(await recheck(id, theirHost), 404);
         error(await resend(id, theirForward), 404);
-        for (const done of [id, clerkChat]) ok(reply(await platform.closeConversation(done)));
+        for (const done of [id, ownerChat, clerkChat]) ok(reply(await platform.closeConversation(done)));
       });
     });
   });
@@ -26467,14 +26487,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const owner = (await db.query("SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'owner' ORDER BY created_at LIMIT 1", [wid])).rows[0].user_id as string;
       const conv = `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('')}`;
       await db.query(`INSERT INTO support_conversations(id, channel, user_id, verification, mode, workspace_id) VALUES ($1, 'chat', $2, 'handoff', 'member', $3)`, [conv, owner, wid]);
-      const team = (await db.query(`SELECT id, proof_hash FROM mailbox_webhooks WHERE workspace_id = $1 AND key = 'team'`, [wid])).rows[0];
+      const team = (await db.query(`SELECT id, proof_hash, encrypted_target, request_from FROM mailbox_webhooks WHERE workspace_id = $1 AND key = 'team'`, [wid])).rows[0];
       const confirmations = async () => (await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id = $1 AND subject = $2', [wid, `Confirm forwarding from ${box.address}`])).rows[0].n as number;
-      const sent = await confirmations(), resend = () => platform.request(conv, 'POST', `/v1/support/receiving/forwards/${team.id}/resend?workspaceId=${wid}`);
-      const resent = await resend();
+      const sent = await confirmations(), resend = (body?: Json) => platform.request(conv, 'POST', `/v1/support/receiving/forwards/${team.id}/resend?workspaceId=${wid}`, body);
+      // The resend names the forward and nothing else: an address, a destination or a choice in its body is ignored.
+      const resent = await resend({ to: 'someone@elsewhere.example', destination: 'someone@elsewhere.example', address: 'someone@elsewhere.example', from: `nobody@${name}`, choice: 'allow', verified: true });
       assert.equal(resent.status, 200, JSON.stringify(resent.body));
       assert.deepEqual([(resent.body as Json).status, (resent.body as Json).name, (resent.body as Json).recipientDomain], ['pending', 'team', 'outside.example']);
       assert.notEqual((await db.query('SELECT proof_hash FROM mailbox_webhooks WHERE id = $1', [team.id])).rows[0].proof_hash, team.proof_hash, 'A new link, which replaces the earlier one.');
       assert.equal(await confirmations(), sent + 1, 'One more confirmation email, from the same address.');
+      // It went to the forward's registered recipient only, from its registered sender; the forward is still unconfirmed and
+      // its destination unchanged: the resend can't confirm, decline, retarget or point the link anywhere else.
+      const { decrypt } = await import('./src/operations.js');
+      const { rows: [newest] } = await db.query('SELECT to_addresses, from_address FROM sending_emails WHERE workspace_id = $1 AND subject = $2 ORDER BY created_at DESC, id DESC LIMIT 1', [wid, `Confirm forwarding from ${box.address}`]);
+      assert.deepEqual([newest.to_addresses, newest.from_address], [['team@outside.example'], box.address]);
+      const { rows: [after] } = await db.query('SELECT verified, declined_at, encrypted_target, request_from FROM mailbox_webhooks WHERE id = $1', [team.id]);
+      assert.deepEqual([after.verified, after.declined_at, after.request_from, await decrypt(runtime, after.encrypted_target, `${wid}:endpoint:${team.id}`)], [false, null, team.request_from, 'team@outside.example']);
+      assert.equal(after.encrypted_target, team.encrypted_target);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id = $1 AND to_addresses::text LIKE '%elsewhere.example%'", [wid])).rows[0].n, 0);
+      // Confirming or declining a forward is the recipient's own link, which no conversation can call.
+      for (const [method, path] of [['GET', '/v1/forwarding/confirm/fwd_x'], ['POST', '/v1/forwarding/confirm/fwd_x']] as const) {
+        const refused = await platform.request(conv, method, path, method === 'POST' ? { choice: 'allow' } : undefined);
+        assert.deepEqual([refused.status, (refused.body as Json).error?.message], [404, 'The support platform cannot call this route for a conversation.'], path);
+      }
       const again = await resend();
       assert.deepEqual([again.status, (again.body as Json).error?.code], [429, 'SUPPORT_ACTION_TOO_SOON']);
       assert.equal(await confirmations(), sent + 1, 'Not twice in 10 minutes.');

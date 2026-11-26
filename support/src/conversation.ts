@@ -1281,6 +1281,16 @@ export class SupportConversation extends DurableObject<Env> {
       if (!this.manager(meta)) throw new ToolFailure(ROLE_REFUSED);
       return workspace;
     };
+    /**
+     * The same thing two ways in one turn: a card the customer confirms to pause their campaign (propose_action
+     * pause_campaign) and a proposal asking the team to pause the workspace's sending (propose_to_staff pause_sending) both
+     * stop sending in the chat's one workspace. Whichever comes second in a turn is refused before it reaches Nightmail.
+     */
+    let pausing: 'card' | 'staff' | null = null;
+    const PAUSE_TWICE = {
+      card: 'Refused: you already asked the team to pause this workspace’s sending in this answer, so don’t also offer a card to pause a campaign. Tell the customer you asked the team.',
+      staff: 'Refused: you already offered the customer a card to pause their campaign in this answer, so don’t also ask the team to pause the workspace’s sending. Let them confirm the card first; ask the team in a later answer only if it isn’t enough.',
+    } as const;
     /** Nightmail's refusal of a change, for the model; a refused stamp stops the turn. */
     const refusedChange = (reply: PlatformReply<unknown>, notFound: string): never => {
       const code = codeOf(reply.body);
@@ -1381,6 +1391,7 @@ export class SupportConversation extends DurableObject<Env> {
       // person's there, writes what they confirm, and runs it only on their own signed-in Confirm. Nothing here, and
       // nothing the customer types, confirms it. The model hears only the kind's fixed title, the status and the ID.
       propose: async (proposal: ActionProposal) => {
+        if (proposal.kind === 'pause_campaign' && pausing === 'staff') throw new ToolFailure(PAUSE_TWICE.card);
         const workspace = await mayChange();
         if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);
         const reply = await this.stamped<SupportAction>('POST', `/v1/support/actions?workspaceId=${encodeURIComponent(workspace)}`, proposal);
@@ -1391,6 +1402,7 @@ export class SupportConversation extends DurableObject<Env> {
           throw new ToolFailure('Couldn’t prepare that change just now. Tell the customer which dashboard action does it instead.');
         }
         this.sql.exec('INSERT INTO _support_actions (id, kind, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING', action.id, action.kind, Date.now());
+        if (action.kind === 'pause_campaign') pausing = 'card';
         log('info', { event: 'support', code: 'ACTION_PROPOSED', kind: action.kind, created: reply.status === 201 });
         // The card shows Nightmail's sentence (and reads it again from Nightmail); the model never gets it.
         this.broadcast({ type: 'action.request', actionId: action.id, kind: action.kind, summary: action.summary.slice(0, 1000) });
@@ -1400,11 +1412,14 @@ export class SupportConversation extends DurableObject<Env> {
       // own workspace, owners and admins only. Nightmail checks the target is the person's, takes the target's turn, records
       // it, and runs nothing risky: a proposal waits for an operator's approval.
       act: async (path: string, body: Record<string, unknown> | undefined, notFound: string) => {
+        const staffPause = path === '/v1/support/approvals' && body?.kind === 'pause_sending';
+        if (staffPause && pausing === 'card') throw new ToolFailure(PAUSE_TWICE.staff);
         const workspace = await mayChange();
         if (this.meta()!.status === 'closed') throw new ToolFailure(NO_CHANGES);
         const reply = await this.stamped('POST', `${path}?workspaceId=${encodeURIComponent(workspace)}`, body);
-        if (reply.status === 200 || reply.status === 201) return reply.body;
-        return refusedChange(reply, notFound);
+        if (reply.status !== 200 && reply.status !== 201) return refusedChange(reply, notFound);
+        if (staffPause) pausing = 'staff';
+        return reply.body;
       },
       // Public text bundled with this Worker: no stamp, so a general email turn may search it too.
       searchDocs: (query: string) => searchDocs(query),

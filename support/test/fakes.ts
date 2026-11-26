@@ -228,7 +228,8 @@ export class SupportPlatform extends WorkerEntrypoint {
       if (!managed(allowed[0])) return refuse(404, 'NOT_FOUND');
       const p = { id: 'apr_' + 'a'.repeat(22) + String(proposals.length).padStart(4, '0'), conversationId: c.id, workspaceId: allowed[0].id, kind: body.kind, fields: Object.fromEntries(keys.map(k => [k, body[k]])), reason: body.reason };
       proposals.push(p);
-      return ok({ id: p.id, kind: p.kind, label: 'Set the daily sending limit', summary: 'Daily limit ' + Number(body.daily ?? 0).toLocaleString('en-US') + ' for workspace ' + p.workspaceId, state: 'proposed',
+      const label = { raise_daily_limit: 'Set the daily sending limit', pause_sending: 'Pause the workspace’s sending' }[p.kind] ?? 'A change for staff';
+      return ok({ id: p.id, kind: p.kind, label, summary: (p.kind === 'raise_daily_limit' ? 'Daily limit ' + Number(body.daily ?? 0).toLocaleString('en-US') + ' for workspace ' : 'Workspace ') + p.workspaceId, state: 'proposed',
         expiresAt: new Date(Date.now() + 72 * 3600000).toISOString() }, 201);
     }
     const recheck = url.pathname.match(/^\\/v1\\/support\\/domains\\/([A-Za-z0-9_-]{1,120})\\/verify$/);
@@ -658,6 +659,15 @@ export async function fakeGateway(request: Request): Promise<Response> {
   if (said.includes('SMTP probe')) return answered ? say(body, ['Your mail app was refused 3 times in the last hour: it sent from an address your SMTP login may not use.']) : toolUse('toolu_smtp', 'smtp_refusals', {});
   // A limit the customer needs sooner: the model first reaches for a change it has no tool for (pause_sending), then asks
   // the team with propose_to_staff, then answers.
+  // The same thing two ways in one turn: a card pausing the campaign and asking the team to pause the workspace's sending,
+  // in either order. The second is refused before Nightmail; then the model answers.
+  for (const [probe, order] of [['Pause probe', ['propose_action', 'propose_to_staff']], ['Staff pause probe', ['propose_to_staff', 'propose_action']]] as const) {
+    if (!said.includes(probe)) continue;
+    const next = order.find(name => !used.includes(name));
+    if (!next) return say(body, ['I’ve set that up: it needs one more step.']);
+    return next === 'propose_action' ? toolUse(`toolu_pause_card_${probe.length}`, 'propose_action', { kind: 'pause_campaign', campaignId: 'cmp_1_acme' })
+      : toolUse(`toolu_pause_staff_${probe.length}`, 'propose_to_staff', { kind: 'pause_sending', reason: 'Their campaign is mailing a list that complained; they want it stopped now.' });
+  }
   if (said.includes('Limit probe')) {
     if (!used.includes('pause_sending')) return toolUse('toolu_limit_direct', 'pause_sending', { workspaceId: 'ws_acme' });
     if (!used.includes('propose_to_staff')) return toolUse('toolu_limit_staff', 'propose_to_staff', { kind: 'raise_daily_limit', daily: 50000, reason: 'Launch next week; standing is ok and the evaluation finished.' });

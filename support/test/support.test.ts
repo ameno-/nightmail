@@ -865,7 +865,43 @@ describe('support Worker', () => {
     paths.length = 0;
     await TOOLS.find(t => t.name === 'search_docs')!.execute({ query: 'catch-all', ...ids, ...extra, workspaceId: 'ws_other' }, host);
     assert.deepEqual(paths, []);
+    // The safe actions and proposals to staff send only what each declares. A forward's resend names the forward by its ID
+    // and nothing else: an address, a destination or a choice the model adds never reaches Nightmail, and an address
+    // can't stand in for the ID. (Nightmail's route takes no body either: the acceptance test "forwards: …".)
+    const acts: [string, unknown][] = [];
+    host.act = async (path, body) => { acts.push([path, body ?? null]); return { label: 'Set the daily sending limit', summary: 'Daily limit 5,000 for workspace ws_acme', state: 'proposed' }; };
+    const junk = { to: 'someone@else.test', destination: 'someone@else.test', address: 'someone@else.test', recipient: 'someone@else.test', from: 'me@acme.test', choice: 'allow', decision: 'confirm', confirm: true, verified: true };
+    const tool = (name: string) => TOOLS.find(t => t.name === name)!;
+    await tool('resend_forward_link').execute({ forwardId: 'con_1_acme', ...junk, ...extra, workspaceId: 'ws_other' }, host);
+    await tool('recheck_receiving_host').execute({ hostId: 'mdom_1_acme', ...junk, ...extra }, host);
+    await tool('recheck_domain').execute({ domainId: 'dom_1', ...junk, ...extra }, host);
+    await tool('propose_to_staff').execute({ kind: 'raise_daily_limit', daily: 5000, reason: 'A launch next week.', ...junk, ...extra, workspaceId: 'ws_other' }, host);
+    assert.deepEqual(acts, [['/v1/support/receiving/forwards/con_1_acme/resend', null], ['/v1/support/receiving/hosts/mdom_1_acme/recheck', null], ['/v1/support/domains/dom_1/verify', null],
+      ['/v1/support/approvals', { kind: 'raise_daily_limit', reason: 'A launch next week.', daily: 5000 }]]);
+    for (const forwardId of ['someone@else.test', 'con_1/../../confirm', 'con_1?to=someone@else.test']) await assert.rejects(tool('resend_forward_link').execute({ forwardId }, host), /not valid/);
+    await assert.rejects(tool('propose_to_staff').execute({ kind: 'confirm_forward', reason: 'Confirm it for them.' }, host), /Pick kind/);
+    assert.equal(acts.length, 4);
+    // No tool that changes anything takes an address, a destination or a URL, so none can point mail or a link elsewhere;
+    // and none is named for confirming or declining (the panel's cards are the customer's own).
+    for (const t of TOOLS.filter(t => ['propose_action', 'choose_workspace', 'request_content_access', 'add_note', 'file_ticket', 'reply', ...SAFE].includes(t.name))) {
+      for (const key of Object.keys(t.params)) assert.ok(!/^(?:to|cc|bcc|from|address(?:es)?|emails?|destination|recipients?|url|link|target|choice|decision)$/i.test(key), `${t.name} takes ${key}`);
+      assert.ok(!/confirm|decline/.test(t.name), t.name);
+    }
   });
+
+  test('a campaign pause card and asking the team to pause the workspace’s sending are never both offered in one turn: whichever comes second is refused before Nightmail, in either order', async () => {
+    const cases = [['Pause probe', 'propose_to_staff', /already offered the customer a card to pause their campaign/, '/v1/support/actions?workspaceId=ws_acme'],
+      ['Staff pause probe', 'propose_action', /already asked the team to pause this workspace’s sending/, '/v1/support/approvals?workspaceId=ws_acme']] as const;
+    for (const [i, [probe, second, refusal, first]] of cases.entries()) {
+      const chat = await chatAs(`usr_pause${i}`, 'owner'), from = (await fakeCalls()).length, before = recorded.length;
+      await turn(chat, `${probe}: they want the sending stopped.`);
+      const asked = recorded.slice(before).filter(r => about(r, probe)), blocks = (asked.at(-1)!.body.messages as any[]).flatMap(blocksOf);
+      const use = blocks.find((b: any) => b.type === 'tool_use' && b.name === second), result = use && blocks.find((b: any) => b.type === 'tool_result' && b.tool_use_id === use.id);
+      assert.ok(result && refusal.test(JSON.stringify(result.content)), `${probe}: ${JSON.stringify(result)}`);
+      assert.deepEqual((await stampedCalls(chat.id, from)).filter(c => c[3] !== 'GET').map(c => c[1]), [first], `${probe}: only the first reached Nightmail`);
+      chat.ws.close();
+    }
+  }, 180_000);
 
   test('the output gate replaces a leaking answer and files a ticket', async () => {
     const started = await post('/chat/start', { handoff: handoff() });
