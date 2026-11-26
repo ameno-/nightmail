@@ -31,7 +31,7 @@ const add = (name: string, title: string, notice: Notice) => {
 };
 
 const row = (r: Partial<StaffRow>): StaffRow => ({
-  id: 'conv_7qk2m4xw9tbp3n6hr5vjc8sdfa', channel: 'chat', mode: 'member', verification: 'handoff', status: 'ticketed', subject: null, pending_address: null,
+  id: 'conv_7qk2m4xw9tbp3n6hr5vjc8sdfa', channel: 'chat', filed_by: null, mode: 'member', verification: 'handoff', status: 'ticketed', subject: null, pending_address: null,
   user_id: 'usr_ada', user_name: 'Ada Lovelace', user_email: 'ada@acme.example', workspace_id: 'ws_acme', workspace_name: 'Acme Prod',
   ticket_id: 'tkt_m3q7xk2vd9ph4tnr', ticket_type: 'staff', ticket_severity: 'P2', ticket_resolved_at: null, agent_state: 'active', paused_by: null, paused_by_name: null, paused_at: null,
   messages: 3, turns: 1, cost_usd: 0.04, blocked_work: 0, created_at: minutesAgo(40), last_message_at: minutesAgo(38), closed_at: null, activity_at: minutesAgo(38),
