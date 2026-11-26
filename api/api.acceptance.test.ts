@@ -10376,6 +10376,14 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.ok(asked.html.includes('pay-now.\u200bexample') && asked.html.includes('refunds.\u200bexample') && !asked.html.includes('refunds.example'), 'The agent’s words are never a link.');
           await sent(asked);
           await later();
+          // Cut short, a link is left out rather than cut inside its host (which would name the wrong one).
+          const cut = await stranger();
+          ok(reply(await platform.mirrorMessages(cut, [{ id: msg(), author: 'customer', text: 'Help.', at: at(30) }])));
+          ok(reply(await platform.mirrorState(cut, { ticket: { id: ticketId(), type: 'account', severity: 'P3', brief: { title: 'Help', summary: `${'word '.repeat(40)}https://nightmail.dev.evil.example/reset`, ask: 'Help.', recommendation: `${'/'.repeat(205)}https://nightmail.dev.evil.example/x` } } })));
+          const [clipped] = await due();
+          assert.ok(clipped.text.includes('word word…') && !clipped.text.includes('links to nightmail') && !clipped.html.includes('nightmail.\u200bd'), clipped.text);
+          await sent(clipped);
+          await later();
 
           // Stuck work: the email's button is an approve link, and opening it changes nothing.
           const stuck = await chat(member);
