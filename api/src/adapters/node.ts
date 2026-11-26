@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import dns from 'node:dns';
 import { request } from 'node:https';
 import { isIPv4, type LookupFunction } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { loadConfig } from '../config.js';
 import { ApiError, log } from '../core.js';
 import type { Runtime, WebhookFetch } from '../core.js';
@@ -42,6 +43,34 @@ export const nodeWebhookFetch: WebhookFetch = (url, init) => new Promise((resolv
   req.on('error', reject);
   req.end(init.body);
 });
+// A client whose upload is refused for its size may still be sending the body. Closing the socket with those bytes unread
+// makes the kernel reset the connection, and a client that writes again before it reads gets a broken pipe instead of the
+// 413 (RFC 9112 section 9.6). Close in stages instead: send the answer and a FIN, read and discard at most 64 KiB more,
+// then stop reading, and close once the client hangs up or 2 seconds after the answer.
+const REFUSED_BODY_DISCARD_BYTES = 64 * 1024, REFUSED_BODY_LINGER_MS = 2000;
+export function closeAfterRefusal(socket: Duplex & { destroySoon(): void; _paused?: boolean }) {
+  let closing = false;
+  // Node calls this once the answer is written to a socket it won't reuse (Hono's adapter may call it again later).
+  socket.destroySoon = () => {
+    if (closing || socket.destroyed) return;
+    closing = true;
+    const timer = setTimeout(() => socket.destroy(), REFUSED_BODY_LINGER_MS);
+    timer.unref();
+    socket.once('close', () => clearTimeout(timer));
+    socket.once('end', () => socket.destroy());
+    let left = REFUSED_BODY_DISCARD_BYTES;
+    // The answer is finished. Only the discard listener may consume further input, never Node's HTTP parser.
+    socket.removeAllListeners('data');
+    socket.on('data', (chunk: Buffer) => {
+      if ((left -= chunk.length) > 0) return;
+      // The unfinished IncomingMessage can still ask to resume its socket during adapter cleanup.
+      socket._paused = true;
+      socket.pause();
+    });
+    socket.end();
+  };
+}
+
 export function postgresConnection(connectionString: string | undefined) {
   if (!connectionString) throw new ApiError(503, 'CONFIG_INVALID', 'DATABASE_URL is required.');
   let url: URL; try { url = new URL(connectionString); } catch { throw new ApiError(503, 'CONFIG_INVALID', 'DATABASE_URL must be a PostgreSQL URL.'); }
