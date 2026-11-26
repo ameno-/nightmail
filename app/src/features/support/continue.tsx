@@ -31,7 +31,7 @@ import './continue.css'
 // while it loads, and kept empty where there is none, or saying what the two choices do), one button of one width and the
 // second choice's place beside it (or under it, on a phone; kept empty where it isn't offered), so the dialog never moves.
 
-type State = 'loading' | 'ready' | 'claimed' | 'other' | 'limit' | 'signin' | 'mailbox' | 'sent' | 'links' | 'link' | 'answered' | 'already' | 'busy' | 'invalid' | 'failed'
+type State = 'loading' | 'ready' | 'claimed' | 'other' | 'limit' | 'signin' | 'mailbox' | 'sent' | 'links' | 'link' | 'answered' | 'went' | 'already' | 'busy' | 'invalid' | 'failed'
 const CONVERSATION = /^conv_[a-z2-7]{26}$/, MESSAGE = /^msg_[0-9a-f]{32}$/, LINK = /^[\w-]{24}\.[\w-]{43}$/
 /** more: in the email's place, what the two choices do. instead: the second choice, Answer me by email instead, is offered. */
 type Copy = { title: string; text: string | ((address: string) => string); more?: string; action: string; instead?: true }
@@ -49,6 +49,7 @@ const COPY: Record<State, Copy> = {
   links: { title: 'Too many sign-in links', text: 'Use a link already in your inbox, or try again later.', action: 'Done' },
   link: { title: 'Sign in to continue', text: 'Choose the account for the address you wrote from. The link works once.', action: 'Sign in' },
   answered: { title: 'You’ll be answered by email', text: address => `We’ll answer by email at ${address}.`, action: 'Done' },
+  went: { title: 'Answered by email', text: address => `We’ve answered by email at ${address}.`, action: 'Done' },
   already: { title: 'Already answered', text: address => `We’ve already answered by email at ${address}.`, action: 'Done' },
   busy: { title: 'Too many requests', text: 'Try again in a few minutes.', action: 'Done' },
   invalid: { title: 'This link doesn’t work', text: 'Open the link from the support email again.', action: 'Done' },
@@ -117,7 +118,7 @@ export function SupportContinuePage() {
   // The second choice: a general answer by email, to the conversation's own address, without a sign-in.
   async function answer() {
     setAnswering(true)
-    try { const answered = await supportApi.answerByEmail(id, messageId); setAddress(answered.address); setState(answered.outcome === 'already_answered' ? 'already' : 'answered') }
+    try { const answered = await supportApi.answerByEmail(id, messageId); setAddress(answered.address); setState(answered.outcome === 'already_answered' ? 'already' : answered.outcome === 'answered' ? 'went' : 'answered') }
     catch (error) { setState(error instanceof ApiError && error.status === 429 ? 'busy' : error instanceof ApiError && error.status === 404 ? 'invalid' : 'failed') }
     finally { setAnswering(false) }
   }
