@@ -36,7 +36,7 @@ By creating an account, joining a workspace or using the Service, you accept the
 - **Sign-in.** You sign in with an Anomaly account (account.anoma.ly). We may require a particular sign-in method, such as Google. Keep your sign-in secure. You're responsible for activity under your account.
 - **Workspaces.** The person who creates a workspace is its first owner. Owners decide who joins and in which role, and can transfer ownership. Each workspace is billed on its own.
 - **Credentials.** API keys, MCP grants, agent tokens, inbox keys and app passwords act for the workspace that issued them. Keep them secret and revoke any that leak. **You're responsible for everything your credentials and Agents do**, including mail an AI agent sends.
-- **Accurate information.** Keep your contact and billing details current. We send notices about billing, sending limits and these Terms to workspace owners and admins.
+- **Accurate information.** Keep your contact and billing details current. We send notices about billing, sending limits and these Terms to workspace owners and admins. We also email customers product news and service status. You can unsubscribe from those at any time; notices about billing, sending limits and these Terms continue.
 - **Several workspaces.** You may create more than one workspace. You may not use extra workspaces or accounts to get more free usage or higher sending limits (see the [Acceptable Use Policy](/legal/acceptable-use#no-working-around-limits-or-screening)). Sending limits are shared between workspaces created by the same account.
 
 ## 4. The Service
