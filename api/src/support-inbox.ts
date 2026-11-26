@@ -213,8 +213,9 @@ export const TICKETS_APART = ['bug', 'billing', 'abuse_report', 'privacy', 'lega
  * - apart: those with a ticket a person handles by design (TICKETS_APART);
  * - answerable: the rest;
  * - without_human: of the answerable, those that ended (closed, marked done, or quiet for 24 hours after a sent agent
- *   answer) with no staff reply, no ticket Nightmail opened for staff (type staff, now or on the timeline), no held
- *   answer, no failed send and never "no reply sent" (a customer message nothing reached within NO_REPLY_AFTER).
+ *   answer) with no staff reply, no ticket for a person (one the agent filed, other than a feature request it logged,
+ *   or one Nightmail opened for staff: type staff, now or on the timeline), no held answer, no failed send and never
+ *   "no reply sent" (a customer message nothing reached within NO_REPLY_AFTER).
  * Nothing here says an answer was right: only that no person had to step in.
  */
 export const supportWeek = (cap: number) => sql`(SELECT json_build_object('answerable',count(*) FILTER (WHERE x.n <= ${cap} AND NOT x.apart),
@@ -222,7 +223,7 @@ export const supportWeek = (cap: number) => sql`(SELECT json_build_object('answe
   FROM (SELECT row_number() OVER (ORDER BY c.created_at DESC) AS n, coalesce(c.ticket_type = ANY(${sql.param([...TICKETS_APART])}::text[]), false) AS apart,
       c.status = 'closed' OR c.done_at IS NOT NULL OR coalesce(last.author = 'agent' AND last.kind IS DISTINCT FROM 'held' AND last.delivery IS DISTINCT FROM 'held'
         AND last.delivery IS DISTINCT FROM 'failed' AND last.created_at <= now() - interval '24 hours', false) AS ended,
-      c.ticket_type IS NOT DISTINCT FROM 'staff'
+      (c.ticket_id IS NOT NULL AND c.ticket_type IS DISTINCT FROM 'feature_request')
         OR EXISTS (SELECT FROM support_events e WHERE e.conversation_id = c.id AND e.kind = 'ticket' AND e.details->>'type' = 'staff')
         OR EXISTS (SELECT FROM support_messages m WHERE m.conversation_id = c.id AND ((m.author = 'staff' AND m.kind IS DISTINCT FROM 'note')
           OR (m.author = 'agent' AND (m.kind = 'held' OR m.delivery = 'held')) OR m.delivery = 'failed'))

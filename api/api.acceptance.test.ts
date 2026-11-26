@@ -10524,6 +10524,9 @@ describe('Hosted MCP OAuth and tools', () => {
           await close(await started(30, [{ author: 'agent', kind: 'held', text: 'Thanks, we are on it.', delivery: 'held', reason: 'gate', at: at(29) }]));
           await started(30 * hour, [answer(29 * hour)]);
           await started(30);
+          // A ticket the agent filed for a person counts as a person stepping in; a feature request it only logged doesn't.
+          ok(reply(await platform.mirrorState(await started(30 * hour, [answer(30 * hour - 1)]), { ticket: { id: ticketId(), type: 'account', severity: 'P3' } })));
+          ok(reply(await platform.mirrorState(await started(30 * hour, [answer(30 * hour - 1)]), { ticket: { id: ticketId(), type: 'feature_request', severity: 'P3' } })));
           // Counted apart: a bug ticket and a billing ticket, however the conversation went.
           for (const type of ['bug', 'billing']) ok(reply(await platform.mirrorState(await started(30 * hour, [answer(30 * hour - 1)]), { ticket: { id: ticketId(), type, severity: 'P2' } })));
           // Not counted at all: agent feedback (nobody to answer) and a conversation older than 7 days.
@@ -10531,7 +10534,7 @@ describe('Hosted MCP OAuth and tools', () => {
           await started(8 * day, [answer(8 * day - 1)]);
           const after = await week();
           assert.deepEqual({ answerable: after.answerable - before.answerable, withoutHuman: after.withoutHuman - before.withoutHuman, apart: after.apart - before.apart, noReply: after.noReply - before.noReply, atLeast: after.atLeast },
-            { answerable: 7, withoutHuman: 2, apart: 2, noReply: 2, atLeast: false }, 'Answered without a human: 2 of 7; 2 counted apart; no reply sent to the customer still waiting, nor to the one whose answer was held.');
+            { answerable: 9, withoutHuman: 3, apart: 2, noReply: 2, atLeast: false }, 'Answered without a human: 3 of 9; 2 counted apart; no reply sent to the customer still waiting, nor to the one whose answer was held.');
         });
       } finally { globalThis.fetch = previous; }
     });
