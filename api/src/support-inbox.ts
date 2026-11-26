@@ -629,9 +629,11 @@ export function registerSupportInbox(app: App) {
   const DraftParams = ConversationParam.extend({ messageId: z.string().regex(MESSAGE_ID) });
   const FRESH_REPLY: Record<string, string> = { access: 'This person’s access changed after the agent wrote this answer', earlier: 'An earlier version of the agent wrote this answer' };
   async function heldDraft(tx: DbExecutor, id: string, messageId: string) {
-    const { rows: [draft] } = await tx.execute<{ text: string; held: boolean; outcome: string | null; reason: string | null }>(sql`SELECT text, author = 'agent' AND delivery = 'held' AS held,
-        draft_outcome AS outcome, held_reason AS reason
-      FROM support_messages WHERE id = ${messageId} AND conversation_id = ${id} FOR UPDATE`);
+    // answered: a reply written after it reached the customer (a staff reply, or an agent answer not held or failed).
+    const { rows: [draft] } = await tx.execute<{ text: string; held: boolean; outcome: string | null; reason: string | null; answered: boolean }>(sql`SELECT m.text, m.author = 'agent' AND m.delivery = 'held' AS held,
+        m.draft_outcome AS outcome, m.held_reason AS reason, EXISTS (SELECT 1 FROM support_messages o WHERE o.conversation_id = m.conversation_id AND o.seq > m.seq AND o.kind IS DISTINCT FROM 'note'
+          AND ((o.author = 'staff' AND o.delivery IN ('queued','sent')) OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed'))) AS answered
+      FROM support_messages m WHERE m.id = ${messageId} AND m.conversation_id = ${id} FOR UPDATE OF m`);
     if (!draft?.held) notFound('Held answer');
     if (draft!.outcome) throw new ApiError(409, 'SUPPORT_DRAFT_DECIDED', 'This held answer was already sent or discarded.');
     return draft!;
@@ -646,6 +648,9 @@ export function registerSupportInbox(app: App) {
       const fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
       if (fresh && (body.text === undefined || body.text === written || body.text === asWritten))
         throw new ApiError(409, 'SUPPORT_DRAFT_FRESH_REPLY', `${fresh}, so it can’t be sent. Write a fresh reply.`, 'text');
+      // As written, it would answer an earlier moment than a reply the customer already has: staff edit it, or discard it.
+      if (draft.answered && (body.text === undefined || body.text === written || body.text === asWritten))
+        throw new ApiError(409, 'SUPPORT_DRAFT_STALE', 'A newer reply already reached the customer, so this held answer can’t be sent as written. Edit it, or discard it.', 'text');
       const text = body.text ?? asWritten;
       if (text.length > 8000) throw new ApiError(422, 'VALIDATION_FAILED', 'This answer is longer than a reply can be: edit it before sending.', 'text');
       const queued = await queueReply(tx, operator, conversation, id, text);

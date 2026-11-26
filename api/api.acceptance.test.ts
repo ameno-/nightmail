@@ -10255,13 +10255,12 @@ describe('Hosted MCP OAuth and tools', () => {
         await t.test('12 held answers: staff send one as the agent wrote it (plain text by email, as written in chat) or edited, as their own queued reply, or discard it; one held for shrunk access or written by an earlier build is never sent, only replaced by a fresh reply; each is decided once, on the trail', async () => {
           ok(reply(await platform.pullOutbox()));
           const conv = await stranger(), asIs = msg(), toEdit = msg(), toDrop = msg(), access = msg(), earlier = msg(), sentAnswer = msg(), question = msg();
-          ok(reply(await platform.mirrorMessages(conv, [{ id: question, author: 'customer', text: 'Why was my email held?' },
+          ok(reply(await platform.mirrorMessages(conv, [{ id: sentAnswer, author: 'agent', kind: 'reply', text: 'Hello.', delivery: 'sent' }, { id: question, author: 'customer', text: 'Why was my email held?' },
             { id: asIs, author: 'agent', kind: 'held', text: 'It was **held** for review; open `Logs` to see it released.', delivery: 'held', reason: 'paused' },
             { id: toEdit, author: 'agent', kind: 'held', text: 'It was held.', delivery: 'held', reason: 'gate' },
             { id: toDrop, author: 'agent', kind: 'held', text: 'Maybe.', delivery: 'held', reason: 'closed' },
             { id: access, author: 'agent', kind: 'held', text: 'Your account **Acme** is suspended.', delivery: 'held', reason: 'access' },
-            { id: earlier, author: 'agent', kind: 'held', text: 'Your 61 bounced emails were to old lists.', delivery: 'held', reason: 'earlier' },
-            { id: sentAnswer, author: 'agent', kind: 'reply', text: 'Hello.', delivery: 'sent' }])));
+            { id: earlier, author: 'agent', kind: 'held', text: 'Your 61 bounced emails were to old lists.', delivery: 'held', reason: 'earlier' }])));
           const drafts = `${inbox}/${conv}/drafts`;
           error(await send('POST', `${drafts}/${asIs}/send`, keyed(reader)), 403, 'OPERATOR_REQUIRED');
           error(await send('POST', `${drafts}/${asIs}/send`, session(operator)), 422);
@@ -10272,6 +10271,8 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual(ok(await send('POST', `${drafts}/${asIs}/send`, keyed(operator, key)), 201), sent, 'The same key answers the same reply.');
           error(await send('POST', `${drafts}/${asIs}/send`, keyed(operator)), 409, 'SUPPORT_DRAFT_DECIDED');
           error(await send('POST', `${drafts}/${asIs}/discard`, keyed(operator)), 409, 'SUPPORT_DRAFT_DECIDED');
+          // A reply reached the customer after it was written: not as written (it answers an earlier moment), only edited.
+          for (const body of [undefined, { text: 'It was held.' }]) error(await send('POST', `${drafts}/${toEdit}/send`, keyed(operator), body as Json | undefined), 409, 'SUPPORT_DRAFT_STALE');
           const edited = ok(await send('POST', `${drafts}/${toEdit}/send`, keyed(operator), { text: 'It was held by our checks; we released it.' }), 201);
           const dropped = ok(await send('POST', `${drafts}/${toDrop}/discard`, keyed(operator)));
           assert.deepEqual([dropped.draft.outcome, dropped.draft.by.userId, dropped.draft.replyId, dropped.delivery], ['discarded', operator.userId, null, 'held']);
