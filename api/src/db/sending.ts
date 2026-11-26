@@ -50,6 +50,8 @@ export type EmailSnapshot = {
   mailApp?: true;
   /** An ordinary send whose In-Reply-To names a stored message its sender could read: that message's thread (thread-view.ts joinReplies). */
   threadId?: string;
+  /** A marketing send's topic (src/topics.ts): who opted out of it is skipped, and its unsubscribe link is about it alone. */
+  topicId?: string;
 };
 export type CampaignDraft = {
   regionPinned?: boolean;
@@ -65,6 +67,8 @@ export type CampaignDraft = {
   attachments: string[]; tracking: boolean; unsubscribePageUrl?: string;
   /** A required notice (src/sending.ts): to everyone in the audience but the suppressed, without an unsubscribe link. */
   requiredNotice?: boolean;
+  /** The topic the campaign is about (src/topics.ts); never on a required notice. */
+  topicId?: string;
   audience: { listId?: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };
   defaults: Record<string, string | number | boolean | null>;
 };

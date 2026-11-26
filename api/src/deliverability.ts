@@ -211,9 +211,11 @@ export async function deliveryMetrics(db: DbExecutor, wid: string, q: MetricsQue
   const unit = q.granularity === 'hour' ? 'hour' : 'day';
   const { rows: extras } = await db.execute<{ bucket: string; unsubscribed: number; screened: number; rejected: number }>(sql`SELECT bucket, sum(unsubscribed)::int AS unsubscribed,
       sum(screened)::int AS screened, sum(rejected)::int AS rejected FROM (
-      SELECT ${bucketOf(q.granularity, sql`occurred_at`)} AS bucket, 1 AS unsubscribed, 0 AS screened, 0 AS rejected FROM audience_consent_audit
-        WHERE workspace_id = ${wid} AND status = 'unsubscribed' AND source IN ('footer-confirm', 'rfc8058-post', 'ses-subscription')
-          AND occurred_at >= ${q.since}::timestamptz AND occurred_at < ${q.until}::timestamptz
+      -- People who unsubscribed in each bucket, from a topic or from everything (src/topics.ts), each once.
+      SELECT bucket, count(DISTINCT contact_id)::int AS unsubscribed, 0 AS screened, 0 AS rejected FROM (
+        SELECT ${bucketOf(q.granularity, sql`occurred_at`)} AS bucket, contact_id FROM audience_consent_audit
+        WHERE workspace_id = ${wid} AND status = 'unsubscribed' AND source IN ('footer-confirm', 'rfc8058-post', 'ses-subscription', 'preferences')
+          AND occurred_at >= ${q.since}::timestamptz AND occurred_at < ${q.until}::timestamptz) u GROUP BY bucket
       UNION ALL SELECT ${bucketOf(q.granularity, sql`hour`)}, 0, screened, rejected FROM hosted_screen_hourly
         WHERE workspace_id = ${wid} AND hour >= date_trunc(${unit}, ${q.since}::timestamptz, 'UTC') AND hour < ${q.until}::timestamptz) x GROUP BY 1 ORDER BY 1`);
 

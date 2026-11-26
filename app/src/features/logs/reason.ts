@@ -36,6 +36,7 @@ const suppressions: Record<string, (on: string) => string> = {
   complaint: on => `The recipient marked an email as spam${on}, so we no longer send to them.`,
   email_validation: () => 'This address looks undeliverable, so it wasn’t sent.',
   unsubscribed: () => 'The recipient unsubscribed, so they don’t get marketing email.',
+  topic_unsubscribed: () => 'The recipient unsubscribed from this email’s topic, so it wasn’t sent.',
   consent_missing: () => 'The recipient hasn’t agreed to marketing email, so it wasn’t sent.',
   contact_deleted: () => 'This contact was deleted, so it wasn’t sent.',
 }

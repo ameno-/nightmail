@@ -1,9 +1,12 @@
+import { useEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router'
-import { useApiDef, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { useNewsletters } from '../newsletters/shared'
 import { composer } from './composer-chunk'
+import { onIdle, warmCampaignEditor } from './composer-content'
 import { campaignEditable, type Campaign } from '../../data/types'
 import { SearchField, Button, DataTable, EmptyState, ErrorState, Pagination, PaginationSkeleton, Select, StatusBadge } from '../../components/ui'
 import { date, number, percent, shortDateTime, time } from '../../lib/format'
@@ -23,8 +26,12 @@ const campaignPath = (campaign: Campaign) => `/campaigns/${encodeURIComponent(ca
 
 export function CampaignsPage() {
   const navigate = useNavigate()
+  const api = useApi()
+  const cache = useQueryClient()
   const warm = usePrefetchQueries()
   const [params, setParams] = useSearchParams()
+  // Warm the composer chunk on idle so both phone taps and quick desktop clicks never wait for the editor bundle.
+  useEffect(() => onIdle(() => { void composer.preload().catch(() => {}) }), [])
   const archived = params.get('archived') === 'true'
   const search = params.get('search') || ''
   const status = !archived && ['draft', 'preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled'].includes(params.get('status') || '') ? params.get('status')! : 'all'
@@ -39,6 +46,15 @@ export function CampaignsPage() {
     return intervals.length ? Math.max(15_000, Math.min(...intervals)) : false
   } })
   const filtered = Boolean(search || status !== 'all')
+  // On page 1 idle, warm the top editable draft (campaign JSON + inline images) so phone taps and zero-hover
+  // clicks open with body text and images already in cache.
+  const idleWarmId = !archived && !filtered && page === 1
+    ? (query.data?.items ?? []).find(row => !row.archivedAt && campaignEditable(row))?.id ?? ''
+    : ''
+  useEffect(() => {
+    if (!idleWarmId) return
+    return onIdle(() => { void warmCampaignEditor(cache, api, idleWarmId) }, 400)
+  }, [idleWarmId, cache, api])
   function filter(key: string, value: string, replace = false) {
     setParams(previous => { const next = new URLSearchParams(previous); value ? next.set(key, value) : next.delete(key); next.delete('page'); return next }, { replace })
   }
@@ -53,14 +69,14 @@ export function CampaignsPage() {
     })
   }
   return <div className="campaigns-page">
-    <CampaignsHeader actions={<>{canAdminister && <Button onClick={() => navigate('/newsletters/new')}>New newsletter</Button>}<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button></>} />
+    <CampaignsHeader actions={<>{canAdminister && <Button onClick={() => navigate('/newsletters/new')}>New newsletter</Button>}<Button variant="primary" onPointerEnter={() => void composer.preload().catch(() => {})} onPointerDown={() => void composer.preload().catch(() => {})} onFocus={() => void composer.preload().catch(() => {})} onClick={() => navigate('/campaigns/new')}>Create campaign</Button></>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search campaigns" placeholder="Search campaigns" value={draft} onChange={event => type(event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
       { value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' },
       { value: 'sending', label: 'Sending' }, { value: 'paused', label: 'Paused' }, { value: 'done', label: 'Done' }, { value: 'failed', label: 'Failed' }, { value: 'canceled', label: 'Canceled' },
       { value: 'archived', label: 'Archived' },
     ]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable className="campaigns-table ui-table--two-line" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={campaignPath} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignPath(row).endsWith('/edit')) void composer.preload().catch(() => {}) }} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
+      <DataTable className="campaigns-table ui-table--two-line" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={campaignPath} onRowIntent={row => { if (campaignPath(row).endsWith('/edit')) void warmCampaignEditor(cache, api, row.id); else void warm([queries.campaign(row.id)]) }} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
         { ...campaignColumns[0], render: row => <div className="campaign-row-name"><span title={row.name}>{row.name}</span>{row.subject.trim() && row.subject.trim() !== row.name.trim() && <span className="muted" title={row.subject}>{row.subject}</span>}</div>, cardRender: row => row.name },
         { ...campaignColumns[1], render: row => <StatusBadge status={campaignDisplayStatus(row)} /> },
         { ...campaignColumns[2], render: row => row.subject.trim() || <span className="muted">No subject</span> },
