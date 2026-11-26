@@ -24,7 +24,8 @@ import { event, itemColumns, itemFrom, triageCandidates, TRIAGE_REASONS, type It
 //
 // Each email is short and readable on a phone, in this order: who and which workspace; what they asked, in their own
 // words (quoted as untrusted text: escaped, links shown with their real host and never made clickable); what the agent
-// checked and found; the one decision, with the agent's recommendation; one link to the conversation. Where the
+// checked and found (for agent feedback, the triage agent's summary, src/feedback-triage.ts, when its note is written
+// before the email); the one decision, with the agent's recommendation; one link to the conversation. Where the
 // decision is a yes or no on something proposed (src/support-approvals.ts), the button opens the conversation with it
 // ready to confirm, and only a signed-in operator's confirm runs it.
 
@@ -37,6 +38,8 @@ export type StaffRow = ItemRow & {
   brief: Brief | null; evidence: { filedBy?: string } | null; staff_thread: string | null; staff_seq: number; staff_reasons: string[]; role: string | null;
   max_seq: number; held_reason: string | null; held_seq: number | null; held_id: string | null; first_words: Words | null; fresh_words: Words[] | null;
   operation: string | null; request_id: string | null; filed_at: string | null; failed_by: 'agent' | 'staff' | null;
+  /** Agent feedback: the triage agent's summary of the report, once its note is written. */
+  triage_summary: string | null;
   /** The agent's newest risky proposal waiting for staff (support-approvals.ts), if any. */
   proposal?: { id: string; kind: string; payload: Record<string, unknown>; reason: string; expires_ms: number } | null;
 };
@@ -214,7 +217,7 @@ export function conversationEmail(origin: string, row: StaffRow, reasons: string
   return renderNotice({ subject, lines, action: approval ?? conversation, ...approval ? { secondary: conversation } : {}, why: ticketLine([row.ticket_id]) }, origin);
 }
 
-/** One workspace's agent feedback: each report's facts and words, the decision, and the tickets. */
+/** One workspace's agent feedback: each report's facts and words, what the triage agent found in it (one line), the decision, and the tickets. */
 export function feedbackEmail(origin: string, rows: StaffRow[], first: boolean, subject: string): Notice {
   const lead = rows[0]!, workspace = whoOf(lead).line.replace(/, filed with .*$/, ''), lines: Line[] = [];
   const facts = (row: StaffRow) => [row.evidence?.filedBy ? inert(oneLine(row.evidence.filedBy, 120)) : null, row.operation ? inert(oneLine(row.operation, 60)) : null, row.request_id ?? 'no request ID', moment(row.filed_at ?? row.created_at)].filter(Boolean).join(' · ');
@@ -223,6 +226,7 @@ export function feedbackEmail(origin: string, rows: StaffRow[], first: boolean, 
   for (const row of rows.slice(0, 5)) {
     if (rows.length > 1) lines.push({ text: facts(row).replace(/^./, c => c.toUpperCase()), tone: 'muted' });
     if (row.first_words) lines.push({ quote: shortQuote(row.first_words.text) });
+    if (row.triage_summary) lines.push({ untrusted: sentences(row.triage_summary) });
   }
   if (rows.length > 5) lines.push(`And ${plural(rows.length - 5, 'more report')} in the support inbox.`);
   const { decision, recommendation } = decisionOf('feedback', lead);
@@ -258,7 +262,7 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
         (SELECT json_build_object('text', left(m.text, 4000), 'at', m.created_at) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' ORDER BY m.seq LIMIT 1) AS first_words,
         (SELECT json_agg(json_build_object('text', left(x.text, 4000), 'at', x.created_at) ORDER BY x.seq) FROM (SELECT m.seq, m.text, m.created_at FROM support_messages m
           WHERE m.conversation_id = c.id AND m.author = 'customer' AND m.seq > c.staff_seq ORDER BY m.seq DESC LIMIT 3) x) AS fresh_words,
-        f.operation, f.request_id, f.created_at::text AS filed_at,
+        f.operation, f.request_id, f.created_at::text AS filed_at, f.triage->>'summary' AS triage_summary,
         (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'failed' ORDER BY m.seq DESC LIMIT 1) AS failed_by,
         (SELECT json_build_object('id', a.id, 'kind', a.kind, 'payload', a.payload, 'reason', a.reason, 'expires_ms', (extract(epoch FROM a.expires_at) * 1000)::float8) FROM support_approvals a
           WHERE a.conversation_id = c.id AND a.proposed_by = 'agent' AND a.state = 'proposed' AND a.expires_at > now() ORDER BY a.created_at DESC LIMIT 1) AS proposal
