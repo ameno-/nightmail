@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, Bot, Check, ChevronRight, Clock, Hand, Image as ImageIcon, Lock, Paperclip, X } from 'lucide-react'
+import { AlertCircle, Bot, Check, ChevronRight, Clock, Hand, Image as ImageIcon, Lock, Paperclip, Ticket, X } from 'lucide-react'
 import { Button, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, StatusBadge, Textarea, useToast } from '../../components/ui'
 import { useKeyboardInset } from '../../components/ui/sheet'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -269,10 +269,13 @@ function Thread({ detail, canAct, actions, composer, onConfirm }: { detail: Supp
 }
 
 /** One message: its sender and time (the first of a run), then the customer's words in a bubble, ours as text under the
- *  mark, a note or a held answer as a card. Delivery shows only when it isn't plain: Queued, or Not sent. */
+ *  mark, a note or a held answer as a card. Delivery shows only when it isn't plain: Queued, or Not sent; a customer
+ *  message filed while the chat couldn't answer is marked Filed. */
 function Message({ row, c, canAct, actions, onEdit }: { row: ChatMessage; c: SupportConversation; canAct: boolean; actions: Actions; onEdit: (m: SupportMessage, fresh: boolean) => void }) {
   const { m, role } = row, customer = role === 'customer', pending = m.id.startsWith('pending:')
   const queued = m.author === 'staff' && m.kind !== 'note' && (m.delivery === 'queued' || pending)
+  // A message the support chat couldn't take, filed by the dashboard (kind filed): why and when are in Activity.
+  const filed = customer && m.kind === 'filed'
   return <div className="sinbox-msg" data-role={role} data-first={row.first || undefined} data-last={row.last || undefined} data-email={m.email ? '' : undefined} data-pending={pending || undefined}>
     {row.first && <p className="sinbox-msg__meta">
       {!customer && <Mark name={row.author} agent={m.author === 'agent'} />}
@@ -284,9 +287,10 @@ function Message({ row, c, canAct, actions, onEdit }: { row: ChatMessage; c: Sup
       : role === 'draft' ? <div className="sinbox-msg__card sinbox-raised" data-draft=""><DraftLabel m={m} /><Body m={m} c={c} /><DraftFoot m={m} c={c} canAct={canAct} actions={actions} onEdit={onEdit} /></div>
       : role === 'note' ? <div className="sinbox-msg__card sinbox-raised"><Body m={m} c={c} /></div>
       : <div className="sinbox-msg__prose"><Body m={m} c={c} /></div>}
-    {(m.delivery === 'failed' || queued) && <div className="sinbox-msg__below">
+    {(m.delivery === 'failed' || queued || filed) && <div className="sinbox-msg__below">
       {m.delivery === 'failed' ? <span className="sinbox-delivery" data-state="failed"><AlertCircle size={12} aria-hidden="true" />Not sent</span>
-        : queued && <span className="sinbox-delivery"><Clock size={12} aria-hidden="true" />Queued</span>}
+        : queued ? <span className="sinbox-delivery"><Clock size={12} aria-hidden="true" />Queued</span>
+        : <span className="sinbox-delivery" title="Filed as a ticket: the chat couldn’t answer"><Ticket size={12} aria-hidden="true" />Filed</span>}
     </div>}
   </div>
 }
@@ -380,7 +384,8 @@ function eventText(e: SupportEvent, c: SupportConversation): string {
   const who = e.by ? e.by.name ?? 'Staff' : null, d = e.details as Record<string, string | boolean | null | undefined>
   switch (e.kind) {
     case 'opened': return c.channel === 'agent_feedback' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
-    case 'ticket': return d.by === 'nightmail' ? `Ticket opened: this needs a person${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
+    // reason chat_unavailable: the dashboard filed a message the support chat couldn't take (api/src/support-conversations.ts fileChatTicket).
+    case 'ticket': return d.by === 'nightmail' ? `${d.reason === 'chat_unavailable' ? 'Filed as a ticket: the chat couldn’t answer' : 'Ticket opened: this needs a person'}${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
     case 'priority': return `Priority ${d.from ?? '—'} → ${d.to ?? '—'}`
     case 'paused': return d.by === 'ticket' ? 'Handed to you: the agent stopped for the ticket' : d.reply ? `${who ?? 'Staff'} replied and took over from the agent` : `${who ?? 'Staff'} paused the agent`
     case 'resumed': return `${who ?? 'Staff'} handed back to the agent`

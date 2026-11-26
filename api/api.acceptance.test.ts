@@ -12379,6 +12379,9 @@ describe('Hosted MCP OAuth and tools', () => {
       const item = (await inbox()).find(c => c.id === id);
       assert.ok(item, 'It needs staff at once.');
       assert.deepEqual([item.needsYou.reasons, item.preview.text, item.customer.userId, item.workspace.id], [['ticket', 'paused'], 'Why did my import bounce?', manager!.userId, wid]);
+      // The panel told them it was filed and that the team replies by email: Needs you for its ticket, never No reply sent.
+      await db.query("UPDATE support_messages SET created_at = now() - interval '11 minutes' WHERE conversation_id = $1", [id]);
+      assert.deepEqual((await inbox()).find(c => c.id === id)?.needsYou.reasons, ['ticket', 'paused']);
       const detail = ok(await send('GET', `/v1/operator/support-inbox/${id}`, session(operator)));
       assert.deepEqual(detail.messages.map((m: Json) => [m.author, m.kind, m.text]), [['customer', 'filed', 'Why did my import bounce?']]);
       assert.equal(detail.conversation.page, '/logs');

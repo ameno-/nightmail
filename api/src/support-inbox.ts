@@ -215,7 +215,9 @@ const owedAt = sql`(SELECT CASE WHEN si.message_id IS NULL OR (si.general_answer
     ELSE least(si.signed_in_at, (SELECT CASE WHEN min(r.general_answer_requested_at) >= m.created_at THEN min(r.general_answer_requested_at) END
       FROM support_email_signins r WHERE r.conversation_id = m.conversation_id)) END
   FROM (SELECT 1) one LEFT JOIN support_email_signins si ON si.conversation_id = m.conversation_id AND si.message_id = m.source_message_id)`;
-const unansweredSince = sql`(SELECT min(${owedAt}) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
+// A message the dashboard filed as a ticket (kind filed) had its answer at once: the panel told them it was filed and
+// that the team replies by email, as the agent's own ticket notice does. It is Needs you for its ticket, not No reply sent.
+const unansweredSince = sql`(SELECT min(${owedAt}) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' AND m.kind IS DISTINCT FROM 'filed'
   AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND ${reached}), 0))`;
 const NO_REPLY_AFTER = sql`interval '10 minutes'`;
 const noReply = (since: SQL) => sql`(c.channel <> 'agent_feedback' AND coalesce(${since} < now() - ${NO_REPLY_AFTER}, false))`;
