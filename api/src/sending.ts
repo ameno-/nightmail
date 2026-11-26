@@ -545,7 +545,10 @@ const CampaignReadiness = z.object({
 }).describe('Whether this campaign is ready to send as it is: its domain, its sender\'s history, its list and how much larger it is than before, with a verdict and a plan. Hosted shared sending with live SES can require the plan; elsewhere it is advice.').openapi('CampaignReadiness');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int(),
   risky: z.number().int().describe('Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address known to be undeliverable): the send skips them. Not in eligible.'),
-  riskyByReason: RiskBreakdown.shape.byReason, readiness: CampaignReadiness.nullable().optional().describe('With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.') }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
+  riskyByReason: RiskBreakdown.shape.byReason,
+  topicExcluded: z.number().int().optional().describe('With a topic: the subscribed contacts it leaves out (who opted out of it, or for a topic only people who opt in get, who didn\u2019t). Counted in unsubscribed, not in eligible.'),
+  approximate: z.literal(true).optional().describe('The topic\u2019s effect on this list couldn\u2019t be counted in time: eligible and topicExcluded are estimated from the workspace\u2019s choices about the topic. Sending counts it exactly.'),
+  readiness: CampaignReadiness.nullable().optional().describe('With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.') }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
 const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Omit to keep the current region selection. An unpinned regional MX draft follows its From domain.') }).strict() }).strict().openapi('CampaignUpdateInput');
 const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('CampaignArchiveInput');
@@ -691,7 +694,9 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
   const links = await linkReview(runtime, db, a.workspaceId, row.draft.from), linkHost = links.origin ? new URL(links.origin).hostname.toLowerCase() : null;
   // Clean: within the ramp check's bounce and complaint lines, no reply named a blocklist in the days it went out, and the
   // delivery history has counted it (src/delivery-history.ts), so a send not counted yet is never taken for clean.
-  const clean = sql`bounced<=accepted*${c.bounceRate}::float8 AND (complained<${c.complaints}::int OR complained<=accepted*${c.complaintRate}::float8) AND NOT blocked AND counted`;
+  // Without the private ramp lines (NIGHTMAIL_RAMP) the review is today's: clean is the bounce and complaint lines alone.
+  const tuned = !!runtime.config.rampLines;
+  const clean = sql`bounced<=accepted*${c.bounceRate}::float8 AND (complained<${c.complaints}::int OR complained<=accepted*${c.complaintRate}::float8)${tuned ? sql` AND NOT blocked AND counted` : sql``}`;
   const [f] = (await db.execute<{ first_seen: string | null; dmarc: string | null; mail_from: string | null; ws_largest: number; dom_largest: number; dom_clean: number;
     dom_accepted: number; dom_bounced: number; dom_complained: number; ws_accepted: number | null; ws_bounced: number | null; ws_complained: number | null; usual_day: number | null; first_sent: string | null;
     blocked_day: string | null; last_clean_done: string | null; uncounted: boolean;
@@ -743,7 +748,7 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
   const judged = judgeReadiness({ recipients: n, matched: audience.matched, risky: audience.risky, neverMailed: audience.neverMailed, domainAgeDays: ageDays,
     dmarc: dmarc === null ? null : !['missing', 'invalid'].includes(dmarc), largestSend: f!.dom_largest, largestCleanSend: f!.dom_clean,
     accepted: wsAccepted, bounced: Number(f!.ws_bounced ?? 0), complained: Number(f!.ws_complained ?? 0), enforced: live,
-    registeredDays: reg?.days ?? null, linkRegisteredDays: link?.registeredDays ?? null, usualDay, lines: rampLines(runtime.config.rampLines),
+    registeredDays: reg?.days ?? null, linkRegisteredDays: link?.registeredDays ?? null, usualDay, lines: tuned ? rampLines(runtime.config.rampLines) : undefined,
     blocklisted: !!f!.blocked_day && !(f!.last_clean_done && f!.last_clean_done.slice(0, 10) > f!.blocked_day), blocklistUncounted: !!f!.uncounted });
   const batches = judged.plan, first = batches[0] ?? 0, fmt = (v: number) => v.toLocaleString('en-US'), share = (v: number, of: number) => `${(100 * v / of).toFixed(of && v / of < 0.1 ? 1 : 0)}%`;
   const rampAt = live ? rampStart(await rampHistory(db, a.workspaceId)) : RAMP.steps.length;

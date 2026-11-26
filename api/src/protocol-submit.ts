@@ -7,6 +7,7 @@ import { withMemory } from './isolate-memory.js';
 import { SMTP_WIRE_LIMIT } from './mailbox-ingest.js';
 import { mailAddress, mib } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
+import { recordSmtpRefusal } from './smtp-refusals.js';
 import type { SubmittedFile } from './submission-mime.js';
 
 /**
@@ -29,8 +30,14 @@ const envelope = z.object({
 const reservation = (size: number) => size + Math.min(size, SEND_LIMITS.attachmentBytes) + 4 * 1024 * 1024;
 
 export async function submit(c: Ctx, p: Submitted): Promise<{ id: string; sentCopy?: boolean }> {
-  if (p.raw.length > SMTP_WIRE_LIMIT) throw new ApiError(413, 'MESSAGE_SIZE', `A message can be at most ${mib(SMTP_WIRE_LIMIT)}.`);
-  return /^(?:key|mbk)_/.test(p.kid) ? (await import('./protocol-relay.js')).relaySubmit(c, p) : (await import('./protocol-content.js')).contentWrite(c, p);
+  try {
+    if (p.raw.length > SMTP_WIRE_LIMIT) throw new ApiError(413, 'MESSAGE_SIZE', `A message can be at most ${mib(SMTP_WIRE_LIMIT)}.`);
+    return await (/^(?:key|mbk)_/.test(p.kid) ? (await import('./protocol-relay.js')).relaySubmit(c, p) : (await import('./protocol-content.js')).contentWrite(c, p));
+  } catch (error) {
+    // A refusal the app will see as an SMTP reply is recorded for support, after the answer (smtp-refusals.ts).
+    if (error instanceof ApiError) recordSmtpRefusal(c.env, p.kid, p.to, error);
+    throw error;
+  }
 }
 
 /** The streamed submission: the body is exactly `size` bytes whose SHA-256 is the signed digest, read before anything

@@ -58,7 +58,7 @@ export function points(last: number, previous: number, good: 'up' | 'down', what
 }
 
 function tiles(g: Glass): (key: string) => GlassTileFill {
-  const { signups, sending: s, delivery, receiving, builtin, support, screening, api, system, visitors } = g
+  const { signups, sending: s, delivery, receiving, builtin, support, screening, api, system, visitors } = g, week = support.week
   const day = s.hourly.reduce((t, h) => ({ accepted: t.accepted + h.accepted, delivered: t.delivered + h.delivered, bounced: t.bounced + h.bounced, complained: t.complained + h.complained }), { accepted: 0, delivered: 0, bounced: 0, complained: 0 })
   const before = s.previous, rate = (part: number, whole: number) => share(part, whole)
   const delivered = rate(day.delivered, day.accepted), bounced = rate(day.bounced, day.accepted), complained = rate(day.complained, day.accepted)
@@ -87,11 +87,17 @@ function tiles(g: Glass): (key: string) => GlassTileFill {
       hint: tripped ? `breaker tripped ${since(builtin.parent!.trippedAt)}` : builtin.parent && !builtin.parent.ok ? `parent down: ${builtin.parent.problem ?? 'unknown'}` : `of ${number(builtin.active)} · breaker closed`,
       meter: { value: builtin.ready, max: Math.max(1, builtin.active), tone: tripped ? 'danger' : 'neutral', label: `${number(builtin.ready)} of ${number(builtin.active)} built-in domains ready` } },
     visitors: { value: visitors.visitors.atLeast ? count(visitors.visitors, 'told apart among the first 50,000 visitor codes') : <Tick value={visitors.visitors.n} />, hint: `${number(visitors.views)} page views today`, spark: visitors.hourly, delta: delta(visitors.day.last, visitors.day.previous, 'up', 'Page views') },
-    // A support channel that isn't set up is said here (its registrations answer 404 SUPPORT_NOT_CONFIGURED).
-    // Someone who wrote and got nothing back is said first: it should always be none.
-    support: { value: <Tick value={support.open} />, tone: support.noReply ? 'danger' : support.configured.chat && support.configured.email ? undefined : 'warning',
-      hint: support.noReply ? `${number(support.noReply)} with no reply sent` : !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? `${number(support.day.last)} new · email not configured`
-        : !support.configured.chat ? `${number(support.day.last)} new · chat not configured` : `${number(support.day.last)} new · ${number(support.ticketed)} ticketed`, spark: support.hourly, delta: delta(support.day.last, support.day.previous, null, 'New conversations') },
+    // The support AI's week (api/src/support-inbox.ts supportWeek): of the conversations it could answer, how many ended
+    // with no person stepping in, beside anyone who got no reply (it should always be none: the tile turns red) and the
+    // ones a person handles by design. Whether the answers were right isn't measured, so the tile never says so. A
+    // support channel that isn't set up is said too (its registrations answer 404 SUPPORT_NOT_CONFIGURED).
+    support: { value: <><Tick value={week.withoutHuman} /><span className="glass-tile__share">of {number(week.answerable)}{week.atLeast ? '+' : ''}{week.answerable ? ` (${percent(share(week.withoutHuman, week.answerable), 0)})` : ''}</span></>,
+      tone: support.noReply ? 'danger' : support.configured.chat && support.configured.email ? undefined : 'warning',
+      hint: !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? 'Email not configured' : !support.configured.chat ? 'Chat not configured' : 'answered without a human',
+      // The foot says what's waiting now: the open conversations, then anyone who got no reply (in words and in red, the
+      // tile too) or, when nobody is waiting, the bug, billing and abuse conversations the share leaves out. The title has all three.
+      note: <span title={`${plural(support.open, 'conversation')} open now · ${plural(support.noReply, 'person', 'people')} waiting with no reply sent · ${plural(week.apart, 'conversation')} with a bug, billing, abuse, privacy or legal ticket: a person decides those, so the share counts them separately`}>
+        {number(support.open)} open · {support.noReply ? <span className="ui-tone--danger">{number(support.noReply)} with no reply</span> : <>{number(week.apart)} bug or billing</>}</span> },
     screened: { value: <Tick value={screening.screened} />, hint: `${number(screening.rejected)} rejected`, spark: screening.hourly },
     classifiers: { value: screening.agree === null ? '—' : <Tick value={screening.agree} format={pct(1)} />, hint: `flagged: Jev ${number(screening.jevFlagged)} · JevF ${number(screening.jevfFlagged)}`,
       meter: { value: screening.agree ?? 0, max: 1, tone: screening.agree !== null && screening.agree < 0.95 ? 'warning' : 'neutral', label: 'Verdicts both classifiers agree on' } },

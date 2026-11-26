@@ -30,7 +30,8 @@ import { EXPIRES_MS, isKind, KINDS, validToken } from './support-approvals.js';
 // The conversation page is one timeline: every message (the customer's, each with the stored email it came from when it
 // was mailed; the agent's, sent or held and why; staff replies and staff notes) and what happened besides
 // (support_events: a ticket filed, its priority, the agent paused and handed back, resolved, done), with the agent's
-// ticket brief above it. A staff note (kind 'note') is never delivered and changes no triage.
+// ticket brief above it. A note (kind 'note': a staff member's, or the feedback triage agent's on an agent feedback report,
+// author agent, src/feedback-triage.ts) is never delivered and changes no triage.
 //
 // Needs you, the inbox's default view, is what only a person can move forward. A conversation needs staff when nobody
 // marked it done since anything new happened (a message, a failed delivery, more blocked work, a ticket, a pause) and at
@@ -61,7 +62,7 @@ const TRANSCRIPT_LIMIT = 500;
 const EMAIL_TEXT_LIMIT = 20_000;
 const MAIL_MESSAGE_ID = /^msg_[0-9a-f]{32}$/, ATTACHMENT_ID = /^att_[a-z2-7]{16}$/;
 const HELD_REASONS = ['paused', 'gate', 'access', 'closed', 'earlier'] as const;
-const EVENT_KINDS = ['opened', 'ticket', 'priority', 'paused', 'resumed', 'resolved', 'done', 'undone', 'closed', 'approved', 'declined'] as const;
+const EVENT_KINDS = ['opened', 'ticket', 'priority', 'paused', 'resumed', 'resolved', 'done', 'undone', 'closed', 'approved', 'declined', 'action', 'proposed'] as const;
 
 const Author = z.enum(['customer', 'agent', 'staff', 'system']);
 const Delivery = z.enum(['queued', 'sent', 'failed', 'held']);
@@ -190,9 +191,10 @@ export const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN ni
  * support platform sent, or a staff reply, queued or sent; a held draft or a failed reply reaches nobody). Over
  * NO_REPLY_AFTER, a conversation (not agent feedback, which has nobody to reply to) needs you for it, and Glass counts it.
  */
+const reached = sql`(o.kind IS DISTINCT FROM 'note' AND (o.author = 'system'
+  OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed') OR (o.author = 'staff' AND o.delivery IN ('queued','sent'))))`;
 const unansweredSince = sql`(SELECT min(m.created_at) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
-  AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND o.kind IS DISTINCT FROM 'note' AND (o.author = 'system'
-    OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed') OR (o.author = 'staff' AND o.delivery IN ('queued','sent')))), 0))`;
+  AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND ${reached}), 0))`;
 const NO_REPLY_AFTER = sql`interval '10 minutes'`;
 const noReply = (since: SQL) => sql`(c.channel <> 'agent_feedback' AND coalesce(${since} < now() - ${NO_REPLY_AFTER}, false))`;
 /** The conversations Needs you and Agent handling can hold: open ones, and closed ones with an open ticket, blocked work or a transcript (failed deliveries). */
@@ -204,6 +206,33 @@ const handling = sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND 
 const waitingOnCustomer = sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND NOT triage.needs_you AND c.done_at IS NULL AND ${answered}`;
 /** Glass's count of conversations that need you because no reply was sent (the same rule as Needs you). */
 export const noReplyCount = sql`(SELECT count(*) FROM support_conversations c WHERE c.done_at IS NULL AND ${triageCandidates} AND ${noReply(unansweredSince)})`;
+/** The ticket types a person handles by design, so the support AI's week counts them apart. */
+export const TICKETS_APART = ['bug', 'billing', 'abuse_report', 'privacy', 'legal'] as const;
+/**
+ * The support AI's week, for Glass: the conversations that started in the last 7 days (the newest `cap`, through
+ * support_conversations_created; agent feedback left out, nobody answers it), as
+ * - apart: those with a ticket a person handles by design (TICKETS_APART);
+ * - answerable: the rest;
+ * - without_human: of the answerable, those that ended (closed, marked done, or quiet for 24 hours after a sent agent
+ *   answer) with no staff reply, no ticket for a person (one the agent filed, other than a feature request it logged,
+ *   or one Nightmail opened for staff: type staff, now or on the timeline), no held answer, no failed send and never
+ *   "no reply sent" (a customer message nothing reached within NO_REPLY_AFTER).
+ * Nothing here says an answer was right: only that no person had to step in.
+ */
+export const supportWeek = (cap: number) => sql`(SELECT json_build_object('answerable',count(*) FILTER (WHERE x.n <= ${cap} AND NOT x.apart),
+    'without_human',count(*) FILTER (WHERE x.n <= ${cap} AND NOT x.apart AND x.ended AND NOT x.human),'apart',count(*) FILTER (WHERE x.n <= ${cap} AND x.apart),'capped',count(*) > ${cap})
+  FROM (SELECT row_number() OVER (ORDER BY c.created_at DESC) AS n, coalesce(c.ticket_type = ANY(${sql.param([...TICKETS_APART])}::text[]), false) AS apart,
+      c.status = 'closed' OR c.done_at IS NOT NULL OR coalesce(last.author = 'agent' AND last.kind IS DISTINCT FROM 'held' AND last.delivery IS DISTINCT FROM 'held'
+        AND last.delivery IS DISTINCT FROM 'failed' AND last.created_at <= now() - interval '24 hours', false) AS ended,
+      (c.ticket_id IS NOT NULL AND c.ticket_type IS DISTINCT FROM 'feature_request')
+        OR EXISTS (SELECT FROM support_events e WHERE e.conversation_id = c.id AND e.kind = 'ticket' AND e.details->>'type' = 'staff')
+        OR EXISTS (SELECT FROM support_messages m WHERE m.conversation_id = c.id AND ((m.author = 'staff' AND m.kind IS DISTINCT FROM 'note')
+          OR (m.author = 'agent' AND (m.kind = 'held' OR m.delivery = 'held')) OR m.delivery = 'failed'))
+        OR EXISTS (SELECT FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' AND m.created_at < now() - ${NO_REPLY_AFTER}
+          AND NOT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = c.id AND o.seq > m.seq AND o.created_at <= m.created_at + ${NO_REPLY_AFTER} AND ${reached})) AS human
+    FROM (SELECT * FROM support_conversations c WHERE c.created_at >= now() - interval '7 days' AND c.channel <> 'agent_feedback' ORDER BY c.created_at DESC LIMIT ${cap + 1}) c
+    LEFT JOIN LATERAL (SELECT m.author, m.kind, m.delivery, m.created_at FROM support_messages m
+      WHERE m.conversation_id = c.id AND m.author <> 'system' AND m.kind IS DISTINCT FROM 'note' ORDER BY m.seq DESC LIMIT 1) last ON true) x)`;
 const finished = sql`NOT triage.needs_you AND (c.done_at IS NOT NULL OR c.status = 'closed' OR (c.channel = 'agent_feedback' AND c.ticket_resolved_at IS NOT NULL))`;
 const firstLine = (text: string | null) => text?.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, 200) ?? null;
 /** A message as one line for the list: its own words, white space folded, the first 200 characters. */
@@ -344,6 +373,7 @@ export function registerSupportInbox(app: App) {
       if (m.delivery && m.author !== 'agent') throw new ApiError(422, 'VALIDATION_FAILED', 'Only an agent answer has a delivery.', `messages.${i}.delivery`);
       if (m.reason && m.delivery !== 'held') throw new ApiError(422, 'VALIDATION_FAILED', 'Only a held answer has a reason.', `messages.${i}.reason`);
       if (m.source && m.author !== 'customer') throw new ApiError(422, 'VALIDATION_FAILED', 'Only a customer message comes from an email.', `messages.${i}.source`);
+      if (m.kind === 'note') throw new ApiError(422, 'VALIDATION_FAILED', 'A note comes from staff or the feedback triage agent, never from a mirror.', `messages.${i}.kind`);
       if (m.at && Date.parse(m.at) > Date.now() + 5 * 60_000) throw new ApiError(422, 'VALIDATION_FAILED', 'A message cannot be written in the future.', `messages.${i}.at`);
       if (messages.findIndex(other => other.id === m.id) !== i) throw new ApiError(422, 'VALIDATION_FAILED', 'Each message appears once.', `messages.${i}.id`);
     });
@@ -842,9 +872,11 @@ export function registerSupportInbox(app: App) {
   const ApprovalParams = z.object({ id: z.string().regex(CONVERSATION_ID), approvalId: z.string().regex(/^apr_[a-z2-7]{26}$/) });
   const Approval = z.object({
     id: z.string(), conversationId: z.string(), kind: z.string(), label: z.string().describe('What approving does, in a few words.'), effect: z.string().describe('What happens, in one sentence.'),
-    risky: z.boolean(), reason: z.string().describe('Why it was proposed.'), proposedBy: z.enum(['nightmail', 'agent']),
+    risky: z.boolean(), summary: z.string().nullable().describe('The exact target in Nightmail\u2019s words (an agent\u2019s risky proposal): what it acts on, with its numbers.'),
+    reason: z.string().describe('Why it was proposed: the proposer\u2019s words (the agent\u2019s, for a risky one).'), proposedBy: z.enum(['nightmail', 'agent']),
     state: z.enum(['proposed', 'approved', 'declined', 'failed', 'expired']), createdAt: z.string(), expiresAt: z.string(), decidedAt: z.string().nullable(),
     decidedBy: z.object({ userId: z.string(), name: z.string().nullable() }).nullable(), result: z.record(z.string(), z.unknown()).nullable(),
+    change: z.object({ now: z.string(), after: z.string() }).nullable().describe('A limit or balance it changes: its value now, read when this is opened, and after approving.'),
     preview: z.object({ text: z.string().nullable().describe('Exactly what would be sent.'), blocked: z.string().nullable().describe('Why it can\u2019t be, now.') }).nullable()
       .describe('Send the held answer: the answer as it would go, and why it can\u2019t go, when it can\u2019t (it needs a fresh reply, a newer reply reached them, or it was decided).'),
   }).openapi('SupportApproval');
@@ -858,9 +890,9 @@ export function registerSupportInbox(app: App) {
     if (!r || !isKind(r.kind) || !validToken(secret, { id: r.id, conversationId: r.conversation_id, expiresAt: new Date(Number(r.expires_ms)) }, token)) notFound('Approval');
     return r!;
   }
-  const approvalView = (r: ApprovalRow, preview: z.infer<typeof Approval>['preview'] = null): z.infer<typeof Approval> => {
+  const approvalView = (r: ApprovalRow, preview: z.infer<typeof Approval>['preview'] = null, change: z.infer<typeof Approval>['change'] = null): z.infer<typeof Approval> => {
     const kind = KINDS[r.kind as keyof typeof KINDS];
-    return { preview, id: r.id, conversationId: r.conversation_id, kind: r.kind, label: kind.label, effect: kind.effect, risky: kind.risky, reason: r.reason, proposedBy: r.proposed_by,
+    return { preview, change, id: r.id, conversationId: r.conversation_id, kind: r.kind, label: kind.label, effect: kind.effect, risky: kind.risky, summary: kind.summary?.(r.payload) ?? null, reason: r.reason, proposedBy: r.proposed_by,
       state: r.state === 'proposed' && r.expired ? 'expired' : r.state, createdAt: isoTime(r.created_at)!, expiresAt: isoTime(r.expires_at)!, decidedAt: isoTime(r.decided_at),
       decidedBy: r.decided_by ? { userId: r.decided_by, name: r.decided_by_name } : null, result: r.result };
   };
@@ -875,7 +907,8 @@ export function registerSupportInbox(app: App) {
     request: { params: ApprovalParams, query: z.object({ token: z.string().min(1).max(100) }) }, responses: { 200: response(Approval), ...errors } }), async c => {
     await staff(c, 'operator:read');
     const params = c.req.valid('param'), a = await approvalOf(c.env.db, c.env.config.authSecret, params, c.req.valid('query').token);
-    return c.json(approvalView(a, await previewOf(c.env.db, a)), 200);
+    const change = a.state === 'proposed' && !a.expired ? await KINDS[a.kind as keyof typeof KINDS].change?.(c.env.db, a.payload) ?? null : null;
+    return c.json(approvalView(a, await previewOf(c.env.db, a), change), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/approvals/{approvalId}', operationId: 'operatorDecideSupportApproval',
     description: 'Approve or decline it (the operator role), once, before it expires: approving runs it as the dashboard\u2019s own button for it would. On the audit trail and the conversation\u2019s timeline.',
@@ -889,19 +922,25 @@ export function registerSupportInbox(app: App) {
       if (a.expired) throw new ApiError(409, 'SUPPORT_APPROVAL_EXPIRED', 'This proposal expired. Open the conversation to act on it.');
       let state: 'approved' | 'declined' | 'failed' = 'declined', result: Record<string, unknown> | null = null;
       if (body.decision === 'approve') {
+        // A refused run gives back whatever it wrote before its refusal, and the decision records the refusal.
+        await tx.execute(sql`SAVEPOINT support_approval`);
         try {
-          result = await KINDS[a.kind as keyof typeof KINDS].run({ wake: id => wakeSupport(c.env.config, id), sendDraft: messageId => sendDraft(tx, operator, conversation, params.id, messageId) }, a.conversation_id, a.payload);
+          result = await KINDS[a.kind as keyof typeof KINDS].run({ wake: id => wakeSupport(c.env.config, id), sendDraft: messageId => sendDraft(tx, operator, conversation, params.id, messageId),
+            tx, c, operator, userId: conversation.user_id, approvalId: a.id }, a.conversation_id, a.payload);
           state = 'approved'; sent = a.kind === 'send_held_answer';
+          await tx.execute(sql`RELEASE SAVEPOINT support_approval`);
         } catch (error) {
-          // Refused as the dashboard's own button would be (a stale draft, one that needs a fresh reply, a closed conversation): said, not thrown.
+          // Refused as the dashboard's own button would be (a stale draft, one that needs a fresh reply, a closed conversation,
+          // a workspace already paused): said, not thrown.
           if (!(error instanceof ApiError)) throw error;
+          await tx.execute(sql`ROLLBACK TO SAVEPOINT support_approval`);
           state = 'failed'; result = { error: error.code, message: error.message };
         }
       }
       const { rows: [decided] } = await tx.execute<ApprovalRow>(sql`UPDATE support_approvals SET state = ${state}, decided_by = ${operator.userId}, decided_at = now(), result = ${result ? JSON.stringify(result) : null}::jsonb
         WHERE id = ${a.id} RETURNING id, conversation_id, kind, payload, proposed_by, reason, state, created_at::text AS created_at, expires_at::text AS expires_at, ${EXPIRES_MS}, false AS expired,
           decided_at::text AS decided_at, decided_by, (SELECT name FROM nightmail_users WHERE id = ${operator.userId}) AS decided_by_name, result`);
-      await tx.execute(event(params.id, body.decision === 'approve' ? 'approved' : 'declined', operator.userId, { approval: a.id, kind: a.kind, ...state === 'failed' ? { failed: true } : {} }));
+      await tx.execute(event(params.id, body.decision === 'approve' ? 'approved' : 'declined', operator.userId, { approval: a.id, kind: a.kind, label: KINDS[a.kind as keyof typeof KINDS].label, ...state === 'failed' ? { failed: true } : {} }));
       return { result: approvalView(decided!) };
     }, body);
     if (sent) await wakeAfter(c, params.id);
