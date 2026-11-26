@@ -127,6 +127,64 @@ export function stackFrames(error: unknown, limit = 12) {
   return frames.join('\n') || undefined;
 }
 /**
+ * What a schema refused, when an error is a Zod error (one of our own parses, such as a route checking the answer it is
+ * about to send, refused a value): where and what kind, never the value. Up to 5 issues, each `path: what was wrong`,
+ * such as `readiness.plan.batches.2: expected int, received number`. A path keeps field names and indexes; any other
+ * key (a record's, which can be data: an address, a property name) reads `*`. The received kind is the word Zod's own
+ * message ends with (number, null, Date, NaN), never the input, which Zod doesn't keep. Read like `scrub`: own data
+ * properties only, along the cause chain, and no getter, method or toString of the error or its issues ever runs.
+ */
+const SCHEMA_ISSUES = 5, PATH_SEGMENTS = 12;
+const ownValue = (target: unknown, key: string): unknown => {
+  if (target === null || (typeof target !== 'object' && typeof target !== 'function')) return undefined;
+  const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+  return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+};
+const word = (value: unknown, pattern = /^[A-Za-z][A-Za-z_]{0,29}$/) => typeof value === 'string' && pattern.test(value) ? value : undefined;
+/** An array's own elements by index (at most `limit`), or null for anything that isn't a plain array. */
+function ownItems(value: unknown, limit: number): unknown[] | null {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+  const length = ownValue(value, 'length');
+  const items: unknown[] = [];
+  for (let index = 0; index < (typeof length === 'number' && length > 0 ? Math.min(Math.floor(length), limit) : 0); index++) items.push(ownValue(value, String(index)));
+  return items;
+}
+function issueText(issue: unknown): string | undefined {
+  if (issue === null || typeof issue !== 'object') return undefined;
+  const prototype = Object.getPrototypeOf(issue);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  const segments = ownItems(ownValue(issue, 'path'), PATH_SEGMENTS + 1) ?? [];
+  const path = segments.slice(0, PATH_SEGMENTS).map(segment => typeof segment === 'number' && Number.isSafeInteger(segment) ? String(segment)
+    : typeof segment === 'string' && /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(segment) ? segment : '*').join('.') + (segments.length > PATH_SEGMENTS ? '.…' : '');
+  const code = word(ownValue(issue, 'code'), /^[a-z][a-z_]{0,39}$/) ?? 'invalid';
+  const message = ownValue(issue, 'message'), said = typeof message === 'string' ? /, received ([A-Za-z]{1,30})$/.exec(message)?.[1] : undefined;
+  const limit = (key: string) => { const n = ownValue(issue, key); return typeof n === 'number' && Number.isFinite(n) ? n : typeof n === 'bigint' ? String(n) : '?'; };
+  const count = (key: string) => ownItems(ownValue(issue, key), 1_000)?.length ?? 0;
+  const what = code === 'invalid_type' ? `expected ${word(ownValue(issue, 'expected')) ?? 'another type'}${(word(ownValue(issue, 'received')) ?? said) ? `, received ${word(ownValue(issue, 'received')) ?? said}` : ''}`
+    : code === 'invalid_value' ? `not one of the ${count('values')} allowed values`
+    : code === 'too_big' ? `${word(ownValue(issue, 'origin')) ?? 'value'} above ${limit('maximum')}`
+    : code === 'too_small' ? `${word(ownValue(issue, 'origin')) ?? 'value'} below ${limit('minimum')}`
+    : code === 'invalid_format' ? `not a valid ${word(ownValue(issue, 'format')) ?? 'format'}`
+    : code === 'unrecognized_keys' ? `${count('keys')} unrecognized keys`
+    : code === 'invalid_union' ? 'no option of the union matched'
+    : code;
+  return `${path || '(root)'}: ${what}`;
+}
+export function schemaIssues(error: unknown): string | undefined {
+  try {
+    let current: unknown = error;
+    for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++, current = ownValue(current, 'cause')) {
+      const name = ownValue(current, 'name');
+      if (name !== 'ZodError' && name !== '$ZodError') continue;
+      const issues = ownItems(ownValue(current, 'issues'), 1_000);
+      if (!issues?.length) return undefined;
+      const described = issues.slice(0, SCHEMA_ISSUES).map(issueText).filter((text): text is string => !!text);
+      return (described.join('; ') + (issues.length > SCHEMA_ISSUES ? `; and ${issues.length - SCHEMA_ISSUES} more` : '')).slice(0, 500) || undefined;
+    }
+    return undefined;
+  } catch { return undefined; } // A proxy that throws from a trap, or a revoked one.
+}
+/**
  * An error's class name (`TypeError`, `DrizzleQueryError`) as a string, or `Error`. `name` is read once and used only
  * when it is a string that looks like a class name: an object with its own toString would be serialized whole.
  */

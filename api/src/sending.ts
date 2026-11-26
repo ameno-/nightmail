@@ -15,7 +15,7 @@ import { lists, mergeSuppression, segments } from './db/audience.js';
 import { literalSearch, SuppressionReason, EmailEventData, readCursor, encodeCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, actorMailAccess, ApiError, apiFailureBody, describeApiFailure, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage, type AttachmentTypes } from './core.js';
+import { actor, actorMailAccess, ApiError, apiFailureBody, describeApiFailure, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, logError, platformMessage, schemaIssues, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage, type AttachmentTypes } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restartRampWindow, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, setRamp, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
@@ -719,10 +719,10 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
     return await reviewSend(runtime, db, a, row, audience, true);
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    const failure = error as { name?: unknown; message?: unknown; stack?: unknown; code?: unknown } | null;
-    log('error', { code: 'SEND_REVIEW_PLAN_UNAVAILABLE', stage: o.launch ? 'launch' : 'preview', campaignId: row.id, errorType: typeof failure?.name === 'string' ? failure.name : typeof error,
-      sqlState: failure?.code ?? null, detail: String(failure?.message ?? error).slice(0, 200),
-      frame: typeof failure?.stack === 'string' ? failure.stack.split('\n').find(line => line.trimStart().startsWith('at '))?.trim().slice(0, 200) ?? null : null });
+    // What failed, as every unexpected failure says it (logError): its type, SQLSTATE, a schema refusal's path and kind, and
+    // the frames in our code. Its own message only when it is the platform's (platformMessage: never a database's text,
+    // which quotes the statement's parameters) and not a schema refusal, which schema already says without the value.
+    logError(error, { code: 'SEND_REVIEW_PLAN_UNAVAILABLE', stage: o.launch ? 'launch' : 'preview', campaignId: row.id, ...schemaIssues(error) ? {} : { cause: platformMessage(error) } });
     if (o.launch) {
       const refused = new ApiError(503, 'SEND_PLAN_UNAVAILABLE', 'The send plan couldn\'t be worked out just now, so nothing was sent and the campaign is still a draft. Try again in a minute.', undefined, true);
       refused.retryAfterSeconds = 60;

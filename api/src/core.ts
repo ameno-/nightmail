@@ -5,7 +5,7 @@ import type { Context } from 'hono';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type { SESv2Client } from '@aws-sdk/client-sesv2';
 import { sql, type SQL } from 'drizzle-orm';
-import { errorCodeOf, errorTypeOf, log, logFallback, stackFrames } from './log.js';
+import { errorCodeOf, errorTypeOf, log, logFallback, schemaIssues, stackFrames } from './log.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, productName } from './brand.js';
@@ -910,7 +910,7 @@ export function transientDatabaseError(error: unknown) {
 export const databaseConflict = (error: unknown) => !(error instanceof ApiError) && ['40P01', '40001'].includes(databaseCodeOf(error) ?? '');
 /** What callers see when the database is briefly unreachable, read-only or too slow: retry (see TRANSIENT_SQLSTATES). */
 export const databaseUnavailable = (background = false) => new ApiError(503, 'DATABASE_UNAVAILABLE', background ? 'The database was briefly unavailable; the job will be retried.' : 'The database is briefly unavailable. Retry the request.', undefined, true);
-export { errorCodeOf, errorTypeOf, log, setLogContext, stackFrames } from './log.js';
+export { errorCodeOf, errorTypeOf, log, schemaIssues, setLogContext, stackFrames } from './log.js';
 /**
  * One line for an unexpected failure: its code, error class, SQLSTATE and Nightmail's own stack frames. Never a message:
  * neither the error's nor an ApiError's, whose text can quote request data (a template variable, a filename).
@@ -921,7 +921,9 @@ export function logError(error: unknown, fields: Record<string, unknown> & { cod
     let known = false;
     try { known = error instanceof ApiError; } catch { /* A proxy: treat as unexpected. */ }
     // `code` usually comes from an ApiError; it is logged only as an error-code-shaped string.
-    entry = { ...fields, code: errorCodeOf(fields.code), errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) };
+    // A schema refusal (our own parse of an answer or a stored value) says where and what kind, never the value (schemaIssues).
+    entry = { ...fields, code: errorCodeOf(fields.code), errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), schema: known ? undefined : schemaIssues(error),
+      stack: known ? undefined : stackFrames(error) };
   } catch { return logFallback(); }
   log(level, entry);
 }

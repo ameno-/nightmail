@@ -17,7 +17,7 @@ fi
 # Each tail event has logs[].message[] (Nightmail logs one JSON object per line, as a string or an object) and
 # exceptions[].
 jq -sc --argjson ids "$ids" '
-  def fields: {timestamp, level, event, requestId, route, operation, method, status, code, databaseCode, errorType, jobId, message: ((.message // "") | tostring | .[0:300])} | with_entries(select(.value != null and .value != ""));
+  def fields: {timestamp, level, event, requestId, route, operation, method, status, code, databaseCode, errorType, schema: ((.schema // "") | tostring | .[0:500]), jobId, message: ((.message // "") | tostring | .[0:300])} | with_entries(select(.value != null and .value != ""));
   def brief: {timestamp, level, event, requestId, route, operation, method, status, code, databaseCode, jobId} | with_entries(select(.value != null and .value != ""));
   def mentions: tostring as $text | any($ids[]; . as $id | $text | contains($id));
   [ .[] | objects ] as $events
