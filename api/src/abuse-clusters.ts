@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { bounded, graphLock, isolateItem, runnableSeed, lockClusterMembers, type WorkVersion, type AbuseTx, monitoring, rare, utc, workspaceExcluded, type Entity, type Hosted } from './abuse.js';
+import { bounded, graphLock, isolateItem, workOrder, runnableSeed, lockClusterMembers, type WorkVersion, type AbuseTx, monitoring, rare, utc, workspaceExcluded, type Entity, type Hosted } from './abuse.js';
 import { operatorContext, recordAudit } from './audit.js';
 import { RATES } from './billing/rates.js';
 import { errors, notFound, response, security, type App, type Ctx } from './core.js';
@@ -212,10 +212,10 @@ export async function refreshClusters(runtime: Hosted, deadline: number, advance
   const result = { grouped: 0, rescored: 0, cut: null as 'time' | 'limit' | null };
   const pending = sql`WITH seeds AS (SELECT a_type,a_id,min(pending_since) AS due FROM identity_links WHERE pending GROUP BY a_type,a_id)
     SELECT json_build_object('type',a_type,'id',a_id) AS seed,abuse_key(a_type,a_id) AS source_key,${utc(sql`due`)} AS at
-    FROM seeds WHERE ${runnableSeed('links',sql`abuse_key(a_type,a_id)`,sql`due`)} ORDER BY due,a_type,a_id LIMIT 1`;
+    FROM seeds WHERE ${runnableSeed('links',sql`abuse_key(a_type,a_id)`,sql`due`)} ORDER BY ${workOrder('links',sql`abuse_key(a_type,a_id)`,sql`due`)},a_type,a_id LIMIT 1`;
   const due = sql`least(score_requested_at,scored_at+interval '30 minutes')`;
   const stale = sql`SELECT members->0 AS seed,abuse_key(id) AS source_key,${utc(due)} AS at FROM abuse_clusters
-    WHERE ${due}<=now() AND ${runnableSeed('scores',sql`abuse_key(id)`,due)} ORDER BY ${due},id LIMIT 1`;
+    WHERE ${due}<=now() AND ${runnableSeed('scores',sql`abuse_key(id)`,due)} ORDER BY ${workOrder('scores',sql`abuse_key(id)`,due)},id LIMIT 1`;
   for (const [stage,query,limit] of [['links',pending,SEEDS_A_RUN],['scores',stale,RESCORED_A_RUN]] as const) {
     for (let n=0; n<limit; n++) {
       if (Date.now()>=deadline) { result.cut='time'; return result; }

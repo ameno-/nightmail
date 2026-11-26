@@ -5,10 +5,20 @@ SET LOCAL lock_timeout='2s';
 -- collation for PostgreSQL to probe the full receipt key, not just its stage.
 CREATE TABLE abuse_work_versions (
   stage text NOT NULL, source_key text COLLATE "C" NOT NULL, version_at timestamptz NOT NULL, version_count integer NOT NULL DEFAULT 0,
-  failures integer NOT NULL DEFAULT 0, reason text,
+  failures bigint NOT NULL DEFAULT 0, reason text, first_failed_at timestamptz, retry_after timestamptz,
   PRIMARY KEY (stage,source_key,version_at,version_count)
 );
 CREATE INDEX abuse_work_retention ON abuse_work_versions(version_at);
+CREATE INDEX abuse_retry_due ON abuse_work_versions(stage,retry_after,source_key) WHERE failures>0;
+-- 32 reusable permits per stage, each cooling down for fifteen minutes. A
+-- permit and its retry commit together. Split cluster capacity evenly so a
+-- backlog of failed grouping attempts cannot starve scoring retries.
+CREATE TABLE abuse_retry_slots (
+  stage text NOT NULL, slot integer NOT NULL, available_at timestamptz NOT NULL DEFAULT '-infinity',
+  PRIMARY KEY(stage,slot)
+);
+INSERT INTO abuse_retry_slots(stage,slot)
+  SELECT s,i FROM (VALUES ('signIns',32),('payments',32),('links',16),('scores',16)) pools(s,n),generate_series(1,n) i;
 CREATE FUNCTION abuse_key(VARIADIC parts text[]) RETURNS text LANGUAGE sql STABLE PARALLEL SAFE AS $$
   SELECT encode(sha256(convert_to(array_to_json(parts)::text,'UTF8')),'hex')
 $$;
@@ -16,9 +26,10 @@ $$;
 -- digest, then re-reads by subject under its privacy guards. VACUUM FULL, a
 -- concurrent update or tuple reuse can invalidate a hint, never receipt a row.
 CREATE TABLE abuse_signin_queue (
-  source_key text COLLATE "C" PRIMARY KEY, source_tid tid NOT NULL, version_at timestamptz NOT NULL, order_key text COLLATE "C" NOT NULL
+  source_key text COLLATE "C" PRIMARY KEY, source_tid tid NOT NULL, version_at timestamptz NOT NULL, order_key text COLLATE "C" NOT NULL, retry_after timestamptz
 );
-CREATE INDEX abuse_signin_queue_head ON abuse_signin_queue(version_at,order_key,source_key);
+CREATE INDEX abuse_signin_queue_head ON abuse_signin_queue(version_at,order_key,source_key) WHERE retry_after IS NULL;
+CREATE INDEX abuse_signin_retry ON abuse_signin_queue(retry_after,source_key) WHERE retry_after IS NOT NULL;
 ALTER TABLE abuse_state ADD COLUMN signin_scan_block bigint NOT NULL DEFAULT 0,
   ADD COLUMN signin_scan_end bigint, ADD COLUMN signin_rescan boolean NOT NULL DEFAULT false, ADD COLUMN signin_seek jsonb;
 
@@ -40,12 +51,16 @@ BEGIN
     FROM nightmail_signin_attempts a
     WHERE a.ctid >= format('(%s,0)',state.signin_scan_block)::tid AND a.ctid < format('(%s,0)',next_block)::tid
       AND a.observed IS NOT NULL AND a.last_at>state.active_since)
-  INSERT INTO abuse_signin_queue AS q(source_key,source_tid,version_at,order_key)
-    SELECT p.source_key,p.source_tid,p.last_at,p.order_key FROM page p
+  INSERT INTO abuse_signin_queue AS q(source_key,source_tid,version_at,order_key,retry_after)
+    SELECT p.source_key,p.source_tid,p.last_at,p.order_key,v.retry_after FROM page p
+    LEFT JOIN LATERAL (SELECT failures,retry_after FROM abuse_work_versions WHERE stage='signIns'
+      AND (source_key,version_at,version_count)=(p.source_key,p.last_at,p.attempts) LIMIT 1) v ON true
     WHERE (p.last_at,p.order_key)>(coalesce((state.cursors#>>'{signIns,at}')::timestamptz,state.active_since),coalesce(state.cursors#>>'{signIns,key}',''))
-      AND coalesce((SELECT v.failures BETWEEN 1 AND 2 FROM abuse_work_versions v WHERE v.stage='signIns'
-        AND (v.source_key,v.version_at,v.version_count)=(p.source_key,p.last_at,p.attempts)),true)
-    ON CONFLICT(source_key) DO UPDATE SET source_tid=excluded.source_tid,version_at=excluded.version_at,order_key=excluded.order_key;
+      AND v.failures IS DISTINCT FROM 0
+    ON CONFLICT(source_key) DO UPDATE SET source_tid=excluded.source_tid,version_at=excluded.version_at,
+      order_key=excluded.order_key,retry_after=excluded.retry_after
+      WHERE (q.source_tid,q.version_at,q.order_key,q.retry_after) IS DISTINCT FROM
+            (excluded.source_tid,excluded.version_at,excluded.order_key,excluded.retry_after);
   IF next_block=stop_block THEN next_block := -1; END IF;
   UPDATE abuse_state SET signin_scan_block=next_block,signin_scan_end=stop_block,signin_seek=NULL WHERE id='monitor';
   RETURN next_block;
@@ -130,7 +145,7 @@ BEGIN
   END LOOP;
   INSERT INTO abuse_work_versions(stage,source_key,version_at,version_count)
     SELECT 'signIns',source_key,at,attempts FROM jsonb_to_recordset(batch) x(source_key text,at timestamptz,attempts int)
-    ON CONFLICT (stage,source_key,version_at,version_count) DO UPDATE SET failures=0,reason=NULL;
+    ON CONFLICT (stage,source_key,version_at,version_count) DO UPDATE SET failures=0,reason=NULL,first_failed_at=NULL,retry_after=NULL;
   DELETE FROM abuse_signin_queue WHERE source_key=ANY(ARRAY(SELECT x.source_key FROM jsonb_to_recordset(batch) x(source_key text)));
   -- Carry the clean prefix over a job or process boundary. Without this seek,
   -- even a LIMIT on the head index can revisit dead entries before VACUUM.

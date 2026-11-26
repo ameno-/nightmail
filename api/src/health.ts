@@ -60,6 +60,7 @@ const KINDS = {
   // Read in the database probe: abuse alerts that should have gone out and have not, and the oldest outstanding work in each abuse stage.
   // abuse-alerts-undelivered is critical while a high alert is unposted (evaluate).
   'abuse-alerts-undelivered': { emoji: ':mag:', label: 'Abuse alerts not delivered', severity: 'warning', unit: 'alerts', section: 'database' },
+  'abuse-item-failing': { emoji: ':mag:', label: 'Abuse monitoring item failing', severity: 'warning', unit: 'items', section: 'database' },
   'abuse-monitor-behind': { emoji: ':mag:', label: 'Abuse monitoring behind', severity: 'warning', unit: 'seconds', section: 'database' },
 } as const satisfies Record<string, { emoji: string; label: string; severity: Severity; unit: string; section: Section }>;
 type Kind = keyof typeof KINDS;
@@ -94,6 +95,7 @@ type CounterRow = { kind: string; key: string; n: number; errors: number; ms: nu
 type Database = { heldDomains?: string[]; /** What the support AI cost since UTC midnight, in US dollars. */ supportAiToday?: number;
   /** Abuse alerts that should have gone out and have not (late: unposted past ABUSE.lateMinutes; failed; expired unposted), of them the high ones, and those posted but unconfirmed. */
   abuseUndelivered?: { late: number; failed: number; expired: number; high: number; unconfirmed?: number };
+  abuseFailures?: Record<string,{count:number;seconds:number}> | null;
   /** Seconds since the oldest outstanding observation or due time, by stage. */ abuseBehind?: Record<string, number | null> | null; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
 export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Failed[] | null; campaigns: CampaignRow[] | null; counters: CounterRow[] | null; database: Database | null };
@@ -297,7 +299,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
 
   let database: Rollup['database'] = null;
   if (sample.database) {
-    const { heldDomains, supportAiToday, abuseUndelivered, abuseBehind, ...d } = sample.database;
+    const { heldDomains, supportAiToday, abuseUndelivered, abuseBehind, abuseFailures, ...d } = sample.database;
     for (const domain of heldDomains ?? []) find('link-domain-held', domain, 1, `Marketing releases using ${id(domain)} are paused after a confirmed DBL listing.`, DATABASE.remindMinutes);
     if (supportAiToday !== undefined && supportAiToday >= SUPPORT_AI.dailyLineUsd)
       find('support-ai-cost', null, supportAiToday, `${dollars(supportAiToday)} since midnight UTC, past the ${dollars(SUPPORT_AI.dailyLineUsd)} daily line.`, SUPPORT_AI.remindMinutes);
@@ -306,6 +308,12 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
       const { late, failed, expired, high, unconfirmed = 0 } = abuseUndelivered, n = late + failed + expired + unconfirmed;
       if (n > 0) find('abuse-alerts-undelivered', null, n, `${count(n)} not delivered${high ? ` (${count(high)} high, unposted)` : ''}: ${[late && `${count(late)} unposted over ${ABUSE.lateMinutes} minutes`, failed && `${count(failed)} failed`,
         expired && `${count(expired)} expired unposted`, unconfirmed && `${count(unconfirmed)} posted but unconfirmed (Slack didn't answer; check the channel)`].filter(Boolean).join(', ')}.`, ABUSE.remindMinutes, high > 0 ? 'critical' : 'warning');
+    }
+    for (const [stage, failed] of Object.entries(abuseFailures ?? {})) {
+      const affected = stage==='scores' ? 'clusters cannot be scored; no alert can be raised for them'
+        : stage==='links' ? 'groups cannot be formed or scored; no alert can be raised for them'
+        : stage==='signIns' ? 'sign-ins cannot be folded' : 'payments cannot be folded';
+      find('abuse-item-failing',stage,failed.count,`${count(failed.count)} affected: ${affected}. Oldest failure: ${span(failed.seconds)}. Retrying automatically.`,ABUSE.remindMinutes);
     }
     for (const [stage, seconds] of Object.entries(abuseBehind ?? {})) {
       const key = 'abuse-monitor-behind:'+stage;
@@ -381,7 +389,7 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
       count(*) FILTER (WHERE whole AND m.n>=${REQUESTS.stormPerMinute})::int AS "stormMinutes",coalesce(round(avg(m.n) FILTER (WHERE whole AND m.n>=${REQUESTS.stormPerMinute})),0)::int AS "stormRate",
       (SELECT hist FROM h WHERE h.kind=m.kind AND h.key=m.key) AS hist
     FROM m GROUP BY m.kind,m.key`)).rows);
-  const lag = config.multiTenant && config.abuseMonitoring ? (await import('./abuse.js')).abuseLag : sql`NULL`;
+  const abuse = config.multiTenant && config.abuseMonitoring ? await import('./abuse.js') : null;
   const activity = sql`pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()`;
   const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",${aiCostToday} AS "supportAiToday",
       (SELECT json_build_object('late',count(*) FILTER (WHERE status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})),
@@ -389,7 +397,7 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
         'high',count(*) FILTER (WHERE band='high' AND ((status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})) OR (status='failed' AND created_at>now()-interval '1 day') OR (status='stale' AND stale_reason='expired'))),
         'unconfirmed',count(*) FILTER (WHERE status='unconfirmed' AND sent_at>now()-interval '1 day'))
         FROM abuse_alerts WHERE created_at>now()-interval '2 days') AS "abuseUndelivered",
-      ${lag} AS "abuseBehind",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
+      ${abuse?.abuseLag ?? sql`NULL`} AS "abuseBehind",${abuse?.abuseFailures ?? sql`NULL`} AS "abuseFailures",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
       current_setting('max_connections')::int AS "maxConnections",(SELECT count(*) FROM ${activity} AND xact_start<now()-interval '1 minute')::int AS "longTransactions",
       coalesce((SELECT extract(epoch FROM now()-min(xact_start)) FROM ${activity}),0)::int AS "oldestTransactionSeconds",
       (SELECT count(*) FROM ${activity} AND state='active' AND query_start<now()-interval '30 seconds')::int AS "slowQueries",

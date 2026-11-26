@@ -7,7 +7,7 @@ import { clientIpHeader, clientNetworkHeader } from './brand.js';
 import { isBuiltinHost } from './builtin-domain.js';
 import type { Client, Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 import { JobDeferred } from './jobs.js';
-import { databaseCodeOf, databaseConflict, transientDatabaseError, log, type JobHandler, type Runtime } from './core.js';
+import { databaseCodeOf, log, type JobHandler, type Runtime } from './core.js';
 import { placementRoot } from './domain-registry.js';
 import { isKnownDisposable, PUBLIC_MAILBOXES } from './list-hygiene.js';
 
@@ -367,49 +367,60 @@ export const utc = (column: SQL) => sql`to_char(${column} AT TIME ZONE 'UTC','YY
  */
 const BATCH_SIZE = 16;
 // No source lock or write. A receipt names the version actually read, not whatever
-// version happens to be current when we commit. Health includes quarantined versions.
-const FAILURE_LIMIT = 3;
+// version happens to be current when we commit. Only success settles a version.
+const hasPermit = (stage: string) => sql`EXISTS (SELECT FROM abuse_retry_slots WHERE stage=${stage} AND available_at<=now())`;
 const outstanding = (stage: string, key: SQL, at: SQL, count = sql`0`, health = false) => sql`NOT EXISTS (
   SELECT FROM abuse_work_versions v WHERE (v.stage,v.source_key,v.version_at,v.version_count)=
-    (${stage},${key},${at},${count}) AND (v.failures=0 ${health ? sql`` : sql`OR v.failures>=${FAILURE_LIMIT}`}))`;
+    (${stage},${key},${at},${count}) AND (v.failures=0 ${health ? sql`` : sql`OR v.retry_after>now() OR NOT ${hasPermit(stage)}`}))`;
 const signInKey = sql`abuse_key(a.issuer,a.subject)`, paymentKey = sql`abuse_key(p.id)`;
 const eligibleSignIn = (since: SQL, at: SQL, key: SQL, health = false) => sql`a.observed IS NOT NULL AND a.last_at>${since} AND
   (a.last_at,md5(a.issuer||' '||a.subject))>(coalesce(${at},${since}),coalesce(${key},'')) AND
-  coalesce((SELECT ${health ? sql`v.failures<>0` : sql`v.failures BETWEEN 1 AND ${FAILURE_LIMIT-1}`} FROM abuse_work_versions v
+  coalesce((SELECT v.failures>0 ${health ? sql`` : sql`AND v.retry_after<=now()`} FROM abuse_work_versions v
     WHERE (v.stage,v.source_key,v.version_at,v.version_count)=('signIns',${signInKey},a.last_at,a.attempts)),true)`;
 const eligiblePayment = (since: SQL, at: SQL, id: SQL, health = false) => sql`p.created_at>=${since} AND NOT EXISTS (SELECT FROM abuse_floors f WHERE f.entity_type='workspace' AND f.entity_id=p.workspace_id AND f.ignore_through>=p.updated_at) AND
   (p.updated_at,p.id)>(coalesce(${at},${since}),coalesce(${id},'')) AND ${outstanding('payments',paymentKey,sql`p.updated_at`,sql`0`,health)}`;
 
 export type WorkVersion = { source_key: string; at: string; attempts?: number };
+// Among due retries use the oldest retry time, not the oldest source timestamp:
+// repeatedly failing old sources must not monopolize the permits.
+export const workOrder = (stage: string, key: SQL, at: SQL) => sql`coalesce((SELECT retry_after FROM abuse_work_versions
+  WHERE stage=${stage} AND source_key=${key} AND version_at=${at} AND version_count=0 AND failures>0),${at})`;
 export const runnableSeed = (stage: string, key: SQL, at: SQL) => outstanding(stage,key,at);
 function itemReason(error: unknown) {
   const code = databaseCodeOf(error);
-  // Connection loss, lock contention, schema and platform failures are stage
-  // failures, never grounds to set aside evidence.
-  if (error instanceof StageDeadline || databaseConflict(error) || (code !== '57014' && transientDatabaseError(error))) return null;
-  if (code && !/^(22|23|54|P0)/.test(code) && code !== '57014') return null;
-  // Never store exception messages: they can contain input, SQL or personal data.
-  return code ?? 'ITEM_ERROR';
+  // Positive attribution only. A driver failure, cancellation, resource limit,
+  // serialization conflict or unknown exception is never an item's fault.
+  return error instanceof InvalidObservation ? 'INVALID_OBSERVATION'
+    : code && /^(22|23)/.test(code) ? code : null;
 }
-// Set the savepoint *after* the guards and version read. On an item failure roll back
-// all derived writes, keep the guards, and record only the SQLSTATE for that version.
+class InvalidObservation extends Error {}
+// The permit commits with the outcome; infrastructure errors roll it back too.
 export async function isolateItem(tx: AbuseTx, stage: string, version: WorkVersion, work: () => Promise<void>) {
+  const match = sql`stage=${stage} AND source_key=${version.source_key} AND version_at=${version.at}::timestamptz AND version_count=${version.attempts ?? 0}`;
+  const { rows: [permit] } = await tx.execute<{retry:boolean;allowed:boolean}>(sql`WITH prior AS MATERIALIZED (
+    SELECT FROM abuse_work_versions WHERE ${match} AND failures>0), claimed AS (
+    UPDATE abuse_retry_slots SET available_at=clock_timestamp()+interval '15 minutes'
+    WHERE EXISTS (SELECT FROM prior) AND (stage,slot)=(SELECT stage,slot FROM abuse_retry_slots
+      WHERE stage=${stage} AND available_at<=now() ORDER BY available_at,slot LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING 1)
+    SELECT EXISTS(SELECT FROM prior) AS retry,EXISTS(SELECT FROM claimed) AS allowed`);
+  if (permit!.retry && !permit!.allowed) return false;
   await tx.execute(sql`SAVEPOINT abuse_item`);
-  try { await work(); return true; }
+  try { await work(); }
   catch (error) {
     const reason = itemReason(error);
     if (!reason) throw error;
     await tx.execute(rollbackItem);
-    const { rows: [row] } = await tx.execute<{ failures: number }>(sql`INSERT INTO abuse_work_versions AS v(stage,source_key,version_at,version_count,failures,reason)
-      VALUES (${stage},${version.source_key},${version.at}::timestamptz,${version.attempts ?? 0},1,${reason})
-      ON CONFLICT (stage,source_key,version_at,version_count) DO UPDATE SET failures=v.failures+1,reason=excluded.reason
-      WHERE v.failures BETWEEN 1 AND ${FAILURE_LIMIT-1} RETURNING failures`);
-    if (stage==='signIns' && row?.failures===FAILURE_LIMIT) {
-      await tx.execute(sql`DELETE FROM abuse_signin_queue WHERE source_key=${version.source_key}`);
-    }
-    log('warn',{code: row?.failures === FAILURE_LIMIT ? 'ABUSE_ITEM_QUARANTINED' : 'ABUSE_ITEM_RETRY', stage, reason});
+    await tx.execute(sql`WITH failed AS (INSERT INTO abuse_work_versions AS v(stage,source_key,version_at,version_count,failures,reason,first_failed_at,retry_after)
+      VALUES (${stage},${version.source_key},${version.at}::timestamptz,${version.attempts ?? 0},1,${reason},clock_timestamp(),clock_timestamp()+interval '15 minutes')
+      ON CONFLICT (stage,source_key,version_at,version_count) DO UPDATE SET failures=v.failures+1,reason=excluded.reason,
+        retry_after=clock_timestamp()+CASE WHEN v.failures=1 THEN interval '30 minutes' ELSE interval '1 hour' END
+      WHERE v.failures>0 RETURNING source_key,retry_after)
+      UPDATE abuse_signin_queue q SET retry_after=f.retry_after FROM failed f WHERE ${stage}='signIns' AND q.source_key=f.source_key`);
+    log('warn',{code:'ABUSE_ITEM_RETRY',stage,reason});
     return false;
   }
+  if (permit!.retry && (stage==='links' || stage==='scores')) await tx.execute(sql`DELETE FROM abuse_work_versions WHERE ${match}`);
+  return true;
 }
 type Candidate = { issuer: string; subject: string; user_id: string | null };
 async function foldSignIns(runtime: Hosted, run: Run) {
@@ -417,7 +428,7 @@ async function foldSignIns(runtime: Hosted, run: Run) {
   let items = 0;
   // The earliest pending hint survives a job cut. Seek past busy guards within the slice.
   let after: SignInPosition | undefined = run.signInSeek ?? undefined;
-  let retrySingles = false, busy = false;
+  let busy = false, retries = true, retryTurn = true;
   let scanning = run.scanningSignIns;
   while (!spent(run) && items < SIGN_INS_A_RUN) {
     if (scanning) {
@@ -427,27 +438,31 @@ async function foldSignIns(runtime: Hosted, run: Run) {
       if (scanning) { run.advanced = true; continue; }
     }
     const started = Date.now();
-    const size = Math.min(run.batchSize,SIGN_INS_A_RUN-items);
+    let size = Math.min(run.batchSize,SIGN_INS_A_RUN-items);
     let folding = false, next = after;
     const batch = await bounded(runtime, async tx => {
       // Limit the ordered index walk BEFORE resolving identities. Neither the
       // receipt count nor a burst sharing one timestamp changes the pick size.
+      const retry = retries && retryTurn;
+      if (retry) size=1;
       const { rows: page } = await tx.execute<SignInPosition & {issuer: string|null;subject:string|null;user_id:string|null}>(sql`WITH heads AS MATERIALIZED (
         SELECT * FROM abuse_signin_queue
-        ${after ? sql`WHERE (version_at,order_key,source_key)>(${after.at}::timestamptz,${after.key},${after.source_key})` : sql``}
-        ORDER BY version_at,order_key,source_key LIMIT ${size})
+        ${retry ? sql`WHERE retry_after<=now() AND ${hasPermit('signIns')} ORDER BY retry_after,source_key` : sql`WHERE retry_after IS NULL
+          ${after ? sql`AND (version_at,order_key,source_key)>(${after.at}::timestamptz,${after.key},${after.source_key})` : sql``}
+          ORDER BY version_at,order_key,source_key`} LIMIT ${size})
         SELECT ${utc(sql`h.version_at`)} AS at,h.order_key AS key,h.source_key,a.issuer,a.subject,i.user_id FROM heads h
         LEFT JOIN LATERAL (SELECT issuer,subject FROM nightmail_signin_attempts a WHERE a.ctid=h.source_tid
           AND abuse_key(a.issuer,a.subject)=h.source_key LIMIT 1) a ON true
         LEFT JOIN LATERAL (SELECT user_id FROM nightmail_oidc_identities i WHERE (i.issuer,i.subject)=(a.issuer,a.subject) LIMIT 1) i ON true
         ORDER BY h.version_at,h.order_key,h.source_key`);
       const last = page.at(-1);
-      next = last && { at: last.at, key: last.key, source_key: last.source_key };
+      if (!retry) next = last && { at: last.at, key: last.key, source_key: last.source_key };
       const candidates = page.filter((r): r is SignInPosition & Candidate => r.issuer!==null && r.subject!==null);
       const keys = (r: Candidate) => [guardKey(subjectGuard(r.issuer,r.subject)),guardKey({type:'attempt',id:attemptEntity(runtime.config,r.issuer,r.subject)}),
         ...(r.user_id ? [guardKey({type:'user',id:r.user_id})] : [])];
       const held = candidates.length ? await tryGuards(tx,candidates.flatMap(keys)) : new Set<string>();
       const ready = candidates.filter(r => keys(r).every(k => held.has(k)));
+      if (retry && ready.length<candidates.length) retries=false;
       busy ||= ready.length < candidates.length;
       // A fresh READ COMMITTED statement after taking the locks: erasures, exclusions,
       // admissions and replacements committed since discovery are visible here.
@@ -460,46 +475,50 @@ async function foldSignIns(runtime: Hosted, run: Run) {
       const stale = [...page.filter(r => r.subject===null),...ready.filter(r => !current.has(r.source_key))];
       if (stale.length) await tx.execute(sql`WITH removed AS (DELETE FROM abuse_signin_queue WHERE source_key=ANY(${sql.param(stale.map(r=>r.source_key))}::text[]) RETURNING 1)
         UPDATE abuse_state SET signin_rescan=true WHERE id='monitor' AND EXISTS (SELECT FROM removed)`);
-      if (!rows.length) return { read: page.length, folded: 0, added: 0 };
+      if (!rows.length) return { read: page.length, folded: 0, added: 0, known: retry };
       const validated = rows.map(({ observed, ...r }) => {
         const signals = Observed.safeParse(observed).data;
-        if (!signals) log('warn', { code: 'ABUSE_STEP_FAILED', step: 'signIn' });
         return { ...r, signals, attempt: attemptEntity(runtime.config,r.issuer,r.subject) };
       });
       await graphLock(tx);
       let added = 0;
       const fold = async () => {
+        if (validated.some(r=>!r.signals)) throw new InvalidObservation();
         const result = await tx.execute<{ added: number }>(sql`SELECT abuse_fold_signins(${JSON.stringify(validated)}::jsonb,
-          ${busy || retrySingles ? null : JSON.stringify(next)}::jsonb) AS added`);
+          ${busy || retry ? null : JSON.stringify(next)}::jsonb) AS added`);
         await wakeClusters(tx, validated.map(r => r.user_id ? { type: 'user', id: r.user_id } : { type: 'attempt', id: r.attempt }));
         added = result.rows[0]!.added;
       };
       folding = true;
       if (rows.length === 1) {
-        if (!await isolateItem(tx,'signIns',rows[0]!,fold)) return {read: page.length,folded: 0,added: 0,singleFailed: true};
+        if (!await isolateItem(tx,'signIns',rows[0]!,fold)) return {read: page.length,folded: 0,added: 0,known: retry};
       } else await fold();
-      return { read: page.length, folded: rows.length, added };
+      return { read: page.length, folded: rows.length, added, known:retry };
     }).catch(error => {
       // A failed batch has no committed writes. Isolate errors one at a time;
-      // halve timed-out batches. No row is blamed for a shared lock or connection failure.
+      // infrastructure failures leave the item untouched and cut the whole stage.
       if (!folding || size === 1 || !itemReason(error)) throw error;
-      run.batchSize = databaseCodeOf(error)==='57014' ? Math.max(1,Math.floor(size/2)) : 1;
+      run.batchSize = 1;
       return {read: 0,folded: 0,added: 0,retry: true};
     });
     if ('retry' in batch) continue;
     after = next;
-    retrySingles ||= 'singleFailed' in batch;
+    retryTurn=!batch.known;
     items += batch.folded; run.items = items; run.added += batch.added;
     if (batch.folded) {
       log('info', { code: 'ABUSE_SIGNIN_BATCH', items: batch.folded, msPerItem: (Date.now()-started)/batch.folded });
       // A whole successful batch earns back capacity, including across job cuts.
-      if (batch.folded===size) run.batchSize=Math.min(BATCH_SIZE,run.batchSize*2);
+      if (!batch.known && batch.folded===size) run.batchSize=Math.min(BATCH_SIZE,run.batchSize*2);
+    }
+    if (batch.known) {
+      if (!batch.read) retries=false;
+      continue;
     }
     if (items < SIGN_INS_A_RUN && batch.read < size) {
-      if (retrySingles) { after=undefined; retrySingles=false; continue; }
+      if (retries) continue;
       if (busy) { cut(run,'signIns','limit'); return items; }
       const reset = await bounded(runtime,tx=>tx.execute<{rescan:boolean}>(sql`WITH prior AS MATERIALIZED (
-        SELECT signin_rescan OR EXISTS (SELECT FROM abuse_signin_queue) AS rescan FROM abuse_state WHERE id='monitor')
+        SELECT signin_rescan OR EXISTS (SELECT FROM abuse_signin_queue WHERE retry_after IS NULL) AS rescan FROM abuse_state WHERE id='monitor')
         UPDATE abuse_state SET signin_scan_block=0,signin_scan_end=NULL,signin_rescan=false,signin_seek=NULL FROM prior
         WHERE id='monitor' AND signin_scan_block<0 RETURNING prior.rescan`));
       if (reset.rows[0] && !reset.rows[0].rescan) return items;
@@ -516,7 +535,7 @@ async function foldPayments(runtime: Hosted, run: Run) {
   while (!spent(run) && items + skipped.length < PAYMENTS_A_RUN) {
     const folded = await bounded(runtime, async tx => {
       const { rows: [row] } = await tx.execute<{ id: string; workspace_id: string }>(sql`SELECT p.id,p.workspace_id FROM billing_payment_attempts p
-        WHERE ${where} AND NOT (p.id=ANY(${sql.param(skipped)}::text[])) ORDER BY p.updated_at,p.id LIMIT 1`);
+        WHERE ${where} AND NOT (p.id=ANY(${sql.param(skipped)}::text[])) ORDER BY ${workOrder('payments',paymentKey,sql`p.updated_at`)},p.id LIMIT 1`);
       if (!row) return null;
       const workspace: Guard & Entity = { type: 'workspace', id: row.workspace_id };
       if (!(await tryGuards(tx,[guardKey(workspace)])).size) return { busy: row.id, added: 0 };
@@ -536,7 +555,7 @@ async function foldPayments(runtime: Hosted, run: Run) {
           await wakeClusters(tx,[workspace]);
         }
         await tx.execute(sql`INSERT INTO abuse_work_versions(stage,source_key,version_at) VALUES('payments',${current.source_key},${current.at}::timestamptz)
-          ON CONFLICT(stage,source_key,version_at,version_count) DO UPDATE SET failures=0,reason=NULL`);
+          ON CONFLICT(stage,source_key,version_at,version_count) DO UPDATE SET failures=0,reason=NULL,retry_after=NULL,first_failed_at=NULL`);
       });
       return { busy: null, added, retry: !ok };
     });
@@ -655,7 +674,10 @@ async function wakeClusters(tx: AbuseTx, members: Entity[]) {
       JOIN jsonb_to_recordset(${JSON.stringify(members)}::jsonb) e(type text,id text) ON (m.entity_type,m.entity_id)=(e.type,e.id)) RETURNING id)
     UPDATE jobs SET status=CASE WHEN status='running' THEN status ELSE 'pending' END,
       payload=payload||jsonb_build_object('revision',coalesce((payload->>'revision')::bigint,0)+1),
-      available_at=CASE WHEN status='pending' THEN available_at ELSE now() END,
+      available_at=CASE WHEN status='pending' AND NOT (payload ? 'waitingForItem' AND
+        (EXISTS (SELECT FROM dirty) OR EXISTS (SELECT FROM identity_links l JOIN jsonb_to_recordset(${JSON.stringify(members)}::jsonb) m(type text,id text)
+          ON (m.type,m.id) IN ((l.a_type,l.a_id),(l.b_type,l.b_id)) WHERE l.pending AND NOT EXISTS (SELECT FROM abuse_work_versions v
+            WHERE v.stage='links' AND v.source_key=abuse_key(l.a_type,l.a_id) AND v.failures>0)))) THEN available_at ELSE now() END,
       attempts=CASE WHEN status='running' THEN attempts ELSE 0 END
     WHERE id='abuse.stage.clusters' AND (EXISTS (SELECT FROM dirty) OR EXISTS (SELECT FROM identity_links WHERE pending))`);
 }
@@ -728,6 +750,7 @@ async function withStageConnection<T>(host: Hosted, deadline: number, work: (db:
 
 export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = budgets[stage], batchSize = BATCH_SIZE) {
   const started = Date.now(), runtime = { ...host, stage, deadline: Math.min(started+budget,host.deadline ?? Infinity,host.lease ? Date.parse(host.lease) : Infinity) };
+  let retryAt: string | null = null;
   let items = 0, added = 0, stopped: Cut | undefined;
   let active: Run | undefined;
   if (monitoring(host.config)) try {
@@ -749,6 +772,12 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
           if (r.cut) cut(run,stage,r.cut);
         }
         added = run.added; stopped = run.cuts[stage];
+        if (!stopped && stage!=='sample' && host.lease) {
+          const {rows:[waiting]} = await bounded(runtime,tx=>tx.execute<{at:string|null}>(sql`SELECT
+            CASE WHEN min(retry_after) IS NOT NULL THEN min(greatest(retry_after,slot_due)) END AS at FROM (SELECT live.retry_after,
+                (SELECT min(available_at) FROM abuse_retry_slots WHERE stage=live.stage) AS slot_due FROM (${liveFailures(stage)}) live) due`));
+          retryAt=waiting!.at;
+        }
       }
     });
   } catch (error) {
@@ -760,7 +789,7 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
   }
   if (stopped) log(stopped === 'time' ? 'warn' : 'info', { code: 'ABUSE_STEP_CUT', step: stage, reason: stopped });
   log('info', { code: 'ABUSE_STAGE', step: stage, items, added, ms: Date.now()-started, cut: stopped });
-  return { items, added, cut: stopped, advanced: items > 0 || !!active?.advanced, batchSize: active?.batchSize ?? batchSize };
+  return { items, added, retryAt: retryAt as string|null, cut: stopped, advanced: items > 0 || !!active?.advanced, batchSize: active?.batchSize ?? batchSize };
 }
 
 // A cut needs time to make its singleton due again. Bound the queue's status write as
@@ -776,19 +805,35 @@ export const abuseStageJob: JobHandler = async (runtime,payload,job) => {
   if (!stage) throw new Error('Unknown abuse stage');
   const scoped = { ...runtime, lease: job.leaseFence, deadline: (job.startedAt ?? Date.now())+budgets[stage] };
   const batchSize = Math.max(1,Math.min(BATCH_SIZE,Number(payload.batchSize) || BATCH_SIZE));
+  const { waitingForItem: _waiting, ...continuation } = payload;
   const result = await runAbuseStage(scoped,stage,budgets[stage],batchSize);
   const defer = () => {
     const stalls = result.advanced ? 0 : Math.min(6,(Number(payload.stalls) || 0)+1);
     const delay = stalls ? Math.min(900,30*2**(stalls-1)) : 0;
     const size = result.cut==='time' && !result.advanced ? Math.max(1,Math.floor(result.batchSize/2)) : result.batchSize;
     if (delay) log('warn',{code:'ABUSE_STAGE_BACKOFF',stage,delay,batchSize:size});
-    throw new JobDeferred(new Date(Date.now()+1000*delay).toISOString(),{...payload,stalls,batchSize:size});
+    throw new JobDeferred(new Date(Date.now()+1000*delay).toISOString(),{...continuation,stalls,batchSize:size});
   };
   if (result.cut) defer();
+  if (result.retryAt) {
+    // A finished pass with only data retries left may sleep until the first
+    // due item/permit. Never spin if another worker changed either meanwhile.
+    const at=new Date(Math.max(Date.now()+15*60_000,new Date(result.retryAt).getTime())).toISOString();
+    if (stage!=='clusters') throw new JobDeferred(at,{...payload,stalls:0,batchSize:result.batchSize});
+    // A fresh grouping/scoring request can wake an idle scorer. Fence this
+    // transition just like completion, or a concurrent wake could be lost.
+    const waiting=await settleStage(runtime,job.id,job.startedAt ?? Date.now(),sql`UPDATE jobs SET
+      status='pending',lease_until=NULL,last_error=NULL,attempts=0,available_at=${at}::timestamptz,
+      payload=(payload-'stalls')||'{"waitingForItem":true}'::jsonb
+      WHERE id=${job.id} AND status='running' AND lease_until=${job.leaseFence}::timestamptz AND
+      coalesce((payload->>'revision')::bigint,0)=${Number(payload.revision ?? 0)} RETURNING id`);
+    if (!waiting.rowCount) defer();
+    return;
+  }
   // Don't lose a writer's wake between the last empty read and settlement.
   if (stage==='clusters' && job.leaseFence) {
     if (scoped.deadline-Date.now()<2*WIRE_RESERVE_MS) defer();
-    const settled = await withStageConnection(scoped,scoped.deadline,db => bounded({ ...scoped, db }, tx => tx.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL,payload=payload-'stalls'-'batchSize'
+    const settled = await withStageConnection(scoped,scoped.deadline,db => bounded({ ...scoped, db }, tx => tx.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL,payload=payload-'stalls'-'batchSize'-'waitingForItem'
       WHERE id=${job.id} AND status='running' AND lease_until=${job.leaseFence}::timestamptz AND
       coalesce((payload->>'revision')::bigint,0)=${Number(payload.revision ?? 0)} RETURNING id`))).catch(error => {
       if (timeError(error)) defer();
@@ -797,6 +842,26 @@ export const abuseStageJob: JobHandler = async (runtime,payload,job) => {
     if (!settled.rowCount) defer();
   }
 };
+
+// Match current source versions in sets: a replaced/deleted source or a component
+// already handled by another seed must disappear from Health without operator cleanup.
+function liveFailures(stage?: AbuseStage) {
+  const sources: SQL[] = [];
+  if (!stage || stage==='signIns') sources.push(sql`SELECT 'signIns' AS stage,abuse_key(a.issuer,a.subject) AS key,a.last_at AS at,a.attempts AS n
+    FROM nightmail_signin_attempts a WHERE observed IS NOT NULL AND EXISTS(SELECT FROM failed WHERE stage='signIns')`);
+  if (!stage || stage==='payments') sources.push(sql`SELECT 'payments' AS stage,abuse_key(id) AS key,updated_at AS at,0 AS n
+    FROM billing_payment_attempts WHERE EXISTS(SELECT FROM failed WHERE stage='payments')`);
+  if (!stage || stage==='clusters') sources.push(sql`SELECT 'links' AS stage,abuse_key(a_type,a_id) AS key,min(pending_since) AS at,0 AS n
+    FROM identity_links WHERE pending AND EXISTS(SELECT FROM failed WHERE stage='links') GROUP BY a_type,a_id
+    UNION ALL SELECT 'scores',abuse_key(id),least(score_requested_at,scored_at+interval '30 minutes'),0
+    FROM abuse_clusters WHERE EXISTS(SELECT FROM failed WHERE stage='scores')`);
+  return sql`WITH failed AS MATERIALIZED (SELECT * FROM abuse_work_versions WHERE failures>0
+    ${stage==='clusters' ? sql`AND stage IN ('links','scores')` : stage ? sql`AND stage=${stage}` : sql``}),
+    current AS (${sql.join(sources,sql` UNION ALL `)})
+    SELECT f.* FROM failed f JOIN current c ON (c.stage,c.key COLLATE "C",c.at,c.n)=(f.stage,f.source_key,f.version_at,f.version_count)`;
+}
+export const abuseFailures = sql`(SELECT json_object_agg(stage,json_build_object('count',n,'seconds',seconds)) FROM
+  (SELECT stage,count(*) AS n,extract(epoch FROM now()-min(first_failed_at)) AS seconds FROM (${liveFailures()}) live GROUP BY stage) totals)`;
 
 export const abuseLag = sql`(SELECT json_build_object(
   'sign-ins',extract(epoch FROM now()-(SELECT a.last_at FROM nightmail_signin_attempts a WHERE ${eligibleSignIn(sql`s.active_since`,sql`(s.cursors#>>'{signIns,at}')::timestamptz`,sql`s.cursors#>>'{signIns,key}'`,true)} ORDER BY a.last_at LIMIT 1)),

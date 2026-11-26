@@ -33555,11 +33555,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const schema = 'abuse_test_'+randomUUID().replaceAll('-',''), control = await fixtureDatabase(t);
       await control.query('CREATE SCHEMA '+schema);
       cleanup(t, async () => { await control.query('DROP SCHEMA '+schema+' CASCADE'); });
-      const tables = ['jobs','abuse_work_versions','abuse_signin_queue','abuse_state','nightmail_signin_attempts','nightmail_oidc_identities','nightmail_users','billing_payment_attempts',
+      const tables = ['jobs','abuse_retry_slots','abuse_work_versions','abuse_signin_queue','abuse_state','nightmail_signin_attempts','nightmail_oidc_identities','nightmail_users','billing_payment_attempts',
         'workspaces','workspace_members','abuse_signals','abuse_alerts','identity_links','abuse_clusters','abuse_cluster_members','abuse_exclusions','abuse_floors','abuse_sampling',
         'sending_emails','sending_email_events','provider_feedback_history'];
       await control.query('SET search_path='+schema+',public');
       for (const table of tables) await control.query(`CREATE TABLE ${table} (LIKE public.${table} INCLUDING ALL)`);
+      await control.query('INSERT INTO abuse_retry_slots SELECT * FROM public.abuse_retry_slots');
       await control.query('CREATE TRIGGER reset_pending BEFORE UPDATE OF pending ON identity_links FOR EACH ROW EXECUTE FUNCTION abuse_link_pending()');
       Object.assign(runtime.config, { multiTenant: true, abuseMonitoring: { since: '2020-01-01Z' } });
       const on = (client: pg.Client) => ({ ...runtime, db: drizzle(client) });
@@ -33762,19 +33763,59 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           [{stage:'payments',n:2},{stage:'signIns',n:2}]);
       });
 
+      await t.test('12 sign-ins survive seven timed-out queue claims and fold exactly once on the first recovered claim', async () => {
+        await seed(12,'slowdown-');
+        await control.query(`CREATE TRIGGER slowdown BEFORE INSERT ON abuse_signals FOR EACH ROW EXECUTE FUNCTION slow_fold();
+          UPDATE jobs SET status='completed';
+          UPDATE jobs SET status='pending',payload='{}',available_at=now() WHERE id='abuse.stage.signIns'`);
+        for (const delay of [30,60,120,240,480,900,900]) {
+          assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+          const row=(await control.query("SELECT extract(epoch FROM available_at-clock_timestamp()) AS delay FROM jobs WHERE id='abuse.stage.signIns' AND status='pending'")).rows[0];
+          assert.ok(row.delay>delay-2 && row.delay<=delay+1);
+          assert.equal((await control.query('SELECT FROM abuse_work_versions WHERE failures>0')).rowCount,0);
+          await control.query("UPDATE jobs SET available_at=now() WHERE id='abuse.stage.signIns'");
+        }
+        await control.query('DROP TRIGGER slowdown ON abuse_signals');
+        assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+        assert.equal((await control.query("SELECT FROM abuse_signals WHERE seen=1 AND value IN (SELECT md5('slowdown-'||i) FROM generate_series(1,12)i)")).rowCount,12);
+        assert.equal((await control.query("SELECT status FROM jobs WHERE id='abuse.stage.signIns'")).rows[0].status,'completed');
+      });
+
       await t.test('a poisonous sign-in and cluster are isolated; healthy peers and their alert finish in the same run', async () => {
         await seed(6,'isolate-');
         await control.query(`UPDATE nightmail_signin_attempts SET last_at=now()-interval '3 hours' WHERE subject='isolate-1';
-          CREATE FUNCTION reject_item() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture fault'; END $$;
+          CREATE FUNCTION reject_item() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture data fault' USING ERRCODE='23514'; END $$;
           CREATE TRIGGER reject_signal BEFORE INSERT ON abuse_signals FOR EACH ROW WHEN (NEW.value=md5('isolate-1')) EXECUTE FUNCTION reject_item()`);
         const isolated = await runAbuseStage(on(one),'signIns');
         assert.equal(isolated.items,5);
-        const failures = async (stage: string) => (await control.query('SELECT failures,reason FROM abuse_work_versions WHERE stage=$1 AND failures>0',[stage])).rows;
-        assert.deepEqual(await failures('signIns'),[{failures:3,reason:'P0001'}]);
+        const failures = async (stage:string) => (await control.query(`SELECT failures::int,reason,
+          round(extract(epoch FROM retry_after-clock_timestamp())/60)::int AS minutes FROM abuse_work_versions WHERE stage=$1 AND failures>0`,[stage])).rows;
+        const {abuseFailures} = await import('./src/abuse.js'), {evaluate,emptyMemory} = await import('./src/health.js');
+        const warnings = async () => {
+          const [{f}] = (await drizzle(control).execute<{f:Record<string,{count:number;seconds:number}>}>(sql`SELECT ${abuseFailures} AS f`)).rows;
+          return evaluate({queues:[],late:[],failed:[],campaigns:[],counters:[],database:{connections:1,maxConnections:100,longTransactions:0,
+            oldestTransactionSeconds:0,slowQueries:0,lockWaits:0,sizeBytes:0,abuseFailures:f}},emptyMemory(),Date.now()/1000,null).findings.filter(x=>x.kind==='abuse-item-failing');
+        };
+        const due = (stage:string) => control.query("UPDATE abuse_work_versions SET retry_after=now()-interval '1 second' WHERE stage=$1 AND failures>0",[stage]);
+        const checkSchedule = async (stage:'signIns'|'links'|'scores') => {
+          const job=stage==='signIns' ? 'signIns' : 'clusters';
+          await control.query("UPDATE abuse_work_versions SET first_failed_at=now()-interval '12 minutes' WHERE stage=$1 AND failures>0",[stage]);
+          for (const [i,minutes] of [15,30,60,60,60].entries()) {
+            if (i) { await due(stage); await runAbuseStage(on(one),job); }
+            await runAbuseStage(on(one),job); // Not due: repeated starts don't consume an attempt.
+            assert.deepEqual(await failures(stage),[{failures:i+1,reason:'23514',minutes}]);
+            const finding=(await warnings()).find(x=>x.key==='abuse-item-failing:'+stage);
+            assert.equal(finding?.value,1); assert.match(finding!.words,/Oldest failure: 12 min/);
+            if (stage!=='signIns') assert.match(finding!.words,/no alert can be raised/);
+          }
+        };
+        await checkSchedule('signIns');
         assert.ok((await lag())['sign-ins']!>=10800);
-        await control.query("DROP TRIGGER reject_signal ON abuse_signals; UPDATE nightmail_signin_attempts SET last_at=now(),attempts=attempts+1 WHERE subject='isolate-1'");
+        await control.query('DROP TRIGGER reject_signal ON abuse_signals');
+        await due('signIns');
         assert.equal((await runAbuseStage(on(one),'signIns')).items,1);
         assert.equal((await lag())['sign-ins'],null);
+        assert.deepEqual(await warnings(),[]);
 
         // Two unrelated components, both at review. Reject only the first one's membership writes.
         await control.query(`INSERT INTO abuse_signals(entity_type,entity_id,kind,value,first_at,last_at)
@@ -33785,16 +33826,31 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           (VALUES ('broken',interval '3 hours'),('healthy',interval '1 hour')) p(prefix,age),unnest(ARRAY['provider','email_alias']) kind;
           CREATE TRIGGER reject_component BEFORE INSERT ON abuse_cluster_members FOR EACH ROW WHEN (NEW.entity_id='broken1') EXECUTE FUNCTION reject_item()`);
         assert.ok((await runAbuseStage(on(one),'clusters')).items>0);
-        assert.deepEqual(await failures('links'),[{failures:3,reason:'P0001'}]);
+        await checkSchedule('links');
         assert.ok((await lag())['pending links']!>=10800);
         const jobsFor = async (member:string) => (await control.query(`SELECT a.id,count(j.id)::int AS jobs FROM abuse_alerts a LEFT JOIN jobs j
           ON j.type='abuse.alert' AND j.payload->>'alertId'=a.id WHERE $1=ANY(a.members) GROUP BY a.id`,[member])).rows;
         assert.deepEqual((await jobsFor('user:healthy1')).map(r=>r.jobs),[1]);
         assert.deepEqual(await jobsFor('user:broken1'),[]);
-        await control.query("DROP TRIGGER reject_component ON abuse_cluster_members; DELETE FROM abuse_work_versions WHERE stage='links' AND failures=3");
-        await runAbuseStage(on(one),'clusters'); await runAbuseStage(on(one),'clusters');
+        await control.query("UPDATE jobs SET status='completed'; UPDATE jobs SET status='pending',available_at=now() WHERE id='abuse.stage.clusters'");
+        assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+        assert.equal((await control.query("SELECT FROM jobs WHERE id='abuse.stage.clusters' AND status='pending' AND available_at>now()+interval '59 minutes'")).rowCount,1);
+        await control.query("DROP TRIGGER reject_component ON abuse_cluster_members"); await due('links');
+        await control.query("UPDATE jobs SET available_at=now() WHERE id='abuse.stage.clusters'");
+        assert.equal(await drainJobs(on(one),1,1,1000,'work'),1);
+        assert.equal((await control.query("SELECT status FROM jobs WHERE id='abuse.stage.clusters'")).rows[0].status,'completed');
         assert.deepEqual((await jobsFor('user:broken1')).map(r=>r.jobs),[1]);
         assert.equal((await lag())['pending links'],null);
+        assert.deepEqual(await warnings(),[]);
+        // Scoring an existing cluster, without new sign-ins or new edges.
+        await control.query(`UPDATE abuse_clusters SET score_requested_at=now()-interval '1 minute' WHERE members @> '[{"id":"broken1"}]';
+          CREATE TRIGGER reject_score BEFORE INSERT ON abuse_cluster_members FOR EACH ROW WHEN (NEW.entity_id='broken1') EXECUTE FUNCTION reject_item()`);
+        await runAbuseStage(on(one),'clusters');
+        await checkSchedule('scores');
+        await control.query('DROP TRIGGER reject_score ON abuse_cluster_members');
+        await due('scores'); await runAbuseStage(on(one),'clusters');
+        assert.deepEqual(await warnings(),[]);
+        assert.equal((await lag())['cluster scoring'],null);
         // Once retention drops an erasure's floor and receipts, the financial row
         // can still exist. Reading it cannot recreate the expired card evidence.
         await control.query("UPDATE abuse_state SET active_since=now()-interval '1 year'");
@@ -33890,6 +33946,30 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await runAbuseStage(on(two),'signIns')).items,1);
         assert.equal((await runAbuseStage(on(two),'signIns')).items,0);
       });
+
+      await t.test('10,000 outstanding data failures share 128 retries per hour and do not block new sign-ins', async () => {
+        await seed(10000,'retry-load-');
+        await control.query(`UPDATE nightmail_signin_attempts SET observed='{}' WHERE subject LIKE 'retry-load-%';
+          INSERT INTO abuse_work_versions(stage,source_key,version_at,version_count,failures,reason,first_failed_at,retry_after)
+          SELECT 'signIns',abuse_key(issuer,subject),last_at,attempts,3,'INVALID_OBSERVATION',now()-interval '1 day',now()-interval '1 hour'
+          FROM nightmail_signin_attempts WHERE subject LIKE 'retry-load-%';
+          UPDATE abuse_retry_slots SET available_at='-infinity' WHERE stage='signIns'`);
+        const retried=async () => (await control.query("SELECT count(*)::int AS n FROM abuse_work_versions WHERE failures=4 AND stage='signIns'")).rows[0].n;
+        for (let quarter=1; quarter<=4; quarter++) {
+          await seed(1,'retry-peer-'+quarter+'-');
+          if (quarter>1) await control.query("UPDATE abuse_retry_slots SET available_at=available_at-interval '15 minutes' WHERE stage='signIns'");
+          assert.equal((await runAbuseStage(on(one),'signIns')).items,1,'Fresh data can fold while permits are being used.');
+          assert.equal(await retried(),32*quarter);
+          assert.equal((await control.query("SELECT FROM abuse_retry_slots WHERE stage='signIns' AND available_at>now()+interval '14 minutes'")).rowCount,32);
+          await runAbuseStage(on(one),'signIns');
+          assert.equal(await retried(),32*quarter,'An extra stage claim grants no retries.');
+        }
+        assert.equal((await control.query("SELECT FROM abuse_work_versions WHERE stage='signIns' AND failures>0")).rowCount,10000);
+        await control.query("DELETE FROM nightmail_signin_attempts WHERE subject LIKE 'retry-load-%'");
+        const {abuseFailures}=await import('./src/abuse.js');
+        assert.equal((await drizzle(control).execute(sql`SELECT ${abuseFailures} AS f`)).rows[0].f,null,'Gone sources immediately leave Health.');
+        await control.query("DELETE FROM abuse_signin_queue WHERE retry_after IS NOT NULL; DELETE FROM abuse_work_versions WHERE failures>0");
+      });
     });
   });
   test('abuse monitoring: off until its activation time, then prospective only; a sign-in adds pseudonymised facts to its own log row and nothing else; only accepted Hosted mail made after activation is sampled; every value is a keyed hash or from a closed list; leased, bounded stage jobs; nothing runs on the send path', async t => {
@@ -33984,8 +34064,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const run = await h.hourly();
       const reads = await Promise.all(queries.mock.calls.map(async call => (await call.result as pg.QueryResult | undefined)?.rows));
       queries.mock.restore();
-      assert.deepEqual(run, { signIns: 9, payments: 4, sampled: 3, added: 8 + 7 + 6 + 8 + 2 + 18 });
-      assert.equal(warnings.mock.calls.filter(call => String(call.arguments[0]).includes('"step":"signIn"')).length, 5, 'Each malformed row is passed over.');
+      assert.deepEqual(run, { signIns: 4, payments: 4, sampled: 3, added: 8 + 7 + 6 + 8 + 2 + 18 });
+      assert.equal(warnings.mock.calls.filter(call => String(call.arguments[0]).includes('"reason":"INVALID_OBSERVATION"')).length, 5, 'Each malformed row is deferred without storing its contents.');
       // Sign-ins: a refused one sits under a keyed hash of its subject; an admitted one on its user.
       assert.deepEqual(await kinds('attempt', attemptOf('sub-a')), ['asn', 'browser', 'email', 'email_alias', 'flag:plus_alias', 'flag:waitlisted', 'net', 'provider']);
       const a = await signals('attempt', attemptOf('sub-a')), userB = await signals('user', b), of = (rows: typeof a, kind: string) => rows.filter(s => s.kind === kind).map(s => s.value);

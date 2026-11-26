@@ -328,7 +328,12 @@ A sign-in, payment, pending link or cluster due for scoring has waited over two 
 **An agent checks first**
 1. Check the named stage’s job: `SELECT type,status,available_at,last_error FROM jobs WHERE starts_with(type,'abuse.stage.');`.
 2. Compare its `ABUSE_STAGE` duration, `ABUSE_STEP_CUT` reason and (for sign-ins) `ABUSE_SIGNIN_BATCH` time per item. A cut after progress requeues immediately. A sign-in job can advance discovery before folding a row: `signin_scan_block` in `abuse_state` is the next block of this pass; −1 means the indexed queue is draining. A full successful batch doubles its size back toward 16. With no progress the stage waits 30 s, 1, 2, 4, 8, then 15 minutes between tries (`ABUSE_STAGE_BACKOFF`).
-3. `SELECT stage,source_key,version_at,version_count,reason FROM abuse_work_versions WHERE failures>=3;` shows versions set aside after three isolated failures. The reason is a SQLSTATE or a fixed error code. These versions still count toward lag while outstanding. After correcting the cause, remove only that exact failure record to retry; a new source version is eligible without operator action.
+3. A database timeout, lost connection or serialization failure backs off the stage; it never marks the source version as failed.
+
+### abuse-item-failing
+An item could not be folded, grouped or scored because of its data. Health shows the current count and age since the first failure separately for each kind, even before the stage-lag threshold. If scoring or grouping fails, no new alert can be raised for that work until it succeeds.
+
+Inspect the SQLSTATE or validation class, attempt count and due time: `SELECT stage,failures,reason,first_failed_at,retry_after FROM abuse_work_versions WHERE failures>0 ORDER BY retry_after;` This table may retain historical versions; Health counts only current outstanding ones. A failed item becomes due after 15 minutes, then 30, then every hour. Under contention the oldest due retries share 32 reusable permits per stage (16 each for grouping and scoring), each usable once per 15 minutes. New work needs no permit. No manual reset or new sign-in is needed.
 
 ### support-ai-cost
 The support AI's model calls cost more than `SUPPORT_AI.dailyLineUsd` (`api/src/health-thresholds.ts`) since midnight UTC.
