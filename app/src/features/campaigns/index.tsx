@@ -1110,9 +1110,15 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
   if (draft) {
     const eligible = audience.data?.eligible ?? 0
     const segmentLabel = `${segmentName ? ` · only ${segmentName}` : ''}${topicName ? ` · ${topicName}` : ''}`
+    // With a topic, what it does to the number, where the count is: the API counts it as launch captures it (approximate only
+    // when counting it on a large list ran out of time).
+    const about = audience.data?.approximate ? 'about ' : '', chosenTopic = audienceOptions.topics.find(topic => topic.id === campaign.topicId)
+    const recipientsLead = (counts: NonNullable<typeof audience.data>) => !campaign.topicId || campaign.requiredNotice ? `${number(counts.matched)} on the list`
+      : chosenTopic && !chosenTopic.subscribedByDefault ? `${about ? 'About ' : ''}${number(counts.eligible)} opted in to ${chosenTopic.name}, of ${number(counts.matched)} on the list`
+      : `${about ? 'About ' : ''}${number(counts.eligible)} will get it · ${about}${number(counts.topicExcluded ?? 0)} ${chosenTopic ? `opted out of ${chosenTopic.name}` : 'left out by the topic'} · ${number(counts.matched)} on the list`
     const toSummary = !campaign.listId ? 'No list chosen'
       : !audience.data ? `${listName ?? 'Your list'}${audience.isError ? ' · couldn’t count' : ''}`
-      : eligible ? `${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'} in ${listName ?? 'your list'}${segmentLabel}${campaign.requiredNotice ? ' · required notice' : ''}`
+      : eligible ? `${audience.data.approximate ? 'About ' : ''}${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'} in ${listName ?? 'your list'}${segmentLabel}${campaign.requiredNotice ? ' · required notice' : ''}`
       // One text node, so the list's name arriving moves nothing (the summary is right-aligned: campaigns.css).
       : <span className="review-warn">{`Nobody in ${listName ?? 'your list'} can receive it yet`}</span>
     const scoreSummary = sendability.data ? checksSummary(sendability.data) : missing.length ? 'After the message is complete' : !campaign.listId ? 'After you choose a list' : sendability.error ? 'Couldn’t check' : 'Checking…'
@@ -1127,7 +1133,7 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
       <div className="review-stages">
         <ReviewStage n={1} id="to" title="Recipients" open={openRow === 'to'} done={Boolean(campaign.listId && eligible)} onOpen={() => setOpenRow('to')} summary={toSummary} footer={next('to')}>
           <AudiencePicker campaign={campaign} audience={audienceOptions} notices={settings.data?.requiredNotices === true} disabled={sendMutation.isPending} />
-          {audience.data && campaign.listId && <p className="review-detail">{number(audience.data.matched)} on the list{audience.data.suppressed ? ` · ${number(audience.data.suppressed)} suppressed` : ''}{audience.data.unsubscribed ? <> · {number(audience.data.unsubscribed)} not subscribed{campaign.topicId ? ' or opted out of the topic' : ''} · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=unknown`}>Fix</Link></> : null}{audience.data.risky ? <> · {number(audience.data.risky)} risky skipped ({riskBreakdown(audience.data.riskyByReason, number)}) · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=risky`}>Review</Link></> : null}</p>}
+          {audience.data && campaign.listId && <p className="review-detail">{recipientsLead(audience.data)}{audience.data.suppressed ? ` · ${number(audience.data.suppressed)} suppressed` : ''}{audience.data.unsubscribed - (audience.data.topicExcluded ?? 0) > 0 ? <> · {number(audience.data.unsubscribed - (audience.data.topicExcluded ?? 0))} not subscribed · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=unknown`}>Fix</Link></> : null}{audience.data.risky ? <> · {number(audience.data.risky)} risky skipped ({riskBreakdown(audience.data.riskyByReason, number)}) · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=risky`}>Review</Link></> : null}</p>}
         </ReviewStage>
         <ReviewStage n={2} id="message" title="Message" open={openRow === 'message'} done={!missing.length && !missingFallbacks.length} onOpen={() => setOpenRow('message')} summary={messageSummary} footer={next('message')}>
           <div className="review-message">
@@ -1152,7 +1158,7 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
         <ReviewStage n={4} id="when" title="Send" open={openRow === 'when'} done={false} onOpen={() => setOpenRow('when')} summary={whenSummary} footer={<>
           {campaign.requiredNotice && <div className="review-confirm"><Checkbox label="This is a required notice, with no promotion." checked={noticeConfirmed} disabled={sendMutation.isPending} onCheckedChange={value => { setNoticeConfirmed(value); setError('') }} /></div>}
           {notes.length > 0 && <ul className="campaign-notes">{notes.map(([tone, text], index) => <li key={index} className="campaign-note" data-tone={tone} role={tone === 'danger' ? 'alert' : undefined}><span>{text}</span></li>)}</ul>}
-          <Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation} data-analytics={mode === 'schedule' ? 'campaigns/schedule' : 'campaigns/send'}>{mode === 'schedule' ? 'Schedule' : eligible ? `Send to ${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'}` : 'Send now'}</Button>
+          <Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation} data-analytics={mode === 'schedule' ? 'campaigns/schedule' : 'campaigns/send'}>{mode === 'schedule' ? 'Schedule' : eligible ? `Send to ${about}${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'}` : 'Send now'}</Button>
         </>}>
           <Tabs value={mode} onValueChange={value => { if (!sendMutation.isPending) { setMode(value as 'now' | 'schedule'); setError(''); setScheduleProblem('') } }} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
           {mode === 'schedule' && <ScheduleField id="campaign-schedule" value={scheduled} onChange={value => { setScheduled(value); setScheduleProblem(''); setError('') }} error={scheduleProblem} disabled={sendMutation.isPending} />}

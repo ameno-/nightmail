@@ -54,6 +54,8 @@ export const topicColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Name', width: '24%', card: 'title' },
   { key: 'description', label: 'Description', card: 'line' },
   { key: 'default', label: 'Who gets it', width: 280, card: 'line' },
+  // How many chose: out of a topic everyone gets, in to an opt-in one. A dash until counted, so the row never moves.
+  { key: 'count', label: <span title="How many have opted out of a topic everyone gets, or in to an opt-in one, counted when the page opened">Choices</span>, width: 132, align: 'right', card: 'inline' },
   { key: 'created', label: 'Created', width: 124, card: 'hide' },
   { key: 'actions', label: '', width: 56, align: 'right', skeleton: <span />, card: 'end' },
 ]

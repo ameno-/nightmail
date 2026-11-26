@@ -110,7 +110,8 @@ Every opt-out marks the contact \`unsubscribed\`, stops later campaigns to them 
 
 A campaign about one kind of mail can name a topic (\`topicId\`, from listTopics): it then skips the people
 who opted out of that topic, and its unsubscribe opts people out of that topic alone (their other
-marketing goes on). The footer link opens a preference page with every topic and Unsubscribe from all.
+marketing goes on). The footer link opens a preference page with the topics they get, to clear, and
+Unsubscribe from all; it never turns a topic on (record that with updateContactConsent and topicId).
 Unsubscribed from all always wins over a topic. Not on a required notice.
 
 ## Required notices
