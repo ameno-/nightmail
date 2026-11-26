@@ -38,7 +38,9 @@ export type ConversationEvidence = { kind: 'handoff'; token: string } | { kind: 
 export type Mode = 'member' | 'non_member' | 'pending_signin' | 'unverified';
 export type Verification = 'handoff' | 'dmarc' | 'signin' | 'none';
 /** A registration's answer (POST /v1/operator/support/conversations): Nightmail's decision about the conversation. */
-export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification; status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean };
+export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification; status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean;
+  /** Email: the message passed the sender checks a general answer needs (api/src/support-conversations.ts emailEvidence). */
+  generalAnswer?: boolean };
 export type ScopeWorkspace = { id: string; name: string; role: 'owner' | 'admin' | 'member' };
 /** GET /v1/support/scope: who the conversation is for and what it can read now, read at the start of every turn. */
 export type Scope = {
@@ -81,6 +83,8 @@ export interface SupportPlatform {
   mirrorState(conversationId: string, state: MirroredState): Promise<PlatformReply<InboxState>>;
   inboxState(conversationId: string): Promise<PlatformReply<InboxState>>;
   pullOutbox(conversationId?: string): Promise<PlatformReply<{ data: OutboxReply[] }>>;
+  /** Conversations whose sender asked, from the sign-in link, to be answered by email instead (one conversation's, after its wake). */
+  generalAnswers(conversationId?: string): Promise<PlatformReply<{ data: { conversationId: string; messageId: string; requestedAt: string }[] }>>;
   markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed'): Promise<PlatformReply<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>>;
   // One path to a human (api/src/support-staff-mail.ts): the staff emails Nightmail wrote, and each one sent.
   staffMail(): Promise<PlatformReply<{ data: StaffEmail[] }>>;

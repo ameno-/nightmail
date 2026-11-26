@@ -23,6 +23,7 @@ let closeFailures = 0;
 // Nightmail's 404 for one it never registered; down makes every inbox call answer 503.
 const inbox = new Map();
 let inboxDown = false;
+const releases = [];
 // Staff emails a test queued: { key, group, thread (the group to reply in, for a later one), subject, text, html }, and each group's thread once sent.
 const staffMail = [], staffThreads = new Map();
 // What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply), as a test sets it (/__staffreply):
@@ -64,7 +65,7 @@ const handoff = token => {
 // Registered conversations (api/src/support-conversations.ts): Nightmail decides whom each is for, and every stamped
 // request answers for that person only, whatever the request says.
 const conversations = new Map();
-const view = (c, created) => ({ id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, status: c.closed ? 'closed' : 'open', workspaceId: c.workspaceId, contentShared: !!c.content, created });
+const view = (c, created, generalAnswer) => ({ id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, status: c.closed ? 'closed' : 'open', workspaceId: c.workspaceId, contentShared: !!c.content, created, ...generalAnswer === undefined ? {} : { generalAnswer } });
 // A chat's own routes (api/src/support-conversations.ts chatOnly): an email conversation is refused them.
 const chatOnly = path => /^\\/v1\\/support\\/(?:notes|actions|approvals)(?:\\/|$)/.test(path) || /^\\/v1\\/support\\/domains\\/[^/]+\\/verify$/.test(path)
   || /^\\/v1\\/support\\/receiving\\/(?:hosts\\/[^/]+\\/recheck|forwards\\/[^/]+\\/resend)$/.test(path);
@@ -98,14 +99,14 @@ function scopeOf(c) {
  * An email's evidence as Nightmail reads it from the message it stored (api/src/support-conversations.ts emailEvidence):
  * a DMARC pass from exactly an account's verified address (the local part in the same case), a mailbox a sign-in proved,
  * binds that account while it has a workspace; a pass without one is non_member; an account's address that doesn't bind
- * is pending_signin.
+ * is pending_signin. generalAnswer: the sender checks a general answer needs (here, the DMARC pass).
  */
 function emailEvidence(messageId) {
   const { from, dmarc } = message(messageId), sender = from.toLowerCase(), verified = dmarc === 'PASS', owner = accountOf(sender);
   const exact = !!owner && owner.email.split('@')[0] === from.split('@')[0];
   const eligible = verified && exact && owner.proven, userId = eligible && memberships(owner.userId).length ? owner.userId : null;
   const mode = userId ? 'member' : verified && (!owner || eligible) ? 'non_member' : owner ? 'pending_signin' : 'unverified';
-  return { sender, userId, verification: verified ? 'dmarc' : 'none', mode, signIn: mode === 'pending_signin' || mode === 'unverified' };
+  return { sender, userId, verification: verified ? 'dmarc' : 'none', mode, signIn: mode === 'pending_signin' || mode === 'unverified', generalAnswer: verified };
 }
 // The audit trail as the API shows it (api/src/audit.ts AuditEntry): this conversation's own support.view and an earlier
 // one's (the support actor and summary.ticket are the conversation, summary.member and subject the person), one from a grant
@@ -177,16 +178,16 @@ export class SupportPlatform extends WorkerEntrypoint {
       const c = { id: conversationId, channel: 'email', userId: found.userId, sender: found.sender, mode: found.mode, verification: found.verification, workspaceId: null, content: null, closed: false, read: new Set(), page: null, challenges: new Set(), signedIn: [] };
       if (found.signIn) c.challenges.add(evidence.messageId);
       conversations.set(conversationId, c);
-      return ok(view(c, true), 201);
+      return ok(view(c, true, found.generalAnswer), 201);
     }
     if (existing.channel !== 'email') return refuse(409, 'SUPPORT_CONVERSATION_EXISTS');
     if (existing.closed) return refuse(409, 'SUPPORT_CONVERSATION_CLOSED');
     if (existing.sender !== found.sender) return refuse(409, 'SUPPORT_CONVERSATION_SENDER');
     // Bound: only mail that binds the same account again; never rebound or downgraded.
-    if (existing.userId) return found.userId === existing.userId ? ok(view(existing, false)) : refuse(409, 'SUPPORT_CONVERSATION_MISMATCH');
+    if (existing.userId) return found.userId === existing.userId ? ok(view(existing, false, found.generalAnswer)) : refuse(409, 'SUPPORT_CONVERSATION_MISMATCH');
     Object.assign(existing, { userId: found.userId, mode: found.mode, verification: found.verification });
     if (found.signIn) existing.challenges.add(evidence.messageId);
-    return ok(view(existing, false));
+    return ok(view(existing, false, found.generalAnswer));
   }
   async closeConversation(id) {
     calls.push(['closeConversation', id]);
@@ -298,6 +299,12 @@ export class SupportPlatform extends WorkerEntrypoint {
     const c = inbox.get(id);
     if (inboxDown) return unavailable();
     return c ? ok(inboxState(id, c)) : missing();
+  }
+  // Emails whose sender asked, from the sign-in link, to be answered by email instead (/__release, as the claim page's button does).
+  async generalAnswers(id) {
+    calls.push(['generalAnswers', id ?? null]);
+    if (inboxDown) return unavailable();
+    return ok({ data: releases.filter(r => id === undefined || r.conversationId === id) });
   }
   async pullOutbox(id) {
     calls.push(['pullOutbox', id ?? null]);
@@ -431,6 +438,7 @@ export default {
       if (!c.signedIn.includes(messageId)) c.signedIn.push(messageId);
       return new Response(null, { status: 200 });
     }
+    if (url.pathname === '/__release') { const { conversationId, messageId } = await request.json(); calls.push(['release', conversationId, messageId]); releases.push({ conversationId, messageId, requestedAt: new Date().toISOString() }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__session') { const { userId, activeSession, sessionSince } = await request.json(); known(userId, userId.slice(4) + '@other.test'); Object.assign(people.get(userId), { activeSession, sessionSince: sessionSince ?? null }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__workspaceName') { const { id, name } = await request.json(); WORKSPACES[id] = name; return new Response(null, { status: 204 }); }
     if (url.pathname === '/__full') { full.add((await request.json()).userId); return new Response(null, { status: 204 }); }
@@ -509,6 +517,24 @@ const MESSAGES = {
   msg_ticket_abort: ['thr_ticket_abort', null, 'PASS', null, 'Webhook test', 'My webhook test fails with a 500 every time.'],
   // The staff inbox's cases.
   msg_held_1: ['thr_held'], msg_held_2: ['thr_held'],
+  // Mail that waits on a claim (each sender an account that spells its address with a capital, so a DMARC pass binds
+  // nobody): answered in general after the claim wait, then followed up once claimed; claimed in time; taken by a ticket;
+  // over the answering limits; forged (no DMARC pass); and automatic.
+  msg_uc_1: ['thr_uc', 'uma@acme.test', 'PASS', null, 'My bounces', 'Unclaimed probe: why are my Gmail bounces up?'],
+  msg_uc_early: ['thr_uc_early', 'una@acme.test', 'PASS', null, 'My bounces', 'Unclaimed probe: why are my Gmail bounces up?'],
+  msg_uc_tk: ['thr_uc_tk', 'ulla@acme.test', 'PASS', null, 'Form fails', 'Ticket probe: the contact form fails after I submit it.'],
+  msg_uc_cap: ['thr_uc_cap', 'uri@acme.test', 'PASS', null, 'My bounces', 'Unclaimed probe: why are my Gmail bounces up?'],
+  msg_uc_forged: ['thr_uc_forged', 'ursa@acme.test', 'FAIL', null, 'Refund', 'Unclaimed probe: refund my top-up please.'],
+  msg_uc_auto: ['thr_uc_auto', 'ugo@acme.test', 'PASS', null, 'Out of office', 'I am away until Monday.'],
+  // The same sender writes again while the first waits on its claim, and again after its general answer; another address
+  // (no DMARC pass) replies in the thread.
+  msg_ur_1: ['thr_ur', 'ula@acme.test', 'PASS', null, 'My bounces', 'Unclaimed probe: why are my Gmail bounces up?'],
+  msg_ur_2: ['thr_ur', 'ula@acme.test', 'PASS', null, 'Re: My bounces', 'Reply probe: and why does my DKIM fail?'],
+  msg_ur_3: ['thr_ur', 'ula@acme.test', 'PASS', null, 'Re: My bounces', 'Later probe: one more thing about DMARC.'],
+  msg_ur_c: ['thr_ur', 'cyd@else.test', 'FAIL', null, 'Re: My bounces', 'Other address probe: answer me instead.'],
+  // Failed verification, no account: released from the sign-in link ("Answer me by email instead"), asking for account data.
+  msg_rel_1: ['thr_rel', 'rhys@else.test', 'FAIL', null, 'My account', 'Released probe: what is my balance, and which API keys and domains do I have?'],
+  msg_rel_2: ['thr_rel', 'rhys@else.test', 'FAIL', null, 'Re: My account', 'Released probe again: and why are my bounces up?'],
   // The work ledger's cases.
   msg_rate_1: ['thr_rate_1', 'rate@else.test'], msg_rate_2: ['thr_rate_2', 'rate@else.test'],
   msg_legal_late_1: ['thr_legal_late', 'counsel@late.test', 'PASS', 'legal@dev.bane.mx', 'Preservation', 'Please preserve the records.'],
@@ -890,6 +916,12 @@ export async function fakeGateway(request: Request): Promise<Response> {
     const next = ['get_billing', 'get_audit', 'api_errors', 'explain_request', 'list_webhook_deliveries', 'receiving_routes', 'held_addresses', 'pending_verifications', 'smtp_refusals', 'recheck_receiving_host', 'resend_forward_link', 'propose_to_staff'].find(name => !used.includes(name));
     if (next) return toolUse(`toolu_x_${next}_${body?.messages?.length ?? 0}`, next, next === 'explain_request' ? { requestId: 'req_' + 'c'.repeat(32) } : {});
     return say(body, ['Hi Ada,\n\nYour balance, invoices and API keys are answered in Help in the dashboard: sign in to Nightmail and open Help.\n\nNightmail support (AI)']);
+  }
+  // An email answered without a sign-in that asks for account data: the model reaches for account reads it isn't offered,
+  // one after another, then answers in general.
+  if (said.includes('A support email arrived') && said.includes('Released probe')) {
+    const next = ['account_context', 'list_domains', 'get_billing', 'bounce_reasons'].find(name => !used.includes(name));
+    return next ? toolUse(`toolu_rel_${next}_${body?.messages?.length ?? 0}`, next, next === 'bounce_reasons' ? { provider: 'gmail' } : {}) : say(body, [GENERAL_ANSWER]);
   }
   // A general email turn offers no account tool, so its answer is a general one; a verified one (bounce_reasons offered)
   // reads the bounces and answers from them.

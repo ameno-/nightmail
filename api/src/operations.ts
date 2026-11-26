@@ -717,7 +717,10 @@ export async function expireDomainClaims(runtime:Runtime,deadline:number) {
 function dnsSetupActor(c:Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
   const a=actor(c,'manage');
-  if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw denied('PERMISSION_DENIED','Use an owner or admin dashboard session to set up DNS.',{ permission: 'configuration', level: 'write', credential: 'dashboard', person: 'admin' });
+  // A person approves this at their DNS provider: the link is signed for them, and the provider sends their browser back
+  // to the dashboard. A key gets the records themselves from the domain, and says so when refused.
+  const id=c.req.param('id') ?? '{id}';
+  if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw denied('PERMISSION_DENIED',`One-click DNS setup is for an owner or admin signed in to the dashboard: it returns a link a person approves at their DNS provider. Every record to publish is in GET /v1/domains/${id} (dns: each record's name, type, value and status). Publish them at the DNS provider, then call POST /v1/domains/${id}/verify to check them now; the domain also re-checks on its own.`,{ permission: 'configuration', level: 'write', credential: 'dashboard', person: 'admin' });
   return a;
 }
 export function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'supersede'='manual') {
@@ -1086,7 +1089,7 @@ export function registerOperations(app: App) {
         throw e;
       }
       if (identity===null) return created(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection,dns_first:true}),claim.token);
-      if (!identity) throw new ApiError(409,'DOMAIN_CLAIM_EXPIRED','The domain claim is no longer active.');
+      if (!identity) throw new ApiError(409,'DOMAIN_CLAIM_EXPIRED',`${row.name} was released while it was being set up (its 72-hour ownership window ended, or it was removed). Add it again with POST /v1/domains.`);
       const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
       const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL ${claim.connection.kind==='shared' && runtime.config.platformAccount ? sql`AND EXISTS(SELECT FROM provider_connections c WHERE c.id=connection_id AND (c.aws_account_id IS NULL OR c.aws_account_id=${runtime.config.platformAccount}))` : sql``} RETURNING ${row.id}::text AS id,token`;

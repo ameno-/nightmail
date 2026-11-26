@@ -51,6 +51,7 @@ export interface OperatorHealth {
   campaigns: HealthCampaign[] | null; feedbackLagSeconds: number | null
   routes: { route: string; count: number; errors: number; p50Ms: number; p95Ms: number; slowestMs: number; behind: boolean }[] | null
   errors: { kind: 'code' | 'sqlstate' | 'error'; code: string; count: number }[] | null; requests: { count: number; errors: number } | null
+  settings?: { feature: string; settings: string[] }[]
   database: { connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number; diskBytes: number | null } | null
 }
 /**
@@ -131,7 +132,9 @@ export type ListRiskBand = 'low' | 'elevated' | 'high'
 export interface OperatorListRow {
   campaignId: string; campaignName: string; workspaceId: string; workspaceName: string; launchedAt: string; recipients: number; state: string
   measure: { sampled: number; exact: boolean; band: ListRiskBand | null; factors: { code: string; level: 'elevated' | 'high' }[]; values: Record<string, number>
-    counts: { flagged: number; deadDomains: number; unengaged: number; unengagedBase: number; neverMailed: number; softFailing: number; proven?: number } } | null
+    counts: { flagged: number; deadDomains: number; unengaged: number; unengagedBase: number; neverMailed: number; softFailing: number; proven?: number }
+    // The band by the first rule, kept beside it for comparison (api/src/list-risk.ts previous).
+    previous?: { flaggedSource: number | null; band: ListRiskBand | null; factors: { code: string; level: 'elevated' | 'high' }[] } } | null
   review: { verdict: string; required: string | null; reasons: string[] } | null
   outcome: { accepted: number; delivered: number; bounced: number; complained: number; probe: 'passed' | 'quarantined' | 'none'; pauseCode: string | null
     failures: { read: number; classes: Record<string, number>; blocklistReplies: number } }

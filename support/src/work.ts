@@ -7,7 +7,8 @@ export type Flow = 'support' | 'intake';
 export type WorkState = 'pending' | 'blocked' | 'parked' | 'done' | 'held' | 'dead';
 export type NewWork = { id: string; kind: string; payload: object; state?: 'pending' | 'parked'; dueAt?: number };
 export type WorkRow = { id: string; kind: string; payload: string; result: string; attempts: number; created_at: number };
-export type Outcome = { state?: 'done' | 'held' | 'parked'; result?: object; children?: NewWork[] };
+/** `dueAt`: when a parked item is next looked at (its owner's checks); otherwise its due time stays as it was. */
+export type Outcome = { state?: 'done' | 'held' | 'parked'; result?: object; children?: NewWork[]; dueAt?: number };
 
 class BindingError extends Error {}
 /** A rejected storage, network or RPC operation is retryable. Don't persist its exception text. */
@@ -90,10 +91,10 @@ export class WorkQueue {
         RETURNING id,kind,payload,result,attempts,created_at`, Date.now(), Date.now()).toArray()[0];
       if (!item) break;
       try {
-        const { state = 'done', result = {}, children = [] } = await run(item);
+        const { state = 'done', result = {}, children = [], dueAt } = await run(item);
         this.storage.transactionSync(() => {
           for (const child of children) this.insert(child, item.id);
-          this.sql.exec('UPDATE _support_work SET state=?, result=?, last_error=NULL, updated_at=? WHERE id=?', state, JSON.stringify(result), Date.now(), item.id);
+          this.sql.exec('UPDATE _support_work SET state=?, result=?, last_error=NULL, due_at=coalesce(?, due_at), updated_at=? WHERE id=?', state, JSON.stringify(result), dueAt ?? null, Date.now(), item.id);
           transitioned(item, state);
         });
       } catch (e) {

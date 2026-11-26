@@ -12,7 +12,8 @@ import { log, logError } from './log.js';
 // answers, mail refused at the edge is kept as a row instead of vanishing, and each object mirrors its work items here
 // (work.ts). The cron sweep (every five minutes) reads it, never each object, to finish what an earlier step left:
 // unsent team notices, intake mail for an address configured since, tickets no team email or follow-up covers, answers
-// parked for their sender's sign-in (a claim's own wake can be lost), and the replay poller (replay.ts), which accepts
+// parked for their sender's sign-in (a claim's own wake can be lost), conversations whose sender asked to be answered by
+// email instead (the claim page's), and the replay poller (replay.ts), which accepts
 // mail no webhook delivered. It also pulls the staff inbox's replies (api/src/support-inbox.ts) and hands each to its
 // conversation: a wake does the same for one conversation at once, and pulling is what lets staff reply at all (they can
 // only while it happens). And it hands new agent feedback reports to the triage agent (triage.ts), before the staff
@@ -108,7 +109,7 @@ export async function blockUnconfigured(env: Env, input: { messageId: string; th
 /** Every five minutes: each step on its own, so one failing never stops the others. */
 export async function sweep(env: Env, now = Date.now()) {
   const result: Record<string, number> = {};
-  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['triage', () => triageFeedback(env, now)], ['staffMail', () => staffMail(env)], ['staff', () => staffReplies(env)], ['signins', () => signinWakes(env, now)],
+  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['triage', () => triageFeedback(env, now)], ['staffMail', () => staffMail(env)], ['staff', () => staffReplies(env)], ['signins', () => signinWakes(env, now)], ['releases', () => releaseWakes(env)],
     ['replaySupport', () => replay(env, 'support', now)], ['replayIntake', () => replay(env, 'intake', now)]];
   for (const [name, step] of steps) {
     try { result[name] = await step(); }
@@ -131,6 +132,21 @@ async function signinWakes(env: Env, now: number) {
     await env.DB.prepare("UPDATE support_work SET due_at = ? WHERE flow = 'support' AND object = ? AND kind = 'answer' AND state = 'parked' AND due_at <= ?").bind(now + MINUTES_5, row.object, now).run();
     try { await env.CONVERSATION.get(env.CONVERSATION.idFromString(row.object)).wake(); n++; }
     catch (error) { logError(error, { event: 'email', code: 'SIGNIN_WAKE_FAILED' }, 'warn'); }
+  }
+  return n;
+}
+
+/**
+ * Conversations whose sender asked, from the sign-in link, to be answered by email instead (Nightmail's due list, the
+ * claim page's button): each woken, so it answers in general even when the page's own wake was lost. A conversation drops
+ * off the list once something reaches its sender.
+ */
+async function releaseWakes(env: Env) {
+  const due = platformBody(await env.BANE.generalAnswers()).data;
+  let n = 0;
+  for (const id of new Set(due.map(d => d.conversationId))) {
+    try { await env.CONVERSATION.get(env.CONVERSATION.idFromName(id)).wake(); n++; }
+    catch (error) { logError(error, { event: 'email', code: 'RELEASE_WAKE_FAILED' }, 'warn'); }
   }
   return n;
 }
