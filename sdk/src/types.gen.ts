@@ -2337,9 +2337,26 @@ export type CampaignAudienceCounts = {
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
             /**
-             * A link host of the domain's own for tracked links: not configurable yet.
+             * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
             linkHost: 'not_configured';
+            /**
+             * The domain's own link host, when this workspace has them; null without one.
+             */
+            ownLinkHost: {
+                /**
+                 * links.<domain>.
+                 */
+                hostname: string;
+                /**
+                 * true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile.
+                 */
+                active: boolean;
+            } | null;
+            /**
+             * Where this campaign's links (its unsubscribe link, the text part's, List-Unsubscribe and linked images) go if it launches now: the domain's own link host when active, else the link domain (Hosted) or this installation's own origin. Null when the launch would be refused for want of one (the workspace's sending is paused, or no link host for the domain). A launch on the link domain moves to the domain's own host for the copies made once that is active.
+             */
+            linkOrigin: string | null;
         };
         history: {
             /**
@@ -2590,9 +2607,26 @@ export type CampaignQueued = {
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
             /**
-             * A link host of the domain's own for tracked links: not configurable yet.
+             * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
             linkHost: 'not_configured';
+            /**
+             * The domain's own link host, when this workspace has them; null without one.
+             */
+            ownLinkHost: {
+                /**
+                 * links.<domain>.
+                 */
+                hostname: string;
+                /**
+                 * true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile.
+                 */
+                active: boolean;
+            } | null;
+            /**
+             * Where this campaign's links (its unsubscribe link, the text part's, List-Unsubscribe and linked images) go if it launches now: the domain's own link host when active, else the link domain (Hosted) or this installation's own origin. Null when the launch would be refused for want of one (the workspace's sending is paused, or no link host for the domain). A launch on the link domain moves to the domain's own host for the copies made once that is active.
+             */
+            linkOrigin: string | null;
         };
         history: {
             /**
@@ -6559,7 +6593,7 @@ export type OverviewSetup = {
         pending: number;
     } | null;
     /**
-     * The first steps of each focus (focus in getWorkspaceSettings), as yes or no. Null unless the caller manages the whole workspace.
+     * The first steps of each focus (focus in getWorkspaceSettings) and whether an agent is connected, as yes or no. Null unless the caller manages the whole workspace.
      */
     progress?: {
         /**
@@ -6594,6 +6628,10 @@ export type OverviewSetup = {
          * A campaign to a newsletter was launched.
          */
         issueSent: boolean;
+        /**
+         * An agent is connected: an unrevoked API key an agent setup made (the agent prompt's setup token or a device code), or a member's active MCP sign-in that defaults to this workspace or made agent tokens here.
+         */
+        agent: boolean;
     } | null;
 };
 
@@ -6845,6 +6883,37 @@ export type BillingAutoRecharge = {
      * At most this much auto-recharge per calendar month (UTC), at least amountCents and up to $250,000.
      */
     monthlyCapCents: number;
+};
+
+export type FeedbackReceipt = {
+    /**
+     * The support ticket it was filed as.
+     */
+    ticketId: string;
+    /**
+     * How many values that looked like keys, tokens or passwords were removed from message and context.
+     */
+    redacted: number;
+    createdAt: string;
+};
+
+export type FeedbackRequest = {
+    /**
+     * What happened and what would have made it easier. Plain text. Anything that looks like a key, token or password is removed before it is stored.
+     */
+    message: string;
+    /**
+     * The request ID of a call that went wrong: its x-request-id header, or error.requestId.
+     */
+    requestId?: string;
+    /**
+     * The operation or MCP tool involved, such as sendEmail.
+     */
+    operation?: string;
+    /**
+     * What you were trying to do, in a sentence or two.
+     */
+    context?: string;
 };
 
 export type BindMcpConnectionData = {
@@ -26807,3 +26876,64 @@ export type CreateBillingCardSetupResponses = {
 };
 
 export type CreateBillingCardSetupResponse = CreateBillingCardSetupResponses[keyof CreateBillingCardSetupResponses];
+
+export type SendFeedbackData = {
+    body: FeedbackRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/feedback';
+};
+
+export type SendFeedbackErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SendFeedbackError = SendFeedbackErrors[keyof SendFeedbackErrors];
+
+export type SendFeedbackResponses = {
+    /**
+     * Success
+     */
+    201: FeedbackReceipt;
+};
+
+export type SendFeedbackResponse = SendFeedbackResponses[keyof SendFeedbackResponses];

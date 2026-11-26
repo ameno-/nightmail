@@ -1,16 +1,17 @@
 import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType, type NavLinkProps } from 'react-router'
-import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, LifeBuoy, Lock, Newspaper, Plug, ScrollText, Search, Send, Settings, ShieldCheck, Users, type LucideIcon } from 'lucide-react'
+import { BookOpen, Bot, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, LifeBuoy, Lock, LogOut, MessageCircleQuestionMark, Newspaper, ScrollText, Search, Send, Settings, ShieldCheck, Users, type LucideIcon } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { preloadRouteChunk, sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { chunk, ChunkFallback } from '../lib/preloadable'
 import { queries } from '../data/queries'
-import { useScoreAbout } from '../lib/score-about'
+import { openScoreAbout, useScoreAbout } from '../lib/score-about'
 import { openConnectAgent, useConnectAgentOpen } from '../lib/connect-agent'
-import { Alert, Button, EmptyState, ErrorState, Icon, IconButton, Select, Sheet, Skeleton, SkeletonText, useToast, type IconSize } from './ui'
+import { Alert, Button, EmptyState, ErrorState, Icon, Select, Sheet, Skeleton, SkeletonText, useToast, type IconSize } from './ui'
 import { CommandMenu, type Command } from './CommandMenu'
+import { useRowKeys } from '../lib/row-keys'
 import { modKey, useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
@@ -20,7 +21,8 @@ import { LegalFooterLinks } from './LegalLinks'
 import { PrivacyToggle } from './PrivacyToggle'
 import { NightmailWordmark } from './NightmailLogo'
 import { togglePrivacy } from '../lib/privacy'
-import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
+import { SupportHost, SupportTrigger, supportTriggerProps, useSupportChat, type SupportChat } from './SupportChat'
+import { ContactSupportDialog } from './ContactSupport'
 import { notesModifierLabel, useUiNotesMode, useUiNotesShortcut } from '../lib/ui-notes-mode'
 import { productName } from '../../../api/src/brand'
 import { newsletterLinks, useNewsletters, useShownNewsletter } from '../features/newsletters/shared'
@@ -30,7 +32,7 @@ const score = chunk(() => import('../features/score'))
 const SidebarScore = score.page(module => module.SidebarScore)
 // The sender score explainer: one dialog for every place the score appears, loaded when first opened.
 const ScoreAboutHost = score.page(module => module.ScoreAboutHost)
-// Connect an agent: one dialog for the whole shell, its code loaded when the sidebar item is pointed at or first opened.
+// Connect your agent: one dialog for the whole shell, its code loaded when the sidebar's row is pointed at or first opened.
 const connectAgent = chunk(() => import('../features/docs/connect-agent'))
 const ConnectAgentHost = connectAgent.page(module => module.ConnectAgentHost)
 const preloadConnectAgent = () => { void connectAgent.preload().catch(() => {}) }
@@ -40,7 +42,7 @@ const UiNotesLayer = chunk(() => import('../features/ui-notes')).page(module => 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
 type NavItem = readonly [path: string, title: string]
-const navigation: readonly NavItem[] = [['/overview', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
+const navigation: readonly NavItem[] = [['/overview', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Mail routing'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
 // Nightmail staff (a platform operator role in GET /v1/me) also get the support inbox and the operator console, last.
 const staffLinks: readonly NavItem[] = [['/support', 'Support'], ['/operator', 'Operator']]
 // A self-hosted installation has no operator area; the same address is its Health page (features/operator/health.tsx).
@@ -59,8 +61,12 @@ const current = (path: string, pathname: string) => pathname === path || pathnam
 // The sidebar's four groups. A newsletter sits with Campaigns; staff and self-hosted pages close Workspace.
 const groups = [['Mail', ['/overview', '/logs', '/receiving']], ['Marketing', ['/campaigns', '/audience']], ['Infra', ['/domains', '/api-keys']], ['Workspace', ['/docs', '/settings']]] as const
 const groupOf = (path: string) => path.startsWith('/newsletters') ? 'Marketing' : groups.find(([, paths]) => (paths as readonly string[]).includes(path))?.[0] ?? 'Workspace'
-// Keyboard-first: G then a letter opens a page from anywhere you aren't typing (G O Overview, G L Logs…), and ⌘K jumps.
+// Keyboard-first: G then a letter opens a page from anywhere you aren't typing (G O Overview, G L Logs…; G R kept its
+// letter when Receiving became Mail routing), ⌘K finds any page or action, and J and K move through a list's rows.
 const goKeys: Record<string, string> = { '/overview': 'O', '/logs': 'L', '/receiving': 'R', '/campaigns': 'C', '/audience': 'A', '/domains': 'D', '/api-keys': 'K', '/settings': 'S' }
+// What else ⌘K finds each page by: its old name, the things on it.
+const pageWords: Record<string, string> = { '/overview': 'home dashboard', '/logs': 'emails sent received delivered bounced', '/receiving': 'receiving inbound addresses rules destinations inboxes', '/campaigns': 'marketing broadcast templates', '/audience': 'contacts lists segments subscribers', '/domains': 'dns dkim verify', '/api-keys': 'tokens smtp app passwords agents', '/docs': 'documentation guides reference', '/settings': 'billing members webhooks account', '/support': 'inbox conversations', '/operator': 'staff admin health' }
+const commandId = (path: string) => path.startsWith('/newsletters') ? 'go-newsletter' : `go-${path.slice(1).replace(/[^a-z0-9]+/g, '-')}`
 const typing = (target: EventTarget | null) => Boolean((target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]'))
 const commandKey = `${modKey}K`
 // A link of the navigation. `on`: undefined lets the address decide, as everywhere; a boolean decides for it.
@@ -73,9 +79,13 @@ export function AppShell() {
   const access = useWorkspaceAccess()
   const location = useLocation()
   const scoreAbout = useScoreAbout()
-  // The support chat: Help in the page's bottom-right corner (in the top bar on a phone or tablet), one conversation for
+  // The support chat: Help at the foot of the sidebar (in the top bar and More on a phone or tablet), one conversation for
   // the whole visit that stays open across pages.
   const support = useSupportChat({ hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
+  // Where the chat isn't on, Help opens Contact support's form instead (hosted); a self-hosted installation has no Help.
+  const [contacting, setContacting] = useState(false)
+  const help = support.mode ? () => support.setOpen(true) : access.multiTenant ? () => setContacting(true) : null
+  const signOut = access.multiTenant && session?.identity ? () => void session.logout() : null
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
   const connecting = useConnectAgentOpen()
   const [connectMounted, setConnectMounted] = useState(false)
@@ -99,6 +109,12 @@ export function AppShell() {
   const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
   const navigate = useNavigate()
+  // The first-grade email's button (api/src/notices.ts) opens the sender score explainer: /overview#sender-score, once.
+  useEffect(() => {
+    if (location.hash !== '#sender-score') return
+    openScoreAbout()
+    navigate({ pathname: location.pathname, search: location.search }, { replace: true })
+  }, [location.hash, location.pathname, location.search, navigate])
   const prefetchRoute = usePrefetchRoute()
   const intent = useRouteIntent()
   const prefetchQueries = usePrefetchQueries()
@@ -210,7 +226,7 @@ export function AppShell() {
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [])
-  // ⌘K (Ctrl+K) opens or closes the quick jumper, except inside the email editor, where it is the editor's own.
+  // ⌘K (Ctrl+K) opens or closes the command menu, except inside the email editor, where it is the editor's own.
   const [commandOpen, setCommandOpen] = useState(false)
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -221,6 +237,7 @@ export function AppShell() {
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [])
+  useRowKeys()
   // G then a letter, within a second, opens that page (goKeys), unless you are typing or a dialog or menu has focus.
   const go = useRef(navigate)
   go.current = navigate
@@ -262,7 +279,7 @@ export function AppShell() {
   const scoreHost = (scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>
   const connectHost = (connecting || connectMounted) && <Suspense fallback={null}><ConnectAgentHost /></Suspense>
   const context = <>
-    {access.multiTenant && <AccountSwitcher onConnectAgent={openConnectAgent} />}
+    {access.multiTenant && <AccountSwitcher shell />}
     {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
     {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
   </>
@@ -278,12 +295,13 @@ export function AppShell() {
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
     {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
   </>
-  // The quick jumper lists every page of the navigation, grouped as the sidebar groups them.
-  const commands = useMemo<Command[]>(() => links.map(([path, title]) => ({ path, title, group: groupOf(path), icon: glyphOf(path), keys: goKeys[path], locked: !access.canAdminister && adminOnly.has(path) })), [links.map(([path, title]) => `${path}:${title}`).join('\n'), access.canAdminister]) // eslint-disable-line react-hooks/exhaustive-deps
+  // ⌘K lists every page of the navigation in the sidebar's order, each with its G shortcut.
+  const commands = useMemo<Command[]>(() => links.map(([path, title]) => ({ id: commandId(path), path, title, section: 'Pages', icon: glyphOf(path), words: pageWords[path], locked: locked(path),
+    shortcut: goKeys[path] ? { keys: ['G', goKeys[path]], label: `G then ${goKeys[path]}` } : undefined, run: () => navigate(path) })), [links.map(([path, title]) => `${path}:${title}`).join('\n'), access.canAdminister, navigate]) // eslint-disable-line react-hooks/exhaustive-deps
   const grouped = groups.map(([name]) => ({ name, links: links.filter(([path]) => groupOf(path) === name) })).filter(group => group.links.length)
   const section = [...links, ...unlisted].find(([path]) => on(path) ?? (location.pathname === path || location.pathname.startsWith(`${path}/`)))?.[1] ?? 'Overview'
   const workspaceName = access.multiTenant ? session?.identity?.workspaces?.find(item => item.id === session?.identity?.workspaceId)?.name ?? 'Workspace' : regionId || productName
-  const overlays = <>{connectHost}{support.mode && <SupportHost chat={support} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} commands={commands} /></>
+  const overlays = <>{connectHost}{support.mode && <SupportHost chat={support} />}{contacting && <ContactSupportDialog onClose={() => setContacting(false)} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} pages={commands} help={help} signOut={signOut} /></>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <Notices />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
@@ -303,10 +321,10 @@ export function AppShell() {
     </header>
     {scoreHost}
     {main}
-    <TabBar links={links} intent={intent} footer={footer} locked={locked} connect={!access.multiTenant} on={on} />
+    <TabBar links={links} intent={intent} footer={footer} locked={locked} on={on} actions={{ help, preloadHelp: support.preload, signOut }} />
     {overlays}
   </div>
-  return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
+  return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
       <div className="sidebar-head"><NavLink className="wordmark" to="/overview" aria-label={`${productName.toLowerCase()} overview`}><NightmailWordmark /></NavLink></div>
@@ -319,7 +337,7 @@ export function AppShell() {
           {locked(path) ? <Icon icon={Lock} size="xs" label="Owners and admins only" /> : goKeys[path] && <span className="ui-shortcut" aria-hidden="true">G {goKeys[path]}</span>}
         </Nav>)}
       </div>)}</nav>
-      <div className="sidebar-footer">{footer}</div>
+      <div className="sidebar-footer"><SidebarActions support={support} help={help} />{footer}</div>
     </aside>
     <header className="topbar">
       <nav className="topbar__crumbs" aria-label="Breadcrumb"><span className="topbar__workspace" data-private title={workspaceName}>{workspaceName}</span><span className="topbar__sep" aria-hidden="true">/</span><span className="topbar__section" aria-current="page">{section}</span></nav>
@@ -327,13 +345,21 @@ export function AppShell() {
       <div className="topbar__end">
         <span className="topbar__hint" aria-hidden="true"><kbd className="ui-kbd">/</kbd>Search</span>
         <ThemeToggle />
-        <IconButton className="topbar__connect" label="Connect an agent" title="Connect an agent" onPointerEnter={preloadConnectAgent} onFocus={preloadConnectAgent} onClick={openConnectAgent}><Icon icon={Plug} /><span className="sr-only">Connect an agent</span></IconButton>
       </div>
     </header>
     {scoreHost}
     {main}
-    {support.mode && <SupportTrigger chat={support} floating />}
     {overlays}
+  </div>
+}
+
+// Connect your agent and Help, pinned at the foot of the sidebar above the legal links: rows like the navigation's.
+// Help toggles the support chat, docked in the page's bottom-right corner, or opens Contact support where the chat is off.
+function SidebarActions({ support, help }: { support: SupportChat; help: (() => void) | null }) {
+  const chat = support.mode ? supportTriggerProps(support) : null
+  return <div className="sidebar-actions">
+    <button type="button" className="sidebar-action" aria-haspopup="dialog" onPointerEnter={preloadConnectAgent} onFocus={preloadConnectAgent} onClick={openConnectAgent}><Icon icon={Bot} size="sm" /><span className="sidebar-action__title">Connect your agent</span></button>
+    {help && <button type="button" aria-haspopup="dialog" onClick={help} {...chat} className={chat ? 'sidebar-action support-trigger' : 'sidebar-action'}><Icon icon={MessageCircleQuestionMark} size="sm" /><span className="sidebar-action__title">Help</span></button>}
   </div>
 }
 
@@ -353,8 +379,9 @@ class PageErrorBoundary extends Component<{ resetKey: string; children: ReactNod
 // instead of leaving the page; a page picked in it replaces that entry, so Back from there returns to the page below.
 const issued = new Set<string>()
 const lockedProps = { title: 'Owners and admins only', 'data-locked': true }
-// `connect`: Connect an agent closes More and opens. Hosted, it is in the account menu instead (AccountSwitcher).
-function TabBar({ links, intent, footer, locked, connect, on }: { links: readonly NavItem[]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode; locked: (path: string) => boolean; connect: boolean; on: (path: string) => boolean | undefined }) {
+// Under the pages, the sidebar's Connect your agent and Help, and Sign out (hosted): each closes More, then acts.
+type MoreActions = { help: (() => void) | null; preloadHelp: () => void; signOut: (() => void) | null }
+function TabBar({ links, intent, footer, locked, on, actions }: { links: readonly NavItem[]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode; locked: (path: string) => boolean; on: (path: string) => boolean | undefined; actions: MoreActions }) {
   const location = useLocation(), navigate = useNavigate(), moreButton = useRef<HTMLButtonElement>(null)
   // Only an entry opened in this visit counts: a reload on it shows the page, not a stale sheet.
   const token = (location.state as { more?: string } | null)?.more
@@ -366,11 +393,16 @@ function TabBar({ links, intent, footer, locked, connect, on }: { links: readonl
   return <>
     <nav className="tab-bar" aria-label="Main navigation">
       {links.filter(([path]) => tabs.includes(path)).map(([path, title]) => <Nav key={path} className="tab-bar__item" to={path} on={on(path)} {...intent(path)}><span className="tab-bar__icon" aria-hidden="true">{iconOf(path, 'lg')}</span><span className="tab-bar__label">{title}</span></Nav>)}
-      <button ref={moreButton} type="button" className="tab-bar__item" aria-haspopup="dialog" aria-expanded={open} aria-current={inMore ? 'page' : undefined} data-active={inMore || open || undefined} onClick={show}><span className="tab-bar__icon" aria-hidden="true"><Icon icon={Ellipsis} size="lg" /></span><span className="tab-bar__label">More</span></button>
+      <button ref={moreButton} type="button" className="tab-bar__item" aria-label="More" aria-haspopup="dialog" aria-expanded={open} aria-current={inMore ? 'page' : undefined} data-active={inMore || open || undefined} onClick={show}><span className="tab-bar__icon" aria-hidden="true"><Icon icon={Ellipsis} size="lg" /></span><span className="tab-bar__label">More</span></button>
     </nav>
     <Sheet open={open} onOpenChange={next => { if (!next) close() }} title="More" hideTitle className="more-sheet" returnFocus={moreButton}>
       <nav className="more-sheet__links" aria-label="More pages">{more.map(([path, title]) => <Nav key={path} className="more-sheet__link" to={path} replace on={on(path)} {...locked(path) ? lockedProps : intent(path)}><span className="more-sheet__icon" aria-hidden="true">{iconOf(path, 'lg')}</span><span className="more-sheet__title">{title}</span>{locked(path) && <Icon className="more-sheet__lock" icon={Lock} size="sm" label="Owners and admins only" />}</Nav>)}
-        {connect && <button type="button" className="more-sheet__link" onPointerDown={preloadConnectAgent} onClick={() => { close(); openConnectAgent() }}><span className="more-sheet__icon" aria-hidden="true"><Icon icon={Plug} size="lg" /></span>Connect an agent</button>}</nav>
+</nav>
+      <div className="more-sheet__links more-sheet__actions">
+        <button type="button" className="more-sheet__link" onPointerDown={preloadConnectAgent} onClick={() => { close(); openConnectAgent() }}><span className="more-sheet__icon" aria-hidden="true"><Icon icon={Bot} size="lg" /></span>Connect your agent</button>
+        {actions.help && <button type="button" className="more-sheet__link" onPointerDown={actions.preloadHelp} onClick={() => { close(); actions.help!() }}><span className="more-sheet__icon" aria-hidden="true"><Icon icon={MessageCircleQuestionMark} size="lg" /></span>Help</button>}
+        {actions.signOut && <button type="button" className="more-sheet__link" onClick={() => { close(); actions.signOut!() }}><span className="more-sheet__icon" aria-hidden="true"><Icon icon={LogOut} size="lg" /></span>Sign out</button>}
+      </div>
       <div className="more-sheet__footer">{footer}</div>
     </Sheet>
   </>

@@ -323,9 +323,9 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     const exempt = graduated || pacing ? establishedBy({ override: row.override, history, score: moved.score, step: next.step }) : null, established = exempt !== null;
     const counts = !established && pacing && next.step === 'ok' && (row.pace === null || was.cap! < 60 * row.pace) && (!was.hour || Date.parse(lastHour) > Date.parse(was.hour));
     const growth = nextGrowth(was, { graduated, established, step: next.step, quality: q.quality, hour: lastHour, evidence: counts ? await growthHour(runtime, row.sponsor_key, lastHour) : null, now });
-    // The evaluation's end is emailed once: not to a first-party workspace (no limit applies to it), not to one that
-    // skips the growth pace (its track record or an operator's limit says more than this email), and not when it
-    // ends in a warning, a hold or a pause, which has its own email.
+    // The evaluation's end (the first grade) is emailed once, with what the sender score is: not to a first-party
+    // workspace (no limit applies to it), not to one that skips the growth pace (its track record or an operator's limit
+    // says more than this email), and not when it ends in a warning, a hold or a pause, which has its own email.
     if (graduated && !row.exempt && !established && !row.paused_at && stepRank(next.step) < stepRank('warn')) finished.push({ workspaceId: row.workspace_id, limited: limits.limit !== null });
     // An owner's marketing release and an operator's hold after a self-resume both end on their own.
     const releaseExpired = !!row.release_until && Date.parse(row.release_until) <= now.getTime();

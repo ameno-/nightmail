@@ -1,12 +1,16 @@
 import { addresses, productName } from './brand.js';
 import { wildcardMessage } from './dns-messages.js';
+import { SCORE_CARD, scoreCardPath, scoreTones } from './score-card.js';
 
 // Every email Nightmail sends a customer about their account, in one template. A notice is three short plain
 // paragraphs (what happened, what it means for their mail right now, what to do next), one link and one line saying
 // why it was sent. customerNotice() is pure and returns the subject with a text part and an HTML part that carry the
 // same words; the HTML part sets a line length, the link as a button and its own colours, light and dark, and nothing
-// else (no images). A notice never says how a check works: no scores, rates, thresholds or provider names. The
+// else (no images). A notice never says how a check works: no score figures, rates, thresholds or provider names. The
 // domain setup reminder alone also lists the DNS records to publish and links the customer's own DNS provider's page.
+// The first grade's email (evaluation_finished) alone shows a figure: it opens with the sender score as the dashboard's
+// card shows it when the email is made (score, grade, the daily limit then, and that moment), says what the score is in
+// one sentence, and its button opens the live score.
 //
 // Words a customer chose (a workspace's name, a campaign's) are shown through shownName, an address through
 // plainAddress and a domain through hostName, and nowhere but where a template puts them. The invitation goes to an
@@ -18,7 +22,10 @@ import { wildcardMessage } from './dns-messages.js';
 
 export type Notice = { subject: string; text: string; html: string };
 /** `records`: DNS records to publish, after the lines, each ready to copy; `link`: one more place to go, under them (a DNS provider's page). */
-type Parts = { subject: string; lines: string[]; records?: SetupRecord[]; link?: { label: string; url: string }; action: { label: string; url: string }; why: string };
+/** `card`: the sender score as a card above the lines (the first grade's email). */
+type Parts = { subject: string; lines: string[]; card?: ScoreCard; records?: SetupRecord[]; link?: { label: string; url: string }; action: { label: string; url: string }; why: string };
+/** The sender score as the dashboard's card shows it (app/src/features/score), at the moment the email is made. */
+export type ScoreCard = { score: number; grade: string; /** The daily limit then; null is none. */ daily: number | null; at: Date };
 /** A DNS record as the setup reminder lists it: the name as the DNS provider asks for it (relative to the zone when known). */
 export type SetupRecord = { type: string; name: string; value: string };
 
@@ -67,24 +74,62 @@ const owes = (workspace: string, owed: string, since: Date | null) => since ? `$
 // table), the dark pair together in one media query. A client that applies the dark query on a light pane of its own
 // (Outlook on the web asks the browser, not its own theme; webmail drops the color-scheme meta) once showed #ededed
 // on white, because the page left its background to the client.
-const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif", MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
+const FONT = "Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif", MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
+// Inter, where a mail client loads web fonts (Apple Mail on a Mac and an iPhone; Gmail and Outlook ignore them and keep
+// the system fonts after it): the dashboard's own basic-Latin cut (app/public/fonts/inter-basic.woff2, every weight in
+// one 50 KB file, served CORS-open by app/asset-headers.ts and src/server.ts) from this installation's own origin. One URL
+// for every email, so loading it says nothing about who opened which; with remote content blocked the system fonts
+// stand in, at the same layout. The range is the file's (app/price-pages.ts BASIC): other letters come from the fallbacks.
+// Inside @media screen, which Outlook on Windows skips (a face it sees makes it drop the fallbacks for Times New Roman),
+// in a <style> of its own: Outlook on the web drops a style sheet with a rule nested in @media, and with it the dark colours.
+const fontFace = (origin: string) => /^https?:\/\/[^\s'"()]+$/.test(origin)
+  ? `<style>@media screen{@font-face{font-family:'Inter';font-style:normal;font-weight:100 900;font-display:swap;src:url('${origin}/fonts/inter-basic.woff2') format('woff2');unicode-range:U+0020-007E,U+00A0,U+00A9,U+00AB,U+00AE,U+00B7,U+00BB,U+00D7,U+2010-2027,U+2030,U+2039-203A,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+FEFF,U+FFFD}}</style>` : '';
 const PAPER = '#ffffff', INK = '#171717', MUTED = '#5d5d5d';
-const DARK = '@media (prefers-color-scheme:dark){.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-why{color:#a3a3a3!important;border-top-color:#2e2e2e!important}.nm-action{background:#314770!important;border-color:#556f9d!important;color:#ffffff!important}}';
-const page = `class="nm-page" bgcolor="${PAPER}"`, ink = (style = '') => `class="nm-text" style="margin:0 0 14px;color:${INK}${style}"`;
+// The button is the dashboard's primary (app/src/styles/ui.css .ui-button--primary): the text colour as a solid fill,
+// #111111 with white words on light and #F2F2F2 with #111111 on dark, semibold. Its one-pixel edge, a step off the fill,
+// is what keeps it visible in Gmail on Android, whose forced dark leaves a near-black fill on a near-black page.
+const DARK = '.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-why{color:#a3a3a3!important}.nm-action-cell{background-color:#f2f2f2!important;border-color:#f2f2f2!important}.nm-action{background-color:#f2f2f2!important;color:#111111!important}';
 
-/** One notice as an email: the same words as text and as HTML. */
-export function notice(p: Parts): Notice {
+// The first grade's card: the sender score as a picture of the dashboard's card (src/score-card.ts), light where the
+// client keeps light colours and dark in a client that asks for dark (Apple Mail, Outlook on the web), on a cell in the
+// tile's colour whose alt text says the same facts when pictures are off (the text part says them too). Under it one quiet
+// line says when they were read, which the picture can't carry (its address names only score, grade and state).
+const stateLine = (c: ScoreCard) => c.daily === null ? 'No daily limit' : `Daily limit of ${count(c.daily)} for now`;
+const limitNow = (c: ScoreCard) => c.daily === null ? 'No daily limit' : `A daily limit of ${count(c.daily)} recipients for now`;
+/** The card's words as the text part says them. */
+const cardText = (c: ScoreCard) => `Sender score: ${c.score} (grade ${c.grade}), ${limitNow(c).replace(/^./, x => x.toLowerCase())}\nAs of ${moment(c.at)}`;
+function cardHtml(c: ScoreCard, origin: string) {
+  const light = scoreTones(c.score, 'light'), alt = escapeHtml(`Sender score ${c.score}, grade ${c.grade}. ${stateLine(c)}.`);
+  const lightPath = scoreCardPath(c.score, c.daily, 'light'), darkPath = scoreCardPath(c.score, c.daily, 'dark'), { width, height } = SCORE_CARD;
+  const img = (path: string, cls: string, hidden: boolean) => `<img class="${cls}" src="${escapeHtml(origin + path)}" width="${width}" height="${height}" alt="${alt}" style="${hidden ? 'display:none;mso-hide:all;' : 'display:block;'}width:100%;max-width:${width}px;height:auto;border:0;outline:none;text-decoration:none;border-radius:16px;font-family:${FONT};font-size:16px;line-height:24px;font-weight:600;color:${light.ink}">`;
+  // No picture for a limit no band sets (an operator's own): the cell says the facts in live text instead.
+  const inside = lightPath && darkPath ? img(lightPath, 'nm-card-light', false) + img(darkPath, 'nm-card-dark', true)
+    : `<p class="nm-card-ink" style="margin:0;padding:22px;font-size:16px;line-height:24px;font-weight:600;color:${light.ink}">${alt}</p>`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:${width}px"><tr><td class="nm-card" bgcolor="${light.tile}" style="border-radius:16px;background-color:${light.tile};color:${light.ink}">${inside}</td></tr></table>`
+        + `<p class="nm-why" style="margin:10px 0 20px;font-size:13px;line-height:20px;color:${MUTED}">${escapeHtml(`As of ${moment(c.at)}`).replaceAll(' ', '&nbsp;')}</p>`;
+}
+const cardDark = (c: ScoreCard) => { const t = scoreTones(c.score, 'dark'); return `.nm-card{background-color:${t.tile}!important;color:${t.ink}!important}.nm-card-ink{color:${t.ink}!important}.nm-card-light{display:none!important}.nm-card-dark{display:block!important;color:${t.ink}!important}`; };
+const page = `class="nm-page" bgcolor="${PAPER}"`, ink = (style = '') => `class="nm-text" style="margin:0 0 16px;color:${INK}${style}"`;
+
+/**
+ * One notice as an email: the same words as text and as HTML. `origin` (the dashboard's) serves its font and card.
+ * Type: 16/26 for the words in a 520 px column (about 68 characters a line), 13/20 for the quiet lines; the button
+ * 15/20 semibold; the footer set apart by space, not a rule.
+ */
+function renderNotice(p: Parts, origin: string): Notice {
   const records = p.records ?? [];
-  const text = [p.lines.join('\n\n'), ...records.map(r => `${r.type} record\nName: ${r.name}\nValue: ${r.value}`), ...p.link ? [`${p.link.label}: ${p.link.url}`] : [], `${p.action.label}: ${p.action.url}`, p.why].join('\n\n') + '\n';
-  const field = (label: string, value: string) => `<tr><td class="nm-why" style="width:40px;padding:2px 12px 2px 0;vertical-align:top;font-size:13px;color:${MUTED};white-space:nowrap">${label}</td><td class="nm-text" style="padding:2px 0;font:14px/1.5 ${MONO};color:${INK};word-break:break-all">${escapeHtml(value)}</td></tr>`;
+  const text = [...p.card ? [cardText(p.card)] : [], p.lines.join('\n\n'), ...records.map(r => `${r.type} record\nName: ${r.name}\nValue: ${r.value}`), ...p.link ? [`${p.link.label}: ${p.link.url}`] : [], `${p.action.label}: ${p.action.url}`, p.why].join('\n\n') + '\n';
+  const field = (label: string, value: string) => `<tr><td class="nm-why" style="width:40px;padding:2px 12px 2px 0;vertical-align:top;font-size:13px;line-height:20px;color:${MUTED};white-space:nowrap">${label}</td><td class="nm-text" style="padding:2px 0;font-family:${MONO};font-size:14px;line-height:20px;color:${INK};word-break:break-all">${escapeHtml(value)}</td></tr>`;
   const paragraphs = p.lines.map(line => `<p ${ink()}>${escapeHtml(line)}</p>`).join('')
-    + records.map(r => `<p ${ink(';margin-bottom:4px;font-weight:600')}>${escapeHtml(r.type)} record</p><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 14px">${field('Name', r.name)}${field('Value', r.value)}</table>`).join('')
-    + (p.link ? `<p ${ink()}><a class="nm-text" href="${escapeHtml(p.link.url)}" style="color:${INK};text-decoration:underline">${escapeHtml(p.link.label)}</a></p>` : '');
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(p.subject)}</title><style>:root{color-scheme:light dark;supported-color-schemes:light dark}${DARK}</style></head>`
-    + `<body ${page} style="margin:0;padding:0;background-color:${PAPER};color:${INK}"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" ${page} style="background-color:${PAPER}"><tr><td ${page} style="padding:20px 16px 28px;background-color:${PAPER};color:${INK}">`
-    + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:520px"><tr><td class="nm-text" style="font:15px/1.6 ${FONT};color:${INK}">`
-    + `${paragraphs}<p style="margin:22px 0 0"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:8px 16px;border:1px solid #223459;border-radius:6px;background:#223459;color:#ffffff;font-weight:500;text-decoration:none">${escapeHtml(p.action.label)}</a></p>`
-    + `<p class="nm-why" style="margin:32px 0 0;padding-top:14px;border-top:1px solid #e4e4e4;font-size:13px;line-height:1.5;color:${MUTED}">${escapeHtml(p.why)}</p>`
+    + records.map(r => `<p ${ink(';margin-bottom:4px;font-weight:600')}>${escapeHtml(r.type)} record</p><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px">${field('Name', r.name)}${field('Value', r.value)}</table>`).join('')
+    + (p.link ? `<p ${ink()}><a class="nm-text" href="${escapeHtml(p.link.url)}" style="color:${INK};text-decoration:underline;text-underline-offset:3px">${escapeHtml(p.link.label)}</a></p>` : '');
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(p.subject)}</title>${fontFace(origin)}<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media (prefers-color-scheme:dark){${DARK}${p.card ? cardDark(p.card) : ''}}</style></head>`
+    + `<body ${page} style="margin:0;padding:0;background-color:${PAPER};color:${INK};-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" ${page} style="background-color:${PAPER}"><tr><td ${page} style="padding:28px 20px 40px;background-color:${PAPER};color:${INK}">`
+    + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:520px"><tr><td class="nm-text" style="font-family:${FONT};font-size:16px;line-height:26px;color:${INK}">`
+    + `${p.card ? cardHtml(p.card, origin) : ''}${paragraphs}`
+    // A table cell carries the fill, so Outlook on Windows (which pads no link) still draws the button.
+    + `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 0"><tr><td class="nm-action-cell" bgcolor="#111111" style="border:1px solid #3a3a3a;border-radius:8px;background-color:#111111"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:12px 20px;border-radius:8px;background-color:#111111;color:#ffffff;font-family:${FONT};font-size:15px;line-height:20px;font-weight:600;text-decoration:none">${escapeHtml(p.action.label)}</a></td></tr></table>`
+    + `<p class="nm-why" style="margin:32px 0 0;font-size:13px;line-height:20px;color:${MUTED}">${escapeHtml(p.why)}</p>`
     + '</td></tr></table></td></tr></table></body></html>';
   return { subject: p.subject, text, html };
 }
@@ -102,7 +147,8 @@ export type NoticeInput =
   | Workspace & { kind: 'domain_setup'; domain: { id: string; name: string }; noDns?: boolean; /** A wildcard (*.domain), and the parking host it points to, answering its missing CNAMEs. */ wildcard?: string; parking?: { owner: string; target: string }; missing: SetupRecord[]; total: number; wrong: boolean; host: { name: string; url: string | null } | null; releasesAt: Date | null }
   /** builtin: the workspace's built-in domain while it sends (builtin-domain.ts), with who it sends to and its daily cap. */
   | Workspace & { kind: 'no_domain'; builtin?: { name: string; scope: 'anyone' | 'members'; perDay: number } | null }
-  | Workspace & { kind: 'evaluation_finished'; limited: boolean }
+  /** score: the card, as the dashboard showed the score when the email was made; its daily limit, when there is one, picks the version. */
+  | Workspace & { kind: 'evaluation_finished'; limited: boolean; score?: ScoreCard | null }
   | Workspace & { kind: 'low_balance'; balance: string; emails: number }
   | Workspace & { kind: 'out_of_credit'; receivingUntil: Date | null }
   | Workspace & { kind: 'recharge_failed'; last4: string | null; decline: string; taxLocation?: boolean; balance: string }
@@ -119,7 +165,7 @@ export type NoticeKind = NoticeInput['kind'];
  * whatever paused the workspace: the ladder, a review or the provider.
  */
 export function customerNotice(origin: string, n: NoticeInput): Notice {
-  const base = origin.replace(/\/$/, ''), w = 'workspace' in n ? shownName(n.workspace) || 'your workspace' : '';
+  const base = origin.replace(/\/$/, ''), notice = (p: Parts) => renderNotice(p, base), w = 'workspace' in n ? shownName(n.workspace) || 'your workspace' : '';
   const members = `${productName} sent this to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`;
   const dashboard = { label: 'Open the dashboard', url: `${base}/overview` }, billing = (label: string) => ({ label, url: `${base}/settings#billing` });
   switch (n.kind) {
@@ -143,15 +189,15 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       `${w} has reached its daily sending limit.`,
       'Mail over the limit is refused for now. Room frees up over the next 24 hours, and mail already accepted is still delivered.',
       'The dashboard shows the limit and what raises it.'] });
-    case 'evaluation_finished': return notice(n.limited
-      ? { subject: `The evaluation of ${w} is finished`, action: dashboard, why: members, lines: [
-        `The first emails from ${w} showed some problems, so it keeps a daily limit for now.`,
-        'Mail within the limit sends as usual. The limit rises on its own as your later mail goes well.',
-        'The dashboard shows the limit and what would raise it.'] }
-      : { subject: `${w} has passed its evaluation`, action: dashboard, why: members, lines: [
-        `The first emails from ${w} were delivered well, so its starting limit is lifted.`,
-        'You can send more now. Over the next day the amount grows on its own as your mail keeps being delivered.',
-        'The dashboard shows how much you can send right now.'] });
+    // The first grade: the one email that says what the sender score is, what moves it and what it changes.
+    // The first grade: the card, one sentence on what the score is and what it changes, the button to the live score.
+    case 'evaluation_finished': {
+      const limited = n.score ? n.score.daily !== null : n.limited;
+      return notice({ subject: `${w} now has a sender score`, card: n.score ?? undefined, action: { label: 'See the live score', url: `${base}/overview#sender-score` },
+        why: `Sent once to the owners and admins of ${w}.`, lines: [limited
+          ? 'It works like a credit score for your sending. It starts low, so a daily limit applies until it rises.'
+          : 'It works like a credit score for your sending: keep it good and there’s no daily limit.'] });
+    }
     case 'campaign_paused': {
       const name = shownName(n.campaign.name), campaign = name ? `the campaign "${name}"` : 'a campaign';
       return notice({ subject: name ? `The campaign "${name}" is paused` : 'A campaign is paused', action: { label: 'Open the campaign', url: `${base}/campaigns/${encodeURIComponent(n.campaign.id)}/review` }, why: members, lines: [

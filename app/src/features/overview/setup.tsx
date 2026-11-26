@@ -1,23 +1,19 @@
-import { useState, type CSSProperties, type ReactNode } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState, type ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { ArrowUpRight, Check, Info } from 'lucide-react'
+import { Info } from 'lucide-react'
 import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
-import type { Identity, SenderScore, SendingLimit, SetupProgress } from '../../data/types'
-import { leadFocus, type WorkspaceFocus } from '../../data/focus'
-import { openConnectAgent } from '../../lib/connect-agent'
-import { newIssuePath, readersPath } from '../newsletters/shared'
+import type { BuiltinDomain, Identity, SenderScore, SendingLimit } from '../../data/types'
 import { date, number } from '../../lib/format'
-import { TestSend, TestSentLine } from '../docs/first-send'
-import { Button, Dialog } from '../../components/ui'
+import { Dialog, SkeletonText } from '../../components/ui'
 import { limitNotes } from '../score'
-import { SendingLimitsGuide } from '../score/limits'
+import { LimitStoryList, limitStory } from '../score/limits'
 import './setup.css'
-import { resourceOf } from '../../data/invalidation'
+import { GROWTH } from '../../../../api/src/standing-model'
 import { setupGap, type SetupGap } from '../settings/domain-setup-alert'
-import { builtinLimitText, sendsFromBuiltin } from '../settings/builtin-domain'
+import { sendsFromBuiltin } from '../settings/builtin-domain'
 import type { Domain } from '../../data/types'
 
 // The hosted limit as GET /v1/me reports it, refreshed with the overview so usage stays current.
@@ -48,16 +44,17 @@ export function limitSummary(limit: SendingLimit, evaluating = false) {
 
 // Hosted: the daily limit as one line, what's left of it and a meter (or nothing, in good standing), then a note only
 // while one applies (an adjustment, a notice). What's left, not what's used: the used count is close to the Emails figure beside it and
-// would say the same fact twice. The row opens how sending limits work; the next band and the per-minute rate are in
-// the sender score's explainer.
+// would say the same fact twice. The row opens what the limit is now, why and what raises it (score/limits.tsx); every
+// rule is in the docs it links to.
 export function DailyLimit({ report }: { report: SenderScore | undefined }) {
   const limit = useSendingLimit(), builtin = useBuiltinSending()
+  const domains = useSession()?.identity?.connection?.domains, ownPending = !!domains && domains.total > 0 && domains.verified === 0
   const [explaining, setExplaining] = useState(false)
   const notes = limitNotes(report)
-  const guide = <Dialog open={explaining} onOpenChange={setExplaining} title="How limits work" className="limits-dialog">
-    {builtin && <p className="limits-dialog__builtin">{builtinLimitText(builtin)}</p>}
-    <SendingLimitsGuide limit={report?.limit} compact />
-    <Link className="limits-dialog__docs" to="/docs#sending-limits">Open in the docs</Link>
+  const story = limitStory(report, builtin)
+  const guide = <Dialog open={explaining} onOpenChange={setExplaining} title="Daily limit" className="limits-dialog">
+    {story ? <LimitStoryList story={story} /> : <SkeletonText width="80%" />}
+    <Link className="limits-dialog__docs" to="/docs#sending-limits">All the limits, in the docs</Link>
   </Dialog>
   // Sending from the built-in domain: its own cap, which is lower than any other until a domain of the workspace's own verifies.
   if (builtin) {
@@ -67,6 +64,7 @@ export function DailyLimit({ report }: { report: SenderScore | undefined }) {
         <span className="limit-row__text"><span className="limit-row__label">Daily limit<Info size={12} aria-hidden="true" /></span><span className="muted">{text}</span></span>
         <span className="limit-row__track" data-full={used / Math.max(1, builtin.perDay) >= 0.9 || undefined}><i style={{ width: `${Math.min(1, used / Math.max(1, builtin.perDay)) * 100}%` }} /></span>
       </button>
+      <p className="limit-row__why">{builtinWhy(builtin, ownPending)}</p>
       {notes.map(note => <p key={note.text} className="limit-row__note" data-tone={note.tone}>{note.tone && <span aria-hidden="true" />}{note.text}</p>)}
       {guide}
     </section>
@@ -79,127 +77,53 @@ export function DailyLimit({ report }: { report: SenderScore | undefined }) {
   // The evaluation is its first recipients, once, not a day; the label stays while the score that says so loads.
   const evaluating = cap !== null && inEvaluation(report)
   const limitText = cap === null ? '' : evaluating ? `Evaluation: ${number(left)} of the first ${number(cap)} left` : `${number(left)} of ${number(cap)} left`
+  const why = limitWhy(cap, evaluating, growth, report)
   return <section className="daily-limit" aria-label="Daily limit">
     {(cap !== null || growth) && <button type="button" className="limit-row" onClick={() => setExplaining(true)} title={cap === null ? limitSummary(limit) : `${limitSummary(limit, evaluating)} Includes simulator addresses.`} aria-label={cap === null ? `No daily limit${growth ? `, growing: up to ${number(growth.hourly)} this hour` : ''}. How limits work` : `Daily limit: ${limitText}. How limits work`}>
       <span className="limit-row__text"><span className="limit-row__label">Daily limit<Info size={12} aria-hidden="true" /></span><span className="muted">{growth ? `Growing: up to ${number(growth.hourly)} this hour` : limitText}</span></span>
       {cap !== null && <span className="limit-row__track" data-full={share >= 0.9 || undefined}><i style={{ width: `${share * 100}%` }} /></span>}
     </button>}
+    {why && <p className="limit-row__why">{why}</p>}
     {notes.map(note => <p key={note.text} className="limit-row__note" data-tone={note.tone}>{note.tone && <span aria-hidden="true" />}{note.text}</p>)}
     {guide}
   </section>
 }
 
-// A step is its title and, while open, its action; `note` is only the test email's confirmation.
-export type SetupStep = { key: string; done: boolean; title: string; action?: ReactNode; note?: ReactNode }
+// Why the limit is what it is, in one plain line under it: the built-in domain's cap (and what lifts it), the evaluation,
+// the growth pace or the sender score. None for an override or an exemption: the notes or nothing say those.
+function builtinWhy(builtin: BuiltinDomain, ownPending: boolean): ReactNode {
+  const allows = `The built-in domain allows ${number(builtin.perDay)} a day${builtin.scope === 'members' ? ', to your team only' : ''}`
+  if (ownPending) return <>{allows}, until your domain is verified. <Link to="/domains">Open Domains</Link></>
+  return <>{allows}. <Link to="/domains?add">Add your domain</Link> {builtin.scope === 'members' ? 'to email anyone.' : 'to lift it.'}</>
+}
+function limitWhy(cap: number | null, evaluating: boolean, growth: { hourly: number } | null, report: SenderScore | undefined) {
+  if (evaluating && cap !== null) return `Your first ${number(cap)} recipients set your sender score; the limit grows with it after that.`
+  if (growth) return `After the evaluation, sending grows for ${GROWTH.hours} hours.`
+  if (cap !== null && report?.limit?.source === 'score') return 'Your sender score sets it; a better score raises it.'
+  return null
+}
 
-// Hosted admins until the first email is sent: each step read from server state, not from this browser. Receiving is
-// not a step: once these are done, the next steps offer it (score/index.tsx).
-// `loading` is true until the setup read (shared with the next steps) settles, so the page can hold its layout until it knows.
-// A failed read is `error` (with `retry`): the steps' place says so, rather than looking like finished setup.
-// `stuck`: the newest domain whose records public DNS still lacks an hour after it was added, for the banner above the steps
-// (shown also once the steps are done, while another domain waits).
-export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[]; error?: unknown; retry?: () => void; stuck?: { domain: Domain; gap: SetupGap } | null; hasDomain?: boolean; sent?: boolean; verifiedDomain?: Domain; progress?: SetupProgress | null } {
+export type SetupRead = { loading: boolean; error?: unknown; retry?: () => void; stuck?: { domain: Domain; gap: SetupGap } | null; sent?: boolean; agent?: boolean; ownVerified?: Domain; pendingDomain?: Domain; sendFrom?: Domain }
+
+// What Overview's get-started strip and banner read for a hosted owner or admin, from GET /v1/overview/setup: server
+// state, never this browser's clicks. `loading` is true until the read settles, so the page can hold its layout until it
+// knows; a failed read is `error` (with `retry`). `stuck`: the newest domain whose records public DNS still lacks an hour
+// after it was added, for the banner. `ownVerified`: a domain of the workspace's own that sends; `pendingDomain`: one still
+// verifying; `sendFrom`: what a test email goes from (the own domain, else the built-in one).
+export function useSetupRead(): SetupRead {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
-  const newsletter = identity?.newsletters?.[0] ?? null
-  const client = useQueryClient()
   const enabled = multiTenant && canAdminister && identity?.connection?.state === 'ready'
   const setup = useApiDef(queries.overviewSetup(), { enabled })
-  // A test sent from the steps keeps them up, with its result, until the next visit.
-  const [testId, setTestId] = useState<string | null>(null)
-  // The new email shows in Latest emails, the facts and the next steps without a reload.
-  const sentTest = (id: string) => {
-    setTestId(id)
-    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['overview', 'overview-setup', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(resourceOf(query.queryKey)) }).catch(() => {})
-  }
-  if (!enabled) return { loading: false, steps: null }
-  if (setup.isPending) return { loading: true, steps: null }
-  if (setup.error) return { loading: false, steps: null, error: setup.error, retry: () => void setup.refetch() }
-  if (!setup.data.domains || !setup.data.apiKeys) return { loading: false, steps: null }
-  // The built-in domain (no DNS of its own) has no records to wait on or a stuck banner, and it can send the first email.
-  const all = setup.data.domains, items = all.filter(domain => !domain.builtIn), keyed = setup.data.apiKeys.active > 0
-  const hasDomain = items.length > 0
+  if (!enabled) return { loading: false }
+  if (setup.isPending) return { loading: true }
+  if (setup.error) return { loading: false, error: setup.error, retry: () => void setup.refetch() }
+  // The built-in domain (no DNS of its own) has no records to wait on or a stuck banner.
+  const all = setup.data.domains ?? [], items = all.filter(domain => !domain.builtIn)
   const stuck = items.flatMap(domain => { const gap = setupGap(domain); return gap ? [{ domain, gap }] : [] })[0] ?? null
-  const verified = items.find(domain => domain.status === 'verified') ?? all.find(domain => domain.builtIn && domain.status === 'verified')
-  const ownVerified = verified && !verified.builtIn
-  // The setup read carries the ten newest domains; an older verified one still counts (the session's domain summary). So
-  // does the built-in domain once it sends: the first email needs no domain of the workspace's own (Overview's card asks
-  // for one to lift its cap).
-  const domainDone = !!ownVerified || (identity?.connection?.domains?.verified ?? 0) > 0 || all.some(domain => domain.builtIn && domain.status === 'verified')
-  const pending = items.find(domain => domain.status !== 'verified')
-  const sent = setup.data.emails.any || !!testId
-  // What Overview's onboarding card reads (onboarding-card.tsx): whether any email exists, the domain to send from, and
-  // each focus's first steps.
-  const progress = setup.data.progress ?? null
-  const known = { stuck, hasDomain, sent: setup.data.emails.any, verifiedDomain: ownVerified ? verified : all.find(domain => domain.builtIn), progress }
-  const domainStep: SetupStep = { key: 'domain', done: domainDone, title: 'Verify a domain',
-    action: !domainDone && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains?add'}>{pending ? 'View records' : 'Add domain'}</Link> }
-  // Another focus than developer emails (onboarding's question, Settings) has its own first steps after the domain.
-  const lead = leadFocus(identity)
-  if (lead !== 'developer' && progress) {
-    // An inbox of their own is on their own domain: the built-in one doesn't count.
-    const ownDomain: SetupStep = { key: 'domain', done: !!ownVerified, title: 'Add your own domain', action: !ownVerified && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains?add'}>{pending ? 'View records' : 'Add domain'}</Link> }
-    const focusSteps = [lead === 'personal' ? ownDomain : domainStep, ...stepsFor(lead, progress, keyed, newsletter)]
-    if (focusSteps.every(step => step.done)) return { loading: false, steps: null, ...known }
-    const current = focusSteps.find(step => !step.done)
-    return { loading: false, steps: focusSteps, current, open: current ? [current] : [], ...known }
-  }
-  if (domainDone && keyed && sent && !testId) return { loading: false, steps: null, ...known }
-  const steps: SetupStep[] = [
-    domainStep,
-    { key: 'key', done: keyed, title: 'Create an API key',
-      action: !keyed && <Link className={`ui-button ui-button--${domainDone ? 'primary' : 'secondary'} ui-button--md`} to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
-    // The test send names its from and to addresses itself; with no verified domain in this read to test from, the code examples.
-    { key: 'send', done: sent, title: 'Send your first email',
-      note: testId && identity?.email ? <TestSentLine id={testId} to={identity.email} /> : undefined,
-      action: !sent && (verified ? <TestSend domain={verified} onSent={sentTest} primary={keyed} /> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Code examples</Link>) },
-  ]
-  // Sending a test needs only a verified domain (it uses this session, not a key), so its step opens beside the key step.
-  const current = steps.find(step => !step.done)
-  // The first email's step stays open once sent, so its confirmation and the link to Logs are seen.
-  const open = steps.filter(step => step === current || (step.key === 'send' && (!!testId || (!step.done && domainDone))))
-  return { loading: false, steps, current, open, ...known }
-}
-
-const action = (to: string, label: string, primary = true) => <Link className={`ui-button ui-button--${primary ? 'primary' : 'secondary'} ui-button--md`} to={to}>{label}</Link>
-/** The steps after the domain for each focus but developer emails, done as GET /v1/overview/setup's progress says. */
-function stepsFor(lead: Exclude<WorkspaceFocus, 'developer'>, progress: SetupProgress, keyed: boolean, newsletter: { id: string } | null): SetupStep[] {
-  if (lead === 'agents') return [
-    { key: 'inbox', done: progress.inbox, title: 'Create an agent inbox', action: !progress.inbox && action('/receiving/inboxes', 'Create inbox') },
-    // The prompt's setup token gets the agent a key of its own: a key is what connecting leaves behind.
-    { key: 'connect', done: keyed, title: 'Connect your agent', action: !keyed && <Button variant="primary" onClick={openConnectAgent}>Connect an agent</Button> },
-    { key: 'receive', done: progress.received, title: 'Receive your first email', action: !progress.received && action('/receiving/inboxes', 'Open inboxes', false) },
-  ]
-  // An inbox of their own: mail to their domain lands in Receiving's inbox, which a mail app can also open where the
-  // installation has a mail gateway (onboarding's step says so).
-  if (lead === 'personal') return [
-    { key: 'inbox', done: progress.received, title: 'Read your mail', action: !progress.received && action('/receiving', 'Open Receiving', false) },
-  ]
-  if (lead === 'marketing') return [
-    { key: 'contacts', done: progress.contacts, title: 'Import your contacts', action: !progress.contacts && action('/audience', 'Open Audience') },
-    { key: 'campaign', done: progress.campaign, title: 'Draft a campaign', action: !progress.campaign && action('/campaigns/templates', 'Pick a template') },
-    { key: 'send', done: progress.campaignSent, title: 'Send your first campaign', action: !progress.campaignSent && action('/campaigns', 'Open Campaigns', false) },
-  ]
-  return [
-    { key: 'newsletter', done: progress.newsletter, title: 'Create your newsletter', action: !progress.newsletter && action('/newsletters/new', 'Create newsletter') },
-    { key: 'readers', done: progress.readers, title: 'Get your first readers', action: !progress.readers && newsletter && action(readersPath(newsletter.id), 'Add readers') },
-    { key: 'issue', done: progress.issueSent, title: 'Send the first issue', action: !progress.issueSent && newsletter && action(newIssuePath(newsletter.id), 'Write an issue', false) },
-  ]
-}
-
-// Numbered steps in Overview's detail column; only the current step is open, with its action. A finished step's number
-// turns into a check, so the marks are the progress. Docs, for the code examples, sits on the title row.
-export function SetupRail({ steps, current, open: opened = current ? [current] : [] }: { steps: SetupStep[]; current?: SetupStep; open?: SetupStep[] }) {
-  return <section className="setup-rail" aria-label="Get started">
-    <div className="setup-rail__head"><h2>Get started</h2><Link className="ui-button ui-button--ghost ui-button--sm" to="/docs#quickstart">Docs <ArrowUpRight size={16} /></Link></div>
-    <ol>{steps.map((step, index) => {
-      const open = opened.includes(step)
-      return <li key={step.key} data-done={step.done || undefined} data-open={open || undefined} style={{ '--i': index } as CSSProperties}>
-        <span className="setup-rail__mark" aria-hidden="true"><span>{index + 1}</span><Check size={12} strokeWidth={2.75} /></span>
-        <div className="setup-rail__body"><span>{step.title}{step.done && <span className="sr-only"> (done)</span>}</span>
-          {open && <>{step.note && <span className="muted">{step.note}</span>}{step.action && <div className="setup-rail__action">{step.action}</div>}</>}
-        </div>
-      </li>
-    })}</ol>
-  </section>
+  // The ten newest domains: an older verified one is in the session's domain summary, which the strip counts too.
+  const ownVerified = items.find(domain => domain.status === 'verified')
+  const builtin = all.find(domain => domain.builtIn && domain.status === 'verified')
+  return { loading: false, stuck, sent: setup.data.emails.any, agent: setup.data.progress?.agent, ownVerified, pendingDomain: items.find(domain => domain.status !== 'verified'),
+    sendFrom: ownVerified ?? builtin }
 }

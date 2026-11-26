@@ -136,8 +136,6 @@
 .onboarding-imported { margin: 0; padding: 0; list-style: none; }
 .onboarding-imported li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: var(--row-height-lg); padding-block: var(--space-8); }
 .onboarding-imported code { min-width: 0; font-size: var(--text-sm); line-height: var(--leading-sm); overflow-wrap: anywhere; }
-.onboarding-builtin-name { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
-.onboarding-builtin-copy { margin: 0; }
 
 /* DNS step */
 .onboarding-domain-title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8) var(--space-12); }
@@ -153,156 +151,53 @@
 .onboarding-actions::before { content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 24px; background: linear-gradient(to bottom, transparent, var(--color-surface)); pointer-events: none; }
 .onboarding-step:has(.onboarding-actions) { padding-bottom: var(--space-8); }
 
-/* First email: one action for a coding agent (its prompt) with its line, then the test email; no code and no key on
-   screen. The line's states share one cell, so a copy never moves the test below it. */
-.onboarding-agent { display: flex; flex-direction: column; gap: var(--space-12); }
-.onboarding-agent [data-pending] { visibility: hidden; }
-.onboarding-agent-line { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.onboarding-test .first-send-test .muted { font-size: var(--text-sm); line-height: var(--leading-sm); }
-
-
-/* The focus step and the steps each focus leads to (focus-steps.tsx): a list of tasks, each a well (as the focus choices
-   are) with its icon, title and one line, its action at the end; a done task's icon turns into a check. Every action sits in a slot that holds its place
-   (.onboarding-slot), so nothing moves as drafts and names land. */
-.focus-tasks { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
-.focus-task { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-12); min-height: 64px; padding: var(--space-12) var(--space-16) var(--space-12) var(--space-12); border-radius: var(--radius-lg); background: var(--color-well, var(--color-layer-1)); }
-.focus-task__icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-lg); background: var(--color-layer-2); color: var(--color-text); }
-.focus-task[data-done] .focus-task__icon { background: var(--color-success-marker); color: var(--color-surface); }
-.focus-task__text { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
-.focus-task__title { font-weight: var(--font-weight-bold); line-height: 22px; overflow-wrap: anywhere; }
-.focus-task__line { color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
-.focus-task__action { display: flex; justify-content: flex-end; min-width: 0; }
-.focus-task__slot { justify-items: end; }
-.focus-task__slot[data-pending], .focus-task__copy[data-pending] { opacity: .45; }
-.focus-name { display: flex; gap: var(--space-6); }
-.focus-name .ui-input { width: 180px; height: var(--control-height-sm); font-size: var(--text-sm); }
-.focus-ramp { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.focus-ramp a { color: var(--color-text); }
-.focus-inline-error { font-size: var(--text-sm); }
-/* Arriving mail: room for three messages from the first frame, so mail landing moves nothing under it. */
-.focus-mail { display: flex; flex-direction: column; gap: var(--space-8); }
-.focus-mail__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
-.focus-mail__head h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
-.focus-mail__list { display: flex; flex-direction: column; min-height: calc(3 * 40px); margin: 0; padding: 0; list-style: none; border-radius: var(--radius-lg); background: var(--color-layer-1); }
-.focus-mail__list > li { display: grid; grid-template-columns: 13rem minmax(0, 1fr) auto; align-items: center; gap: var(--space-12); height: 40px; padding-inline: var(--space-12); font-size: var(--text-sm); }
-.focus-mail__from, .focus-mail__subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.focus-mail__list > .focus-mail__empty { display: flex; flex: 1; height: auto; justify-content: center; gap: var(--space-8); text-align: center; }
-@media (max-width: 640px) {
-  .focus-task { grid-template-columns: 32px minmax(0, 1fr); row-gap: var(--space-8); }
-  .focus-task__action { grid-column: 2; justify-content: flex-start; }
-  .focus-task__slot { justify-items: start; }
-  .focus-name { width: 100%; }
-  .focus-name .ui-input { flex: 1; width: auto; height: 44px; font-size: var(--text-lg); }
-  .focus-task .ui-button--sm { min-height: 44px; }
-  .focus-mail__list { min-height: calc(3 * 56px); }
-  .focus-mail__list > li { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; row-gap: var(--space-4); height: 56px; }
-  .focus-mail__from { grid-row: 1; }
-  .focus-mail__subject { grid-row: 2; grid-column: 1 / -1; color: var(--color-muted); }
-}
-
 /* Key hints (keys.tsx): set into the control they belong to; ui.css hides them on touch screens and below 900 px. */
 .onboarding-surface .onb-kbd { margin-inline-end: calc(-1 * var(--space-4)); background: var(--color-kbd-inset); }
 .onboarding-surface .ui-button--primary > .onb-kbd { background: color-mix(in oklab, var(--color-on-accent) 16%, transparent); color: var(--color-on-accent-muted); }
-.onboarding-skip:has(.onb-kbd) { display: inline-flex; align-items: center; gap: var(--space-8); }
 
-/* Provisioning (email-step.tsx ProvisioningBar): a 2 px bar along the surface's top edge with its label under it, both in
-   the surface's top padding and out of the flow, so they move nothing as they come and go. Ready, the bar fills and both
-   fade. */
-.onb-provisioning { position: absolute; top: 0; left: 0; right: 0; z-index: 3; pointer-events: none; transition: opacity 300ms ease-out 350ms; }
-.onb-provisioning[data-state='done'] { opacity: 0; }
-.onb-provisioning__track { position: relative; height: 2px; overflow: hidden; border-start-start-radius: var(--radius-lg); }
-.onb-provisioning__track > span { position: absolute; inset: 0; background: var(--color-text); transform-origin: left; animation: onb-provision 1.6s cubic-bezier(.4, 0, .2, 1) infinite; }
-.onb-provisioning[data-state='done'] .onb-provisioning__track > span { animation: none; transform: none; transition: transform 300ms var(--ease-out-strong); }
-@keyframes onb-provision { 0% { transform: translateX(-100%) scaleX(.35); } 60% { transform: translateX(60%) scaleX(.5); } 100% { transform: translateX(100%) scaleX(.35); } }
-.onb-provisioning__label { margin: 0; padding-top: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); text-align: center; }
 
-/* The first email (email-step.tsx): the email as it will arrive, From and To above its subject and words, the fields a
-   solid control fill. Sent, it stays where it is, read-only, and its footer says Sent. */
-.onb-annotated { position: relative; }
-.onb-mail { display: flex; flex-direction: column; gap: var(--space-8); padding: var(--space-16); border-radius: var(--radius-lg); background: var(--color-well, var(--color-layer-1)); }
-.onb-mail__head { display: flex; flex-direction: column; gap: var(--space-4); margin: 0 0 var(--space-4); padding-inline: var(--space-12); font-size: var(--text-sm); line-height: var(--leading-sm); }
-.onb-mail__head > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-8); }
-.onb-mail__head dt { color: var(--color-muted); }
-.onb-mail__head dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-.onb-mail .ui-input { background: var(--color-surface); box-shadow: none; }
-.onb-mail .onb-mail__subject { font-weight: var(--font-weight-bold); }
-.onboarding-surface .onb-mail .onb-mail__text { min-height: 0; height: 112px; resize: none; }
-.onb-mail .ui-input[readonly] { background: transparent; cursor: default; }
-.onb-mail .ui-input[readonly]:is(:hover, :focus, :focus-visible) { background: transparent; }
-.onb-mail__foot { display: flex; align-items: center; gap: var(--space-12); min-height: 32px; margin-top: var(--space-4); }
-.onb-mail__status { justify-items: start; align-items: center; }
-.onb-mail__sent { padding-left: var(--space-12); display: inline-flex; align-items: center; gap: var(--space-6); height: 32px; color: var(--color-success); font-size: var(--text-sm); font-weight: var(--font-weight-bold); }
-.onb-email-error { margin: calc(-1 * var(--space-12)) 0 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.onb-num { font-family: var(--font-mono); font-weight: var(--font-weight-bold); font-variant-numeric: tabular-nums; white-space: nowrap; }
-
-/* The reply: room for it from the send on, the wait and the reply in one cell, so it landing moves nothing below. */
-.onb-reply-slot > * { min-width: 0; }
-.onb-waiting { display: flex; align-items: center; justify-content: center; gap: var(--space-8); align-self: stretch; min-height: 120px; border-radius: var(--radius-lg); background: var(--color-layer-1); color: var(--color-muted); font-size: var(--text-sm); transition: opacity 200ms ease-out; }
-.onb-waiting:not([data-active]) { opacity: 0; }
-.onb-mail--reply { gap: var(--space-6); }
-.onb-mail__words { padding-inline: var(--space-12); }
-.onb-mail__line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.onb-mail__words { display: -webkit-box; margin: 0; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; font-size: var(--text-md); line-height: 22px; white-space: pre-line; min-height: 22px; }
-.onb-reply-slot > .onb-annotated:not([data-active]) { visibility: hidden; }
-.onb-reply-slot > .onb-annotated[data-active] .onb-mail--reply { animation: onboarding-rise 260ms var(--ease-out-strong) both; }
-.onb-email-actions .onboarding-slot { justify-items: start; align-items: center; }
-
-/* Callouts (email-step.tsx Callout): a figure beside what it measures, joined by a thin line. Out of the flow at desktop
-   widths; on a narrow screen it sits under the item, its box there from the first frame. */
-.onb-callout { position: absolute; top: 50%; left: 100%; display: flex; align-items: center; width: 248px; color: var(--color-muted); font-size: var(--text-sm); line-height: 20px; transform: translateY(-50%); opacity: 0; transition: opacity 200ms ease-out; }
-.onb-callout[data-shown] { opacity: 1; transition-delay: 60ms; }
-.onb-callout__line { position: relative; flex: 0 0 40px; height: 1px; margin-right: var(--space-12); background: var(--color-border-strong); transform-origin: left; transform: scaleX(0); transition: transform 300ms var(--ease-out-strong); }
-.onb-callout__line::before { content: ''; position: absolute; top: -2px; left: -3px; width: 5px; height: 5px; border-radius: 50%; background: var(--color-border-strong); }
-.onb-callout[data-shown] .onb-callout__line { transform: none; }
-.onb-callout__body { display: flex; flex-direction: column; min-width: 0; }
-.onb-callout__body > span:first-child:not(.onb-callout__row) { display: inline; }
-.onb-callout__row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-12); }
-.onb-callout .onb-num { color: var(--color-text); }
-@media (max-width: 1239px) {
-  .onb-callout { position: static; width: auto; margin-top: var(--space-8); padding-left: var(--space-4); transform: none; align-items: stretch; }
-  .onb-callout__line { flex: 0 0 1px; height: auto; margin: var(--space-4) var(--space-12) var(--space-4) var(--space-4); transform-origin: top; transform: scaleY(0); }
-  .onb-callout__line::before { top: -3px; left: -2px; }
-  .onb-callout__body { flex: 1; }
-  .onb-callout__row { justify-content: flex-start; }
-}
-
-/* "What do you want to do?" (focus-steps.tsx FocusStep): five rows, each its icon, name, one line and the number that
-   picks it; a tap, a click or the number opens its next screen. */
-.onb-choices { display: flex; flex-direction: column; gap: var(--space-8); }
-.onb-choice { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-12); min-height: 64px; padding: var(--space-12) var(--space-16) var(--space-12) var(--space-12); border: 0; border-radius: var(--radius-lg); background: var(--color-well, var(--color-layer-1)); color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 100ms ease-out, transform 180ms var(--ease-out-strong); }
-.onb-choice:active { transform: scale(.99); transition-duration: 100ms; }
-.onb-choice:focus-visible, .onb-choice[aria-pressed='true'] { background: var(--color-well-hover, var(--color-layer-2)); }
-.onb-choice__icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-lg); background: var(--color-layer-2, var(--color-layer-1)); transition: background-color 100ms ease-out, color 100ms ease-out; }
-.onb-choice:focus-visible .onb-choice__icon, .onb-choice[aria-pressed='true'] .onb-choice__icon { background: var(--color-contrast); color: var(--color-on-contrast); }
-.onb-choice__text { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
-.onb-choice__title { font-size: var(--text-md); line-height: 22px; font-weight: var(--font-weight-bold); letter-spacing: -.1px; }
-.onb-choice__line { color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
-.onb-choice__go { display: inline-flex; align-items: center; gap: var(--space-8); color: var(--color-muted); }
-.onb-choice__go .onb-kbd { margin: 0; }
-.onb-choice__go svg { transition: transform 180ms var(--ease-out-strong); }
-@media (hover: hover) and (pointer: fine) {
-  .onb-choice:hover { background: var(--color-well-hover, var(--color-layer-2)); transition-duration: 0ms; }
-  .onb-choice:hover .onb-choice__icon { background: var(--color-contrast); color: var(--color-on-contrast); transition-duration: 0ms; }
-  .onb-choice:hover .onb-choice__go { color: var(--color-text); }
-  .onb-choice:hover .onb-choice__go svg { transform: translateX(3px); }
-}
-@media (max-width: 640px) {
-  .onb-mail { padding: var(--space-12); }
-  .onboarding-surface .onb-mail .onb-mail__text { height: 132px; }
-  .onb-mail__foot .ui-button { width: 100%; }
-  .onb-mail__status { flex: 1; justify-items: stretch; }
-  .onb-waiting { flex-wrap: wrap; min-height: 160px; padding: var(--space-16); text-align: center; }
-  .onb-choice { min-height: 72px; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .onb-provisioning__track > span { animation: none; transform: scaleX(.4); opacity: .5; }
-  .onb-callout__line { transition: none; transform: none; }
-  .onb-reply-slot > .onb-annotated[data-active] .onb-mail--reply { animation: onboarding-fade 150ms ease-out both; }
-  .onb-choice, .onb-choice:active { transition: none; transform: none; }
-}
+/* Get started (get-started.tsx): two tabs whose panels share one cell (the taller sets the
+   height, so switching moves nothing below), the optional test email, then Go to dashboard. The shown panel comes in from
+   the side of its tab. */
+.onb-start { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
+.onb-panels { display: grid; min-width: 0; }
+.onb-panel { grid-area: 1 / 1; display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
+.onb-panel:not([data-active]) { visibility: hidden; }
+.onb-panel[data-enter='left'] { animation: onb-from-left 300ms var(--ease-out-strong) both; }
+.onb-panel[data-enter='right'] { animation: onb-from-right 300ms var(--ease-out-strong) both; }
+@keyframes onb-from-left { from { opacity: 0; transform: translateX(-24px); } }
+@keyframes onb-from-right { from { opacity: 0; transform: translateX(24px); } }
+.onb-panel__actions { display: flex; }
+.onb-panel__line { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+/* The prompt fills what the panel has left (at least eight lines) and scrolls; its text fades where it runs on. */
+.onb-prompt { flex: 1 1 0; height: 0; min-height: 168px; margin-top: var(--space-4); }
+.onb-prompt.developer-code { padding: 0; overflow: hidden; display: flex; }
+.onb-prompt > code { flex: 1; min-width: 0; padding: var(--space-12) var(--space-16); overflow-y: auto; --fade-top: 0px; --fade-bottom: 0px;
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent); }
+.onb-key { display: flex; flex-direction: column; gap: var(--space-8); }
+.onb-key__slot { justify-items: start; align-items: center; min-height: var(--onb-control-height); }
+.onb-key__secret { align-self: stretch; width: 100%; min-height: var(--onb-control-height); padding: var(--space-4) var(--space-4) var(--space-4) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.onb-send { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
+.onb-send__copy[data-pending] { visibility: hidden; }
+/* Its words start on the column: the ghost button's inset hangs outside it. */
+.onb-docs { align-self: flex-start; margin-inline-start: calc(-1 * var(--space-12)); }
+/* A one-time screen: the column sits in the middle of the page when it has room, and scrolls from the top when it doesn't. */
+.onboarding-step:has(> .onb-get-started) { margin-block: auto; }
+.onb-start-test { display: flex; flex-direction: column; gap: var(--space-8); }
+.onb-start-test .first-send-test { flex-direction: column; align-items: flex-start; gap: var(--space-8); }
+.onb-start-time { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); visibility: hidden; }
+.onb-start-time[data-shown] { visibility: visible; animation: onboarding-fade 200ms ease-out both; }
+.onb-num { color: var(--color-text); font-family: var(--font-mono); font-weight: var(--font-weight-bold); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.onb-start-test .first-send-test > .muted { font-size: var(--text-sm); line-height: var(--leading-sm); overflow-wrap: anywhere; }
+.onb-test-line { justify-items: start; }
+/* Try again after a failed test email: a quiet link at the end of its line. */
+.onb-retry { padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+/* Skip's two labels share one cell, so the button keeps its width when it turns into Go to dashboard. */
+.onb-finish-label { justify-items: center; }
 
 @media (prefers-reduced-motion: reduce) {
   .onboarding-continue[data-timer]::after { display: none; }
+  .onb-panel[data-enter] { animation: onboarding-fade 150ms ease-out both; }
 }
 
 @media (max-width: 850px) {
@@ -332,9 +227,11 @@
   .onboarding-inline-form > .ui-button { margin-top: 0; height: 44px; }
   .onboarding-surface .ui-input { height: 44px; font-size: var(--text-lg); }
   .onboarding-connect-actions { flex-direction: column; align-items: stretch; }
-  /* The agent prompt's copy takes the row; the docs and the download share the next. */
-  .onboarding-agent .onboarding-connect-actions { flex-direction: row; flex-wrap: wrap; }
-  .onboarding-agent .onboarding-connect-actions > * { flex: 1 1 0; }
-  .onboarding-agent .onboarding-connect-actions > .copy-action { flex-basis: 100%; }
   .onboarding-actions .ui-button { flex: 1; }
+  /* Get started: full-width actions, and two lines kept for the test email's line, which names the domain once it exists. */
+  .onb-panel__actions > .ui-button, .onb-key__slot > span:first-child, .onb-key__slot .ui-button, .onb-start-test .first-send-test > .ui-button { width: 100%; }
+  .onb-key__slot { justify-items: stretch; }
+  .onb-start-test .first-send-test { align-items: stretch; }
+  .onb-start-test .first-send-test > .muted { min-height: calc(2 * var(--leading-sm)); }
+  .onb-prompt { min-height: 200px; }
 }

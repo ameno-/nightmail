@@ -301,6 +301,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
     }, config);
   }
   async verifyWake(token: string, conversationId: string) { return (await this.platform()).verifyWake(token, conversationId); }
+  async verifyFile(token: string, conversationId: string, attachmentId: string) { return (await this.platform()).verifyFile(token, conversationId, attachmentId); }
   async verifyHandoff(token: string) { return (await this.platform()).verifyHandoff(token); }
   async registerConversation(body: Parameters<SupportPlatformApi['registerConversation']>[0]) { return (await this.platform()).registerConversation(body); }
   async closeConversation(conversationId: string) { return (await this.platform()).closeConversation(conversationId); }
@@ -344,7 +345,7 @@ export default {
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
-    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !linkHost && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
+    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !linkHost && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal|i)(?:\/|$)/.test(pathname)) {
       // Existing files are served asset-first. Only dashboard routes get the shell on a miss. "/" on a hosted
       // installation is the homepage: home.html, the dashboard's shell with the homepage's first screen painted in it
       // (app/home-shell.ts); Workers Assets answers /home with it.
@@ -365,6 +366,11 @@ export default {
       if (isMissingComparePage(pathname)) return untransformed(shell, request, 404);
       return untransformed(shell, request);
     }
+    // A linked campaign image (src/linked-images.ts) is the same bytes for every reader: once answered, this colo keeps it
+    // and answers it again before admission, the database or storage.
+    const images = request.method === 'GET' && pathname.startsWith('/i/') && typeof caches !== 'undefined' ? (caches as unknown as { default: Cache }).default : undefined;
+    const imageKey = images && new Request(url.origin + pathname);
+    if (images && imageKey) { const kept = await images.match(imageKey).catch(() => undefined); if (kept) return kept; }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
     try {
       deps = await loadHttpDeps();
@@ -410,7 +416,17 @@ export default {
       const innerTiming = responseHeaders.get('server-timing');
       if(innerTiming) responseHeaders.set('server-timing', [innerTiming, `admission;dur=${admissionMs.toFixed(1)}`, `runtime;dur=${runtimeMs.toFixed(1)}`].join(', '));
       if (!(feedbackIngress && [400,429].includes(response.status))) core.log('info', { requestId: responseHeaders.get('x-request-id'), operation: 'worker-runtime', status: response.status, admissionMs: Number(admissionMs.toFixed(1)), runtimeMs: Number(runtimeMs.toFixed(1)) });
-      return core.secureResponse(new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders }));
+      const answer = core.secureResponse(new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders }));
+      if (images && imageKey && answer.status === 200) {
+        const kept = new Response(answer.clone().body, answer);
+        kept.headers.delete('x-request-id'); kept.headers.delete('server-timing');
+        // Kept here an hour, not the year browsers may: a deleted picture or one taken down stops being served from this colo
+        // within the hour (a Cloudflare purge of its URL ends it at once). A score card (src/score-card.ts) is never taken
+        // down and its address is its design's version: kept 30 days, so each colo draws each card about once a month.
+        kept.headers.set('cache-control', pathname.startsWith('/i/score-card/') ? 'public, max-age=2592000' : 'public, max-age=3600');
+        ctx.waitUntil(images.put(imageKey, kept).catch(() => {}));
+      }
+      return answer;
     }
     catch (error) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;

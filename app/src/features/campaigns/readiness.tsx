@@ -13,6 +13,14 @@ const titles = { ready: 'Ready to send', ramp_recommended: 'We recommend sending
 const tones = { ready: 'success', ramp_recommended: 'warning', ramp_required: 'warning' } as const
 const dmarcLabels = { reject: 'DMARC p=reject', quarantine: 'DMARC p=quarantine', none: 'DMARC p=none', missing: 'no DMARC record', invalid: 'DMARC record invalid' } as const
 const mailFromLabels = { verified: 'MAIL FROM verified', pending: 'MAIL FROM pending', failed: 'MAIL FROM failed', not_configured: 'no custom MAIL FROM' } as const
+const hostOf = (origin: string) => { try { return new URL(origin).host } catch { return origin } }
+// Where the links go, plainly: a domain's own link host that isn't active yet means they go somewhere else meanwhile.
+function linksLine(domain: CampaignReadiness['domain']) {
+  if (!domain.linkOrigin) return 'none: this campaign can’t launch right now'
+  const host = hostOf(domain.linkOrigin)
+  const own = domain.ownLinkHost
+  return own?.active ? `${host}, this domain’s own` : own ? `${host}, until ${own.hostname} is set up` : host
+}
 const rate = (value: number | null) => value === null ? null : percent(value, value < 0.01 ? 2 : 1)
 const added = (days: number | null) => days === null ? 'not added to this workspace' : days === 0 ? 'added today' : days === 1 ? 'added yesterday' : `added ${number(days)} days ago`
 function history(h: CampaignReadiness['history']['domain']) {
@@ -48,12 +56,14 @@ export function ReadinessPanel({ readiness, start, choice, onChoice, consent, on
       </Field>
     </div>}
     <dl className="review-facts">
-      <dt>Domain</dt><dd>{[domain.name, added(domain.ageDays), domain.dmarc ? dmarcLabels[domain.dmarc] : 'DMARC not checked yet', mailFromLabels[domain.mailFrom], 'no link host'].join(' · ')}</dd>
+      <dt>Domain</dt><dd>{[domain.name, added(domain.ageDays), domain.dmarc ? dmarcLabels[domain.dmarc] : 'DMARC not checked yet', mailFromLabels[domain.mailFrom]].join(' · ')}</dd>
+      <dt>Links</dt><dd>{linksLine(domain)}</dd>
       <dt>This domain</dt><dd>{history(readiness.history.domain)}</dd>
       <dt>Workspace</dt><dd>{history(readiness.history.workspace)}</dd>
       <dt>List</dt><dd>{listLine}</dd>
       {readiness.sizeJump !== null && readiness.sizeJump > 1 && <><dt>Size</dt><dd>{number(Math.round(readiness.sizeJump))}× this domain’s largest campaign</dd></>}
     </dl>
+    {domain.ownLinkHost && !domain.ownLinkHost.active && domain.linkOrigin && <p className="campaign-note" data-tone="warning"><span>Links in this campaign go on {hostOf(domain.linkOrigin)}, not {domain.ownLinkHost.hostname}: that link host isn’t set up yet. Copies made once it is go there.</span></p>}
     {readiness.reasons.length > 0 && <ul className="campaign-notes" aria-label="What the review found">{readiness.reasons.map(reason => <li key={reason.code} className="campaign-note"><span>{reason.message}</span></li>)}</ul>}
   </section>
 }

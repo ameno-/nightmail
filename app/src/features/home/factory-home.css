@@ -13,7 +13,8 @@
 /* A wide frame's stage is the window's height at most, and no taller than the frame's safe width shows down to the
    floor line: a more upright window has the hero end there and the page go on under it (factory-home.tsx). */
 .fac-page[data-format='desktop'] .fac-hero { height: auto; }
-.fac-page[data-format='desktop'] .fac-stage { flex: none; aspect-ratio: var(--fac-safe-w) / var(--fac-floor); max-height: calc(100svh - var(--srt-head) - var(--fac-under)); }
+/* Give the stage its width explicitly: WebKit otherwise shrinks it through the aspect ratio when max-height wins. */
+.fac-page[data-format='desktop'] .fac-stage { flex: none; width: 100%; aspect-ratio: var(--fac-safe-w) / var(--fac-floor); max-height: calc(100svh - var(--srt-head) - var(--fac-under)); }
 .fac-frame {
   --fac-fw: min(max(100cqw, 100cqh * var(--fac-w) / var(--fac-floor)), 100cqh * var(--fac-w) / var(--fac-safe-h), 100cqw * var(--fac-w) / var(--fac-safe-w));
   --fac-fh: calc(var(--fac-fw) * var(--fac-h) / var(--fac-w));

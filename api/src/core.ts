@@ -170,11 +170,14 @@ export interface Config {
   sharedRegions?: string[];
   hostedSendCaps: { firstWeek: number };
   publicUrl: string;
+  /** CAMPAIGN_IMAGES: campaign mail links its inline pictures from publicUrl/i/… instead of carrying them (src/linked-images.ts). */
+  linkedImages: boolean;
   /** Hosted: the link domain the links in campaign and marketing mail go on (NIGHTMAIL_LINK_HOST, src/link-domains.ts). */
   linkHost?: string;
   /** Own link hosts (src/link-domains.ts), off unless set: the Cloudflare for SaaS zone customers' links.<domain> CNAMEs
-   *  reach (`target`, a name in that zone) and the token that edits its custom hostnames. */
-  linkHosts?: { zoneId: string; token: string; target: string };
+   *  reach (`target`, a name in that zone) and the token that edits its custom hostnames. `workspaces` (Hosted,
+   *  NIGHTMAIL_LINK_HOST_WORKSPACES): the only workspaces they are for, none when empty; absent (self-hosted), every one. */
+  linkHosts?: { zoneId: string; token: string; target: string; workspaces?: readonly string[] };
   sesFeedbackUrl?: string;
   regions: string[];
   liveEnabled: boolean;
@@ -277,7 +280,7 @@ export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody
   /** Elapsed time asleep between long-poll reads; queries and reauthorization are active request time. */
   pollWaitMs?: number;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
-  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean; origin?: { originClass: string; fetchSite?: string } };
+  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean; origin?: { originClass: string; fetchSite?: string }; attachmentTypes?: AttachmentTypes };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
   principal?: { type: string; workspace?: string }; support?: SupportScope } };
 export type App = OpenAPIHono<AppEnv>;
@@ -319,6 +322,8 @@ export type JobHandler = ((runtime: Runtime, payload: Record<string, unknown>, j
   batch?: (runtime: Runtime, items: JobBatchItem[]) => Promise<JobBatchOutcome[]>;
 };
 
+/** A refused attachment's declared type, the type its bytes are and its name's extension. */
+export type AttachmentTypes = { declaredType: string; detectedType: string; extension: string };
 export class ApiError extends Error {
   /** Structured detail for errors that have several parts, such as rule compile diagnostics. */
   details?: Record<string, unknown>[];
@@ -332,6 +337,8 @@ export class ApiError extends Error {
   origin?: { originClass: string; fetchSite?: string };
   /** Seconds for the HTTP Retry-After header when a retryable 503/429 has a fixed backoff instead of resetAt. */
   retryAfterSeconds?: number;
+  /** What the request log may say about a refused attachment (screened-html.ts attachmentTypes): types, never its name or content. */
+  attachmentTypes?: AttachmentTypes;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
 /** Classify once, whether the error is the whole response or a failed part of a private dashboard read. */
@@ -483,9 +490,16 @@ export function receivedMailRefusal(code: 'UNRESTRICTED_KEY_REQUIRED' | 'ADMIN_R
  */
 export const unrestrictedRequired = (a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
   fullAccessRefusal('UNRESTRICTED_KEY_REQUIRED', a, area, { ...need, scope: 'workspace' }, note);
-/** A refusal, under `code`, of a credential that isn't full access, worded as unrestrictedRequired words it. */
-export const fullAccessRefusal = (code: string, a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
-  denied(code, `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, need);
+/**
+ * A refusal, under `code`, of a credential that isn't full access, worded as unrestrictedRequired words it. An API key
+ * with no sender-domain limit is one edit away from Full access: it is told that edit on its own ID (an agent with a Read
+ * only key listing receiving addresses retried six times when told to create another key, which keys can't do), and that
+ * asking again with it changes nothing.
+ */
+export const fullAccessRefusal = (code: string, a: (Pick<Actor, 'permissions' | 'domains' | 'credential'> & { keyId?: string }) | undefined, area: string, need: Required, note?: string) =>
+  denied(code, a?.credential === 'apiKey' && !a.domains.length && a.keyId
+    ? `${credentialLimits(a)} ${area} Full access: make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${a.keyId} with {"permissions":["read","send","manage"]}.${note ? ` ${note}` : ''} Until then this key gets the same answer.`
+    : `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, need);
 export class ModuleLoadError extends ApiError {
   constructor(cause?: unknown) {
     super(503, 'MODULE_LOAD_FAILED', 'Unable to load a required runtime module; retry shortly.', undefined, true);

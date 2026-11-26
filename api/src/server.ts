@@ -25,7 +25,7 @@ async function dashboardFile(request: Request, path: string, response: Response)
   // The public docs (the Docs page reads the 1.7 MB OpenAPI document) are the same for every reader: compress them too.
   // Exactly these paths: a longer one that only starts like them is a dashboard route, with its own answer below.
   if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/[^/]+)$/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
-  if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/(?:operations|tags))(?:\/|$)/.test(path)) return response;
+  if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|i|docs\/(?:operations|tags))(?:\/|$)/.test(path)) return response;
   const html = response.headers.get('content-type')?.startsWith('text/html');
   const asset = path.startsWith('/assets/') && !html, font = path.startsWith('/fonts/') && !html;
   if (!html && !asset && !font) return response;
@@ -33,6 +33,8 @@ async function dashboardFile(request: Request, path: string, response: Response)
   // A missing /assets/ file falls back to the HTML shell: never cache that answer.
   // (HTML is never transformed on the way, as on Cloudflare: src/worker.ts, untransformed.)
   headers.set('cache-control', asset ? 'public, max-age=31536000, immutable' : font ? 'public, max-age=86400, stale-while-revalidate=604800' : 'no-cache, no-transform');
+  // Fonts load cross-origin too: in webmail, from the account emails (src/notices.ts), as app/asset-headers.ts serves them.
+  if (font) headers.set('access-control-allow-origin', '*');
   if (!asset || !/\.(?:js|css|svg|json|map)$/.test(path)) return new Response(response.body, { status: 200, headers });
   return encode(request, path, response, headers, '');
 }
@@ -80,7 +82,7 @@ try {
   const siteIndex = existsSync(`${publicRoot}${SITE_INDEX.slice(1)}`) ? readFileSync(`${publicRoot}${SITE_INDEX.slice(1)}`, 'utf8') : '';
   const app = createApp({ fallback: async (c, next) => {
     // API failures must remain JSON, never an apparently successful SPA response.
-    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/(?:operations|tags))(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
+    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|i|docs\/(?:operations|tags))(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
     if (homepage && c.req.path === '/') { const response = await homepage(c, next); if (response) return response; }
     return assets(c, async () => {
       const response = await pages(c, async () => {

@@ -56,6 +56,10 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
 .ov-gauge > i[data-on] { background: var(--color-accent-data); }
 .ov-gauge[data-zone='near'] > i[data-on] { background: var(--color-warning-marker); }
 .ov-gauge[data-zone='over'] > i[data-on] { background: var(--color-danger-marker); }
+/* No mail in the period: one quiet well across the four, its label and a sentence where the figures would be, the same
+   height (two rows of wells on a phone), so the figures replace it in place. */
+.ov-kpi--empty { grid-column: 1 / -1; }
+.ov-kpi--empty > p { display: flex; align-items: center; height: 28px; margin-top: var(--space-4); color: var(--color-muted); font-size: var(--text-md); line-height: var(--leading-md); }
 /* Where there is no sidebar to carry it (the compact shell), the sender score card is a row under the figures; its
    neutral tile is the tiles' well. */
 .ov-kpis > .score-card { grid-column: 1 / -1; --score-neutral: var(--color-well); --score-neutral-hover: var(--color-well-hover); }
@@ -69,8 +73,7 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
 /* The rail: compact sections 20px apart, no rule between; labels in mono capitals. */
 .ov-split__aside > * { flex: none; }
 .ov-split__aside > .score-card { --score-neutral: var(--color-well); --score-neutral-hover: var(--color-well-hover); }
-.ov-split__aside :is(.setup-rail__head h2, .next-steps__title) { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.ov-split__aside .setup-rail__head { height: 24px; }
+.ov-split__aside .next-steps__title { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .ov-rail-section { display: flex; flex-direction: column; gap: var(--space-4); }
 .ov-rail-section > .ov-label { display: flex; align-items: center; height: 24px; }
 .ov-split__aside .next-steps { gap: var(--space-4); }
@@ -132,6 +135,8 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
 .ov-readout em[data-zone='near'] { color: var(--color-warning); }
 .ov-readout em[data-zone='over'] { color: var(--color-danger); }
 .ov-chart__plot .ui-empty-state { height: 100%; justify-content: center; padding: 0; }
+/* No mail: the key steps back and the plot is its time axis alone. */
+.ov-legend[data-hidden] { visibility: hidden; }
 .ov-chart__plot--loading { border-radius: var(--radius-xs); background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 
 /* Latest emails: Logs' dense 32px rows under a 32px label row, as many as fill the column (latest.ts). The label sits
@@ -140,6 +145,9 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
 .ov-latest .ui-section-header { flex: none; flex-wrap: nowrap; height: 32px; margin: 0; padding: 0; }
 .ov-latest .ui-section-header h2 { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .ov-table .ui-table :is(th, td):first-child { padding-left: var(--space-12); }
+/* None yet: one quiet sentence where the head would be, in the rows' inset; the list keeps its height. */
+.ov-latest .ui-table-empty { place-items: start stretch; }
+.ov-latest__empty { position: relative; top: -30px; padding: var(--space-8) var(--space-12); color: var(--color-muted); font-size: var(--text-md); line-height: var(--leading-md); }
 
 /* Phone: the section links ("Logs", "All") and the range segments are 44px targets. */
 @media (max-width: 640px) {
@@ -181,6 +189,8 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
   /* The SES chip keeps its label and verdict; the rates (in its title and on Settings) don't fit beside the tabs. */
   .overview-reputation > .muted:last-child:not(:first-child) { display: none; }
   .ov-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov-kpi--empty { grid-row: span 2; height: calc(2 * 82px + var(--space-8)); }
+  .ov-kpi--empty > p { flex: 1; justify-content: center; height: auto; margin: 0 0 var(--space-12); }
 }
 
 /* A new range or stream: the old figures stay up and dim once the new ones take over 100 ms, then brighten as they

@@ -13,6 +13,7 @@ import { regionLabels } from './region-labels.js';
 import { MicroCentsJson } from './billing/money.js';
 import { PUBLIC_ROUTE } from './analytics-traffic.js';
 import { gradeCounts, registerGlassDeliverability } from './glass-deliverability.js';
+import { noReplyCount } from './support-inbox.js';
 
 // Glass (/glass in the dashboard): everything going on in the installation on one page, for operators. One read that
 // returns every figure, cached GLASS_TTL_SECONDS per installation, so the page's 30-second refresh costs one statement
@@ -78,7 +79,7 @@ const Glass = z.object({
   receiving: z.object({ today: int, spam: int, atLeast: z.boolean(), hourly: z.array(int).describe('The last 24 hours, oldest first.'), day: Day }),
   builtin: z.object({ active: int, ready: int.describe('Built-in domains that send.'), revoked: int,
     parent: z.object({ name: z.string(), ok: z.boolean(), problem: z.string().nullable(), trippedAt: z.string().nullable(), resetAt: z.string().nullable(), checkedAt: z.string() }).nullable() }),
-  support: z.object({ open: int, ticketed: int, hourly: z.array(int).describe('Conversations started per hour, the last 24.'), day: Day,
+  support: z.object({ open: int, ticketed: int, noReply: int.describe('Conversations in Needs you because the customer wrote and nothing was sent back for 10 minutes. Should always be 0.'), hourly: z.array(int).describe('Conversations started per hour, the last 24.'), day: Day,
     configured: z.object({ chat: z.boolean().describe('NIGHTMAIL_SUPPORT_SIGNING_KEY and NIGHTMAIL_SUPPORT_URL are set.'), email: z.boolean().describe('NIGHTMAIL_SUPPORT_ADDRESS_IDS is set.') }) }),
   screening: z.object({ compared: Count.describe('Content screened by both classifiers in the last 24 hours (the newest at most).'),
     agree: z.number().nullable().describe('Share of those where both gave the same verdict.'), jevFlagged: int, jevfFlagged: int,
@@ -108,7 +109,7 @@ type Raw = {
   places: Omit<Places, 'open'>; joined: { today: z.infer<typeof Split>; week: z.infer<typeof Split>; last: number; previous: number }; joined_daily: number[]; joined_hourly: number[]; funnel: Glass['signups']['funnel'];
   mail_previous: Glass['sending']['previous'] | null; steps: Glass['delivery']['steps']; ramp: { ramping: number; waiting: number };
   received_day: { last: number; previous: number }; builtin: { active: number; revoked: number; ready: number }; parent: Glass['builtin']['parent'];
-  support: { open: number; ticketed: number; last: number; previous: number }; support_hourly: number[];
+  support: { open: number; ticketed: number; last: number; previous: number; no_reply: number }; support_hourly: number[];
   screen: { n: number; agree: number; both: number; jev_flagged: number; jevf_flagged: number; jev_failed: number; jevf_failed: number } ; screened: { screened: number; rejected: number }; screened_hourly: number[];
   api: { back: number; key: string; n: number }[]; api_recent: { slowest: number; hist: number[] | null }[]; views_day: { last: number; previous: number };
   minutes: number[]; today: Glass['sending']['today']; hourly: Glass['sending']['hourly']; queued: number; held: number;
@@ -187,7 +188,7 @@ export async function readGlass(runtime: Pick<Runtime, 'db' | 'config'>): Promis
       (SELECT json_build_object('name',p.name,'ok',p.ok,'problem',p.problem,'trippedAt',${utc(sql`p.tripped_at`)},'resetAt',${utc(sql`p.reset_at`)},'checkedAt',${utc(sql`p.checked_at`)})
         FROM builtin_parent p ORDER BY p.name LIMIT 1) AS parent,
       (SELECT json_build_object('open',count(*) FILTER (WHERE c.status='open'),'ticketed',count(*) FILTER (WHERE c.status='ticketed'),
-          'last',count(*) FILTER (WHERE c.created_at>=t.day),'previous',count(*) FILTER (WHERE c.created_at>=t.since48 AND c.created_at<t.day))
+          'last',count(*) FILTER (WHERE c.created_at>=t.day),'previous',count(*) FILTER (WHERE c.created_at>=t.since48 AND c.created_at<t.day),'no_reply',${noReplyCount})
         FROM support_conversations c WHERE c.status<>'closed' OR c.created_at>=t.since48) AS support,
       ${series(sql`t.day`, 'hour', 24, sql`SELECT date_trunc('hour',c.created_at,'UTC') AS at,count(*) AS n FROM support_conversations c WHERE c.created_at>=t.day GROUP BY 1`)} AS support_hourly,
       (SELECT json_build_object('n',count(*),'agree',count(*) FILTER (WHERE x.jev_flagged=x.jevf_flagged),'both',count(*) FILTER (WHERE x.jev_flagged IS NOT NULL AND x.jevf_flagged IS NOT NULL),
@@ -268,7 +269,7 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy' | 'support'>): G
       steps: { ok: num(r.steps.ok), notice: num(r.steps.notice), warn: num(r.steps.warn), restrict: num(r.steps.restrict), pause: num(r.steps.pause) }, ramping: num(r.ramp.ramping), rampWaiting: num(r.ramp.waiting) },
     receiving: { today: num(r.received.today), spam: num(r.received.spam), atLeast: r.received.capped, hourly: r.received_hourly.map(num), day: { last: num(r.received_day.last), previous: num(r.received_day.previous) } },
     builtin: { active: num(r.builtin.active), ready: num(r.builtin.ready), revoked: num(r.builtin.revoked), parent: r.parent },
-    support: { open: num(r.support.open), ticketed: num(r.support.ticketed), hourly: r.support_hourly.map(num), day: { last: num(r.support.last), previous: num(r.support.previous) },
+    support: { open: num(r.support.open), ticketed: num(r.support.ticketed), noReply: num(r.support.no_reply), hourly: r.support_hourly.map(num), day: { last: num(r.support.last), previous: num(r.support.previous) },
       configured: { chat: Boolean(config.support?.signingKey && config.support.url), email: Boolean(config.support?.addressIds?.length) } },
     screening: { compared: { n: Math.min(num(r.screen.n), GLASS_CAP), atLeast: num(r.screen.n) > GLASS_CAP }, agree: num(r.screen.both) ? num(r.screen.agree) / num(r.screen.both) : null,
       jevFlagged: num(r.screen.jev_flagged), jevfFlagged: num(r.screen.jevf_flagged), jevFailed: num(r.screen.jev_failed), jevfFailed: num(r.screen.jevf_failed),
@@ -289,15 +290,17 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy' | 'support'>): G
 //  - standing: a workspace's step changes (standing_events, per workspace through its page index);
 //  - breaker: the built-in domains' breaker tripping (builtin_parent); alert: the open health alerts;
 //  - link_fallback: a workspace's first use of the link domain on a UTC day (link_fallback_days), with its
-//    campaign and marketing recipients there that day so far.
+//    campaign and marketing recipients there that day so far;
+//  - agent_feedback: a report an agent filed (support_feedback, src/feedback.ts): its workspace and the operation it
+//    names, never its text (the report is in the support inbox).
 // No message content: a campaign is its name and size, a domain its name. A sign-up's address is there for the page
 // to blur with the dashboard's privacy toggle. Cached GLASS_TTL_SECONDS per installation; `after` only filters that.
-const ACTIVITY_KINDS = ['signup', 'first_send', 'domain_verified', 'builtin_ready', 'campaign_launched', 'campaign_paused', 'standing', 'breaker', 'alert', 'link_fallback'] as const;
+const ACTIVITY_KINDS = ['signup', 'first_send', 'domain_verified', 'builtin_ready', 'campaign_launched', 'campaign_paused', 'standing', 'breaker', 'alert', 'link_fallback', 'agent_feedback'] as const;
 const ActivityEvent = z.object({
   id: z.string().describe('Stable across reads: the page adds an event once.'), at: z.string(), kind: z.enum(ACTIVITY_KINDS),
   workspace: z.object({ id: z.string(), name: z.string() }).nullable(),
-  subject: z.string().nullable().describe('What it is about: a domain, a campaign\u2019s name, the built-in parent or an alert\u2019s label.'),
-  detail: z.string().nullable().describe('A sign-up\u2019s method (google, github, email, password), a campaign\u2019s recipients, a pause reason\u2019s code, a step change (from>to), an alert\u2019s words or the recipients linked on the link domain that day.'),
+  subject: z.string().nullable().describe('What it is about: a domain, a campaign\u2019s name, the built-in parent, an alert\u2019s label or the operation agent feedback names.'),
+  detail: z.string().nullable().describe('A sign-up\u2019s method (google, github, email, password), a campaign\u2019s recipients, a pause reason\u2019s code, a step change (from>to), an alert\u2019s words, the recipients linked on the link domain that day.'),
   place: z.enum(['open', 'waitlist']).nullable().describe('A sign-up\u2019s place.'),
   email: z.string().nullable().describe('A sign-up\u2019s address.'),
   tone: z.enum(['neutral', 'success', 'warning', 'danger']),
@@ -335,11 +338,13 @@ export async function readActivity(runtime: Pick<Runtime, 'db'>): Promise<GlassA
       FROM builtin_parent p WHERE p.tripped_at IS NOT NULL)
     UNION ALL (SELECT 'link_fallback:'||f.workspace_id||':'||f.host||':'||f.day,${at(sql`f.first_at`)},'link_fallback',w.id,w.name,f.host,f.recipients::text,NULL,NULL,NULL,NULL,f.first_at
       FROM link_fallback_days f JOIN workspaces w ON w.id=f.workspace_id ORDER BY f.first_at DESC LIMIT ${n})
+    UNION ALL (SELECT 'agent_feedback:'||f.conversation_id,${at(sql`f.created_at`)},'agent_feedback',w.id,w.name,f.operation,NULL,NULL,NULL,NULL,NULL,f.created_at
+      FROM support_feedback f JOIN workspaces w ON w.id=f.workspace_id ORDER BY f.created_at DESC LIMIT ${n})
     UNION ALL (SELECT 'alert:'||a.key||':'||extract(epoch FROM a.since)::bigint,${at(sql`a.since`)},'alert',NULL,NULL,NULL,a.words,NULL,NULL,a.severity,a.kind,a.since
       FROM health_alerts a ORDER BY a.since DESC LIMIT ${n})
   ) x ORDER BY t DESC,id DESC LIMIT ${n}`);
   const tone = (row: ActivityRow): z.infer<typeof ActivityEvent>['tone'] => row.kind === 'alert' ? (row.severity === 'critical' ? 'danger' : 'warning')
-    : row.kind === 'standing' ? (row.severity as 'success' | 'warning' | 'danger') : row.kind === 'breaker' ? 'danger' : row.kind === 'campaign_paused' ? 'warning'
+    : row.kind === 'standing' ? (row.severity as 'success' | 'warning' | 'danger') : row.kind === 'breaker' ? 'danger' : row.kind === 'agent_feedback' ? 'warning' : row.kind === 'campaign_paused' ? 'warning'
     : row.kind === 'signup' || row.kind === 'link_fallback' ? 'neutral' : 'success';
   const events = rows.flatMap(row => {
     const label = row.kind === 'alert' ? alertLabel(row.alert_kind ?? '') : null;
@@ -363,7 +368,7 @@ export function registerGlass(app: App) {
     return c.json(value, 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/glass/activity', operationId: 'operatorGetGlassActivity',
-    description: `What just happened across the installation, for operators: sign-ups, first sends, verified and built-in domains, campaigns launched and paused, standing changes, the built-in breaker and health alerts. The newest ${GLASS_ACTIVITY}, cached ${GLASS_TTL_SECONDS} seconds.`,
+    description: `What just happened across the installation, for operators: sign-ups, first sends, verified and built-in domains, campaigns launched and paused, standing changes, the built-in breaker, health alerts and agent feedback. The newest ${GLASS_ACTIVITY}, cached ${GLASS_TTL_SECONDS} seconds.`,
     request: { query: z.object({ after: z.string().datetime().optional().describe('Only events at or after this time: the newest `at` the page has.') }) },
     responses: { 200: response(Activity), ...errors } }), async c => {
     await operatorActor(c, 'operator:read');

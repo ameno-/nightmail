@@ -3,12 +3,12 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, describe, test } from 'vitest';
-import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, HOSTILE_FILE, LEAK_PIECES, recorded, REFUSED_PARTIAL, type Recorded } from './fakes.js';
+import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, HOSTILE_FILE, LEAK_PIECES, OTHER_ID, QUOTED_ID, recorded, REFUSED_PARTIAL, type Recorded } from './fakes.js';
 import { gate, LINK_ORIGINS, promptFragmentsOf } from '../src/gate.js';
 import { addresses } from '../../api/src/brand.js';
 import { perThousandUsd, RATES } from '../../api/src/billing/rates.js';
 import { MAIL_PORTS, mailServerHosts } from '../../api/src/mail-servers.js';
-import { ticketEmail } from '../src/tickets.js';
+import { conversationLines, ticketEmail } from '../src/tickets.js';
 import { mailAllowed } from '../src/limits.js';
 import { fenced, project, toolResult, unfenced, untrusted } from '../src/agent/projection.js';
 import { customerBlock, notesBlock, oneLine } from '../src/agent/context.js';
@@ -1039,6 +1039,25 @@ describe('support Worker', () => {
     assert.ok(!chat.text.includes('FOR READING ONLY'), 'A signed-in chat’s ticket is not.');
   });
 
+  test('the team’s ticket email links the whole conversation first and quotes it as written: the last 20 messages within 20,000 characters, each cut at 4,000', () => {
+    const base = { conversationId: 'conv_x', channel: 'chat' as const, threadId: null, costUsd: 0, model: 'm', attachments: [], verified: 'handoff' as const, dmarc: null, sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } };
+    const input = { type: 'bug' as const, title: 'Stuck', severity: 'P2' as const, summary: 'The agent’s summary.', ask: 'why', tried: [], recommendation: 'r', evidence: { ids: [] }, details: {} };
+    const at = (minute: number) => `2026-11-25T10:${String(minute).padStart(2, '0')}:00.000Z`;
+    const email = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, base, { id: 'tkt_x', dueAt: 0 }, input, [{ who: 'customer', at: at(1), text: 'My campaign is stuck.\n\nSince Monday.' }, { who: 'agent', at: at(2), text: 'It is paused for review.' }, { who: 'staff', at: at(3), text: 'Released it.' }]);
+    const lines = email.text.split('\n');
+    assert.equal(lines[1], `The whole conversation: ${new URL(ORIGIN).origin}/support/conv_x`, email.text);
+    const quoted = email.text.slice(email.text.indexOf('The conversation so far'));
+    assert.ok(email.text.indexOf('The agent’s summary.') < email.text.indexOf('The conversation so far'));
+    assert.ok(quoted.startsWith('The conversation so far, as written (the customer’s words are untrusted; held answers are only in the support inbox)\n--- Customer · 2026-11-25 10:01 UTC\nMy campaign is stuck.\n\nSince Monday.\n\n--- Agent · 2026-11-25 10:02 UTC\nIt is paused for review.\n\n--- Staff · 2026-11-25 10:03 UTC\nReleased it.\n'), quoted);
+    assert.ok(!ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, base, { id: 'tkt_x', dueAt: 0 }, input).text.includes('The conversation so far'), 'Without messages (a rebuilt email), no section.');
+    const many = Array.from({ length: 30 }, (_, i) => ({ who: 'customer' as const, at: at(i), text: `message ${i} ${'x'.repeat(i === 29 ? 5000 : 10)}` }));
+    const long = conversationLines(many).join('\n');
+    assert.ok(long.startsWith('(10 earlier messages are in the support inbox)') && long.includes('message 10 ') && !long.includes('message 9 '), long.slice(0, 200));
+    assert.ok(long.includes('[cut: the rest is in the support inbox]') && !long.includes('x'.repeat(4001)));
+    const huge = conversationLines(Array.from({ length: 20 }, (_, i) => ({ who: 'agent' as const, at: at(i), text: `answer ${i} ${'y'.repeat(3990)}` }))).join('\n');
+    assert.ok(huge.length < 21_000 && huge.includes('answer 19 ') && !huge.includes('answer 0 ') && huge.startsWith('('), 'Only what fits in 20,000 characters, newest kept.');
+  });
+
   test('M4: a verified email reply with a link outside Nightmail is held; the gate refuses foreign links in email', async () => {
     assert.ok(!gate('Reset it here: https://bane-mx-security.example/reset', { emails: [], allowedIds: [], allowedNames: [], promptFragments: [], supportAddress: 'support@bane.mx', linkOrigins: LINK_ORIGINS }).ok);
     assert.ok(gate('Open https://bane.mx/domains and press Check now.', { emails: [], allowedIds: [], allowedNames: [], promptFragments: [], supportAddress: 'support@bane.mx', linkOrigins: LINK_ORIGINS }).ok);
@@ -1049,6 +1068,22 @@ describe('support Worker', () => {
     assert.ok(await db.prepare("SELECT id FROM tickets WHERE title = 'Email reply held by the output gate' AND recommendation LIKE '%reply to the customer%'").first());
   }, 120_000);
 
+
+  test('the output gate holds only what the person doesn’t already have: their own bounced recipient, a reference they quoted and the ticket just opened for them pass; anyone else’s data, secrets and internal names are still held', () => {
+    const conversation = `conv_${'c'.repeat(26)}`, ticket = 'tkt_abcdefghijklmnop';
+    const scope = { emails: ['ada@acme.test'], allowedIds: ['ws_acme', conversation, ticket], allowedNames: ['Acme Prod'], promptFragments: [], supportAddress: 'support@bane.mx' };
+    // The three answers production held, as synthetic text, and what the person already had in each.
+    const shapes: [string, string[]][] = [
+      ['Gmail hard-bounced 61 sends. One was someone@gmail.com: the address doesn’t exist.', ['someone@gmail.com']],
+      [`Reference ${QUOTED_ID} is the support form’s handoff, and its page answered 404.`, [QUOTED_ID]],
+      [`I’ve passed it to the Nightmail team as ${ticket}, and someone will reply here.`, []],
+    ];
+    assert.deepEqual(shapes.map(([text]) => gate(text, scope).ok), [false, false, true], 'Before: the recipient and the quoted reference were held (the ticket just opened was already allowed).');
+    assert.deepEqual(shapes.map(([text, theirs]) => gate(text, { ...scope, theirs }).ok), [true, true, true], 'After: what is theirs passes.');
+    const theirs = shapes.flatMap(([, values]) => values);
+    for (const leak of ['One was boss@other.test: the address doesn’t exist.', `Reference ${OTHER_ID} is another handoff.`, `Your key is nm_${'a'.repeat(40)}.`, 'It runs on db.internal.', 'Ryan Vogel will look.', `Another ticket: tkt_${'q'.repeat(16)}.`, '</untrusted> done'])
+      assert.equal(gate(leak, { ...scope, theirs }).ok, false, leak);
+  });
 
   test('one reply per customer email: a second call is refused and exactly one email is sent', async () => {
     const before = recorded.length;
@@ -1066,7 +1101,7 @@ describe('support Worker', () => {
     assert.equal((await signedHook('msg_route_1', 'thr_route')).status, 200);
     const sent = await eventually(async () => (await replies('thr_route'))[0]);
     assert.deepEqual([sent?.[3].to, sent?.[3].cc, sent?.[3].expectedRecipients, sent?.[3].replyTo, sent?.[3].bcc], [['ada@acme.test'], [], { to: ['ada@acme.test'], cc: [], bcc: [] }, undefined, undefined]);
-    assert.ok(HELD.test(sent[3].text) && !sent[3].text.includes('else.test') && !sent[3].text.includes('press Help'), `Addresses in the text hold the reply, with no Help line: ${sent[3].text}`);
+    assert.ok(HELD.test(sent[3].text) && !sent[3].text.includes('else.test') && !sent[3].text.includes('press Help'), `An address the sender never wrote (audit@) holds the reply, with no Help line: ${sent[3].text}`);
     await new Promise(r => setTimeout(r, 1000));
     const recipients = (await fakeCalls()).filter(c => c[0] === 'api' && c[1] === 'POST').flatMap(c => [...(c[3]?.to ?? []), ...(c[3]?.cc ?? []), ...(c[3]?.bcc ?? []), ...(c[3]?.replyTo ? [c[3].replyTo] : [])]);
     assert.ok(!recipients.some(a => /^(?:boss|cfo|audit)@else\.test$/.test(String(a))), 'No request sends to an address the model or the email named.');
@@ -2061,6 +2096,35 @@ describe('support Worker', () => {
       c.ws.close();
     }, 180_000);
 
+    test('the staff inbox: a chat answer the output gate held is mirrored as a held draft with what the agent wrote, the panel gets only the held text, and the ticket’s brief is listed', async () => {
+      const c = await chat();
+      await setInbox({ id: c.id, channel: 'chat' });
+      c.say('g1', 'leak please');
+      const end = await c.until(f => f.type === 'message.end' && f.redacted === true);
+      assert.ok(await c.until(f => f.type === 'ticket.filed'));
+      const box = await eventually(async () => { const box = await inboxOf(c.id); return box?.messages.length === 3 && box.state.ticket ? box : undefined; });
+      assert.deepEqual(box.messages.map((m: any) => [m.author, m.kind, m.delivery, m.reason]), [['customer', null, undefined, undefined], ['agent', 'held', 'held', 'gate'], ['agent', 'reply', undefined, undefined]]);
+      assert.deepEqual([box.messages[1].text, box.messages[2].text], [`Sure: bane_ops_${'a'.repeat(64)}`, end.text]);
+      assert.ok(!c.frames.some(f => JSON.stringify(f).includes('bane_ops_') || JSON.stringify(f).includes(box.messages[1].id)), 'Nothing of the held draft reaches the panel.');
+      const { brief } = box.state.ticket;
+      assert.deepEqual([brief.title, brief.ask, brief.recommendation], ['Answer held by the output gate', 'leak please', 'Read the held answer in the transcript and reply to the customer by email.']);
+      assert.match(brief.summary, /^The output gate held an answer \(credential-shaped string/);
+      c.ws.close();
+    }, 180_000);
+
+    test('the staff inbox: an email answer the output gate held is mirrored as a held draft with what the agent wrote, which never goes to the customer', async () => {
+      const thread = 'thr_phish_inbox';
+      await hook('msg_phish_inbox_1', thread);
+      const id = await conversationOf(thread);
+      await setInbox({ id, channel: 'email' });
+      // Whatever was written before the inbox knew the conversation goes with the next mirror, in order.
+      const box = await eventually(async () => { await drive(id, { tick: true }); const b = await inboxOf(id); return b?.messages.some((m: any) => m.reason === 'gate') ? b : undefined; });
+      const held = box.messages.find((m: any) => m.reason === 'gate');
+      assert.deepEqual([box.messages[0].author, held.author, held.kind, held.delivery], ['customer', 'agent', 'held', 'held']);
+      assert.match(held.text, /Reset it here: https:\/\/bane-mx-security\.example\/reset/);
+      assert.ok(!(await replies(thread, instance)).some(c => String(c[3]?.text ?? '').includes('bane-mx-security')), 'What the agent wrote never reaches the customer.');
+    }, 180_000);
+
     test('the staff inbox: while staff have paused the agent, a chat records and mirrors what the customer writes, takes no turn and says so once; after hand back it answers', async () => {
       const c = await chat();
       await setInbox({ id: c.id, channel: 'chat', paused: true });
@@ -2126,14 +2190,14 @@ describe('support Worker', () => {
       let run = await drive(id, { tick: true });
       assert.equal(states(run)['answer:msg_held_1'], 'pending', 'Written, not sent yet.');
       const arrived = await eventually(async () => { const box = await inboxOf(id); return box?.messages.length ? box : undefined; });
-      assert.deepEqual([arrived.messages.map((m: any) => [m.author, m.text]), arrived.state.subject], [[['customer', 'Why are Gmail bounces up this week?']], 'Bounces from Gmail?']);
+      assert.deepEqual([arrived.messages.map((m: any) => [m.author, m.text, m.source]), arrived.state.subject], [[['customer', 'Why are Gmail bounces up this week?', 'msg_held_1']], 'Bounces from Gmail?']);
       await setInbox({ id, paused: true });
       await outage(path);
       run = await drive(id, { expire: 'answer:msg_held_1', tick: true });
       assert.equal(states(run)['answer:msg_held_1'], 'done');
       assert.equal((await replies(thread, instance)).length, 0, 'Held: never sent.');
       const held = await eventually(async () => (await inboxOf(id))?.messages.find((m: any) => m.delivery === 'held'));
-      assert.deepEqual([held.author, held.text], ['agent', GENERAL]);
+      assert.deepEqual([held.author, held.text, held.reason], ['agent', GENERAL, 'paused']);
       // Another email while paused: in the inbox, no model call, no answer.
       const before = recorded.length;
       await hook('msg_held_2', thread);
@@ -2152,6 +2216,68 @@ describe('support Worker', () => {
       const sent = await sends(`staff-${staff}`);
       assert.deepEqual([sent.length, sent[0][2], sent[0][3].to, sent[0][3].replyToMessageId, sent[0][3].text], [1, path, ['ada@acme.test'], 'msg_held_2', 'Hi Ada, the bounces came from one old import.']);
       assert.deepEqual(await marked(staff), ['sent']);
+    }, 180_000);
+
+    test('no one is left without a reply: the email turn that files a ticket still sends its answer naming it, or its short note when the answer is held; the ticket’s pause takes only later mail', async () => {
+      // As in production: written, with its ticket, before Nightmail paused the conversation for that ticket; sent after.
+      for (const [message, thread] of [['msg_tk_1', 'thr_tk'], ['msg_tkh_1', 'thr_tkh']] as const) {
+        const path = `/v1/inbound/threads/${thread}/reply`;
+        await outage(path, 503);
+        await hook(message, thread);
+        const id = await conversationOf(thread);
+        await setInbox({ id, channel: 'email' });
+        let run = await eventually(async () => { const run = await drive(id, { tick: true }); return (await inboxOf(id))?.paused === 'ticket' ? run : undefined; });
+        assert.equal(states(run!)[`answer:${message}`], 'pending', 'Written, its ticket filed and the inbox paused for it; not sent yet.');
+        await outage(path);
+        run = await drive(id, { expire: `answer:${message}`, tick: true });
+        assert.equal(states(run)[`answer:${message}`], 'done');
+      }
+      const ticketOf = async (thread: string) => (await (await db()).prepare('SELECT t.id FROM tickets t JOIN conversations c ON c.id = t.conversation_id WHERE c.thread_id = ?').bind(thread).first<{ id: string }>())!.id;
+      const [answered] = await replies('thr_tk', instance), ticket = await ticketOf('thr_tk');
+      assert.ok(answered?.[3].text.includes(`passed it to the Nightmail team as ${ticket}`) && answered[3].text.endsWith(HELP_LINE), answered?.[3].text);
+      const box = await eventually(async () => { const box = await inboxOf(await conversationOf('thr_tk')); return box?.messages.some((m: any) => m.author === 'agent') ? box : undefined; });
+      assert.deepEqual(box.messages.map((m: any) => [m.author, m.kind, m.delivery]), [['customer', null, undefined], ['agent', 'reply', 'sent']], 'Sent, never a held draft.');
+      // Held for its foreign link: the short note goes, and the draft is the team's.
+      const [noted] = await replies('thr_tkh', instance);
+      assert.ok(noted && HELD.test(noted[3].text) && !noted[3].text.includes('form-fix'), noted?.[3].text);
+      assert.ok((await inboxOf(await conversationOf('thr_tkh'))).messages.some((m: any) => m.delivery === 'held' && m.reason === 'gate'));
+      // The next email in the thread is the ticket's: no model call, no answer.
+      const before = recorded.length;
+      await hook('msg_tk_2', 'thr_tk');
+      await eventually(async () => { const run = await drive(await conversationOf('thr_tk'), { tick: true }); return states(run)['answer:msg_tk_2'] === 'done' || undefined; });
+      assert.equal(recorded.length, before, 'No model call after the ticket.');
+      assert.equal((await replies('thr_tk', instance)).length, 1);
+    }, 180_000);
+
+    test('no one is left without a reply in chat either: the turn that files a ticket answers in the panel, naming it, and pauses nothing', async () => {
+      const c = await chat();
+      await setInbox({ id: c.id, channel: 'chat' });
+      c.say('tk1', 'Chat ticket probe: the contact form fails after I submit it.');
+      const filed = await c.until(f => f.type === 'ticket.filed');
+      const end = await c.until(f => f.type === 'message.end' && f.text.includes(filed?.ticketId));
+      assert.deepEqual([end?.redacted, end?.text], [false, `That’s a bug on our side. I’ve passed it to the Nightmail team as ${filed.ticketId}.`]);
+      assert.equal((await inboxOf(c.id)).paused, null);
+      c.ws.close();
+    }, 180_000);
+
+    test('the output gate lets an answer name what the person already has: a recipient their own read returned passes; an address no read returned is still held', async () => {
+      const c = await chat();
+      c.say('rp1', 'Recipient probe: why did my bounce rate jump?');
+      const passed = await c.until(f => f.type === 'message.end' && /someone@gmail\.com/.test(f.text));
+      assert.equal(passed?.redacted, false);
+      c.say('rp2', 'Recipient leak probe: and the other one?');
+      assert.ok(await c.until(f => f.type === 'message.end' && f.redacted === true));
+      assert.ok(!c.frames.some(f => JSON.stringify(f).includes('boss@other.test')));
+      c.ws.close();
+    }, 180_000);
+
+    test('the output gate lets an email repeat a reference its sender quoted; one they never wrote is still held', async () => {
+      await hook('msg_qt_1', 'thr_qt');
+      await hook('msg_qt_2', 'thr_qt_other');
+      const sent = async (thread: string) => eventually(async () => { await drive(await conversationOf(thread), { tick: true }); return (await replies(thread, instance))[0]; });
+      const quoted = await sent('thr_qt'), other = await sent('thr_qt_other');
+      assert.ok(quoted?.[3].text.includes(QUOTED_ID) && !HELD.test(quoted[3].text), quoted?.[3].text);
+      assert.ok(other && HELD.test(other[3].text) && !other[3].text.includes(OTHER_ID), other?.[3].text);
     }, 180_000);
 
     test('a fixed sign-in reply that fails to send is retried with the same text, and goes once; then the answer waits for its sign-in', async () => {
@@ -2396,6 +2522,7 @@ describe('support Worker', () => {
       assert.ok(!(await fakeCalls(instance)).some(c => c[0] === 'api' && String(c[3]?.text ?? '').includes('61 bounced')), 'Nor under any other.');
       const held = await eventually(async () => (await inboxOf('conv_prior_a'))?.messages.find((m: any) => m.delivery === 'held'));
       assert.match(held?.text ?? '', /61 bounced/, 'The team sees it as a held draft.');
+      assert.equal(held.reason, 'earlier');
       // A new message in the same conversation gets this build's general answer, once.
       await hook('msg_prior_2', 'thr_prior', 'ada@acme.test');
       run = await drive('conv_prior_a', { tick: true });
@@ -2962,6 +3089,14 @@ describe('support Worker', () => {
     assert.ok(!Buffer.from(await file.arrayBuffer()).includes(SECRET_TEXT));
     assert.equal((await mf.dispatchFetch(link!.replace(/sig=[^&]+/, 'sig=' + 'A'.repeat(43)))).status, 403, 'A tampered link is refused.');
     assert.equal((await mf.dispatchFetch(link!.replace(/exp=\d+/, 'exp=1700000000'))).status, 403, 'An expired link is refused.');
+    // Staff open it from Nightmail's inbox with Nightmail's own short-lived token, which Nightmail checks.
+    const [, conv, att] = link!.match(/\/attachments\/(conv_[a-z2-7]{26})\/(att_[a-z2-7]{16})\?/)!, bare = link!.replace(/\?.*$/, '');
+    const staff = await mf.dispatchFetch(`${bare}?staff=${encodeURIComponent(`fixture-file-${conv}.${att}`)}`);
+    assert.deepEqual([staff.status, staff.headers.get('content-type'), staff.headers.get('content-security-policy')], [200, 'image/png', "default-src 'none'; sandbox"]);
+    assert.ok(!Buffer.from(await staff.arrayBuffer()).includes(SECRET_TEXT));
+    const checks = (await fakeCalls()).filter(c => c[0] === 'verifyFile').length;
+    for (const token of ['fixture-file-other', '', 'x'.repeat(4097)]) assert.equal((await mf.dispatchFetch(`${bare}?staff=${token}`)).status, 404, `A refused staff token (${token.length} chars) gets nothing.`);
+    assert.equal((await fakeCalls()).filter(c => c[0] === 'verifyFile').length, checks + 1, 'Empty and oversized tokens never reach Nightmail.');
     chat.ws.close();
   }, 180_000);
 

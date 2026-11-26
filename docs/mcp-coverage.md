@@ -299,3 +299,4 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `updateBillingAutoRecharge` | Human step: auto-recharge spends from the saved card, so only a signed-in owner or admin sets it in the dashboard. |
 | `createBillingCardSetup` | Human step: a person saves a card in Stripe Checkout from the dashboard; card details never reach Nightmail or an agent. |
 | `deleteBillingPaymentMethod` | Human step: a signed-in owner or admin removes the saved card in the dashboard. |
+| `sendFeedback` | `sendFeedback` · `send` · admin |

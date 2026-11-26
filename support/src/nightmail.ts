@@ -21,8 +21,14 @@ export type Handoff = {
 export type HandoffCheck = { ok: true; handoff: Handoff } | { ok: false; code: 'HANDOFF_INVALID' | 'HANDOFF_EXPIRED' | 'HANDOFF_NOT_FOUND' | 'SUPPORT_NOT_CONFIGURED' };
 /** A transcript entry mirrored into the staff inbox. Staff replies come from the inbox, never from here. */
 export type MirroredMessage = { id: string; author: 'customer' | 'agent' | 'system'; kind?: string | null; text: string; tools?: { label: string; ok: boolean }[]; attachments?: string[];
+  /** The screenshots' metadata (`attachments` keeps their IDs). */
+  files?: { id: string; name: string; type: string; size: number }[];
+  /** A customer email's: the Nightmail inbound message it came from. */
+  source?: string;
+  /** A held answer's: staff paused the agent, the output gate held it, access shrank, the conversation ended, or an earlier build wrote it. */
+  reason?: 'paused' | 'gate' | 'access' | 'closed' | 'earlier';
   delivery?: 'sent' | 'failed' | 'held'; at?: string };
-export type MirroredState = { subject?: string; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3' }; turns?: number; costUsd?: number; blockedWork?: number; pauseForTicket?: true };
+export type MirroredState = { subject?: string; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3'; brief?: { title: string; summary: string; ask: string; recommendation: string } }; turns?: number; costUsd?: number; blockedWork?: number; pauseForTicket?: true };
 /** Whether staff paused the agent: checked before every turn and every send. */
 export type InboxState = { id: string; status: 'open' | 'ticketed' | 'closed'; agentState: 'active' | 'paused'; pausedBy: 'staff' | 'ticket' | null; pausedAt: string | null; queuedReplies: number };
 /** A staff reply waiting for this Worker to deliver it. */
@@ -61,6 +67,8 @@ export type SupportAction = {
 /** The methods of Nightmail's SupportPlatform entrypoint, as this Worker calls them over RPC. */
 export interface SupportPlatform {
   verifyWake(token: string, conversationId: string): Promise<boolean>;
+  /** A staff download of one screenshot: Nightmail's short-lived token for this conversation and attachment. */
+  verifyFile(token: string, conversationId: string, attachmentId: string): Promise<boolean>;
   verifyHandoff(token: string): Promise<HandoffCheck>;
   /** Nightmail checks the evidence itself and decides who the conversation is for (201 new, 200 repeated). */
   registerConversation(body: { conversationId: string; evidence: ConversationEvidence }): Promise<PlatformReply<RegisteredConversation>>;

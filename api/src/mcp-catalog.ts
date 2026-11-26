@@ -73,9 +73,11 @@ const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'receiveCloudFormationSn
 const READ_ONLY_POSTS = new Set(['testRouting', 'testRules', 'checkRule', 'queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
 // REST permission below, never by the HTTP method; confirm=true marks only state changes.
-const NO_CONFIRM = new Set(['planAudienceMutation']);
+const NO_CONFIRM = new Set(['planAudienceMutation', 'sendFeedback']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
+/** The server instructions' paragraph on sendFeedback (mcp.ts), for every connection that lists it. */
+export const FEEDBACK_INSTRUCTIONS = `If something in ${productName} gets in your way while you do a task, tell us with sendFeedback: what happened and what would have made it easier. Include the request ID if you have one. One report per distinct problem, then carry on.`;
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // Listings must not offer what REST refuses. These mirror the handlers' permission checks where
@@ -83,7 +85,9 @@ const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // for email, attachment and campaign work, read-only delegation (a read grant may mint a read
 // agent token; it still needs confirm=true), and manageKeys() reads.
 const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'cancelEmail', 'rescheduleEmail', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'unscheduleCampaign', 'rescheduleCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
-const READ_LEVEL_WRITES = new Set(['createAgentToken']);
+const READ_LEVEL_WRITES = new Set(['createAgentToken', 'sendFeedback']);
+/** Listed for every connection that may call them, whatever toolsets it asked for: an agent reports friction wherever it is. */
+export const ALWAYS_LISTED = new Set(['sendFeedback']);
 const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listApiKeyChanges', 'listAgentTokens', 'listAppPasswords', 'listBillingLedger', 'listBillingPayments', 'getBillingPayment', 'listActivity']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
 const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
@@ -223,7 +227,7 @@ const TAG_TOOLSET: Record<string, Toolset> = {
   'Agent inboxes': 'inboxes', 'Inbound addresses': 'inboxes', 'Inbound threads': 'inboxes', 'Inbound events': 'inboxes',
   Routing: 'routing', Rules: 'rules', Endpoints: 'endpoints', 'Inbound webhooks': 'endpoints',
   Emails: 'sending', Campaigns: 'sending', Newsletters: 'sending', Templates: 'sending', Audience: 'sending', Consent: 'sending', Attachments: 'admin', Metrics: 'sending',
-  Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Workspaces: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin',
+  Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Feedback: 'admin', Workspaces: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin',
 };
 // listEmailEvents and the webhook delivery log: a bounce's or a delay's diagnosticCode is the receiving server's text.
 const UNTRUSTED_READS = new Set(['listEmailEvents', 'listWebhookDeliveries', 'getWebhookDelivery', 'listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'previewEmail', 'listLogs', 'testRouting', 'testRules', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
@@ -234,6 +238,7 @@ const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
 };
 /** Better descriptions for directly published receiving tools, where the operation summary alone is thin. */
 const DESCRIPTIONS: Record<string, string> = {
+  sendFeedback: `Tell ${productName} what got in your way while doing a task: what happened and what would have made it easier, with the request ID if you have one. Only message is needed. It is filed for the ${productName} team with this connection's workspace; nobody replies. One report per distinct problem, then carry on.`,
   updateWorkspaceSettings: 'Rename the workspace, set its focus (marketing, newsletter, developer, agents; the first leads) or its postal address (plain text, up to 6 lines and 300 characters, no HTML; null removes it). Campaigns and marketing sends show the address under Unsubscribe (CAN-SPAM); sendCampaign and scheduleCampaign refuse with POSTAL_ADDRESS_REQUIRED until it is set. Confirm the address with the user.',
   createNewsletter: 'Make a newsletter: a contact list with a sender. Pass name to create a new list, or listId to make an existing list one. Its issues are ordinary campaigns to that list: createCampaign with audience.listId set to the newsletter ID, then test and send it as any campaign. There are no issue operations.',
   getNewsletter: 'Read a newsletter (a contact list with a sender) and its readers: subscribed, unsuppressed members, with how many joined each day for 182 days. Its issues are the campaigns to its list: listCampaigns with listId.',

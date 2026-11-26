@@ -37,6 +37,8 @@ function keyLines(origin: string, token: string | null | undefined) {
 
 // domain is undefined when the reader is signed out and the workspace's domains are unknown. setupToken: the token a
 // copy carries, null for its placeholder (the prompt as shown before copying), undefined for a prompt without one.
+// One line in each agent prompt: an agent that hit friction tells us (api/src/feedback.ts), then carries on.
+const feedbackLine = `- If something in ${productName} gets in your way, report it with sendFeedback (POST /v1/feedback): say what would have made it easier, then carry on.`
 export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: { origin: string; domain: Domain | null | undefined; email: string | null; multiTenant: boolean; setupToken?: string | null }) {
   const lines = [
     `Set up ${productName} email in this project.`,
@@ -48,6 +50,7 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     `- Auth: bearer API key from the ${apiKeyEnv} environment variable. Never hardcode it or ship it to a browser.`,
     // The attachment rules up front, so the agent doesn't find them one refused upload or send at a time.
     `- Attachments: ${ATTACHMENT_LIMITS_TEXT} ${ATTACHMENT_RULES_TEXT} A refusal names every attachment problem at once, in error.details.`,
+    feedbackLine,
   ]
   if (domain === undefined) {
     lines.push(`- Sending domain: use a verified domain from Domains in the ${productName} dashboard. Ask me which one before sending.`)
@@ -62,7 +65,8 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
   const membersOnly = domain.builtIn && domain.limits?.scope === 'members'
   const to = email ?? (membersOnly ? `the email address I sign in to ${productName} with (ask me which)` : 'an address I control (ask me which)')
   lines.push(
-    `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}).`,
+    // A new workspace's built-in domain sends from its first moment: a send while it finishes setting up waits for it.
+    `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}${domain.builtIn ? 'built-in: it needs no DNS and sends now; a send in its first seconds waits while it finishes setting up' : `status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}`}).`,
     `- Send a first email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. Give it a short, real subject and plain text: "test" or placeholder words in either send it to spam. 202 means queued, not delivered.`,
   )
   // The built-in domain's limits up front, so the agent doesn't find them one refused send at a time.
@@ -74,67 +78,6 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     : `- Receiving: enable it with POST /v1/inbound/domains/${domain.id}/enable, then point the MX record for ${mx.name} to ${mx.host} (priority ${mx.priority}).`)
   lines.push('- Inbound mail arrives as message.received webhooks (subscribe with POST /v1/inbound/webhooks); fetch full messages with GET /v1/inbound/messages/{messageId}.')
   return lines.join('\n')
-}
-
-// The agent inboxes focus (onboarding, Overview): the agent gets its own key, then reads the inbox over MCP or REST.
-// inboxId is unknown only while the inbox is still being made.
-export function agentInboxPrompt({ origin, address, inboxId, setupToken }: { origin: string; address: string; inboxId?: string | null; setupToken?: string | null }) {
-  const messages = `${origin}/v1/inboxes/${inboxId ?? '{id}'}/messages`
-  return [
-    `Give this project's agent the ${productName} inbox ${address}: it receives every email sent to that address.`,
-    '',
-    `- API base URL: ${origin}`,
-    ...keyLines(origin, setupToken),
-    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index).`,
-    `- Connect over MCP if your client can: add the server ${mcpServerUrl(origin)} with the header Authorization: Bearer <the key>. Its tools list, wait for and read this inbox's mail.`,
-    `- To be told when mail arrives instead of waiting for it, if your MCP client supports MCP Events (OpenCode does): subscribe to the server's message.received event with {"addressIds":["${inboxId ?? '{id}'}"]}, then read each message it names.`,
-    `- Or use the REST API with the key as a bearer token: wait for mail with GET ${messages}?wait=30 (it answers as soon as one arrives) and read one with GET ${messages}/{messageId}.${inboxId ? '' : ` Find the inbox's id with GET ${origin}/v1/inboxes?q=${address}.`}`,
-    `- Test it: ask me to send an email to ${address}, wait for it, then tell me who sent it and its subject.`,
-  ].join('\n')
-}
-
-// The newsletter focus: a form on the project's site that adds readers to the newsletter, with consent, from the server.
-export function signupFormPrompt({ origin, newsletter, setupToken }: { origin: string; newsletter: { id: string; name: string }; setupToken?: string | null }) {
-  return [
-    `Add a signup form for my ${productName} newsletter "${newsletter.name}" to this project's website.`,
-    '',
-    `- API base URL: ${origin}`,
-    ...keyLines(origin, setupToken),
-    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Audience and Consent).`,
-    `- The form asks for an email address (and, optionally, a name) and posts to a server route of this project, never straight to ${productName}: the key stays on the server.`,
-    `- That route adds the reader: create the contact with POST ${origin}/v1/contacts {"email": …, "name": …} (reuse it if the address is already a contact), record their consent with POST ${origin}/v1/contacts/{id}/consent {"status":"subscribed","source":"signup form"}, then add them with POST ${origin}/v1/lists/${newsletter.id}/members {"contactIds":["{id}"]}.`,
-    `- Keep bots out (a hidden honeypot field and a rate limit per IP address), and say "You're subscribed" once it worked.`,
-  ].join('\n')
-}
-
-// The marketing focus: the agent imports contacts and drafts campaigns, over MCP or REST; it never sends one on its own.
-export function marketingPrompt({ origin, setupToken }: { origin: string; setupToken?: string | null }) {
-  return [
-    `Help me send marketing email with ${productName}.`,
-    '',
-    `- API base URL: ${origin}`,
-    ...keyLines(origin, setupToken),
-    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Audience and Campaigns).`,
-    `- Connect over MCP if your client can: add the server ${mcpServerUrl(origin)} with the header Authorization: Bearer <the key>. Or call the REST API with the key as a bearer token.`,
-    '- Import my contacts from the CSV I point you to: previewContactImport, show me its summary, then commitContactImport. Mark them subscribed only if I confirm they agreed to hear from me.',
-    '- Draft a first campaign with createCampaign (read getCampaignContentGuide before writing its HTML). Leave it as a draft: never send or schedule a campaign without my go-ahead.',
-  ].join('\n')
-}
-
-// The personal inbox focus: their own address on their own domain. mailServers: the installation's IMAP/SMTP hosts, when
-// it has a mail gateway (a mail app's password is made in the dashboard: an agent's key can't make one).
-export function personalInboxPrompt({ origin, setupToken, mailServers }: { origin: string; setupToken?: string | null; mailServers: { imap: string; smtp: string } | null }) {
-  return [
-    `Set up my own email address with ${productName}: mail to me@<my domain> lands in a ${productName} inbox.`,
-    '',
-    `- API base URL: ${origin}`,
-    ...keyLines(origin, setupToken),
-    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Domains and Agent inboxes).`,
-    '- Ask me which domain and which address I want before changing anything.',
-    `- Add the domain with createDomain (POST ${origin}/v1/domains) and walk me through its DNS records (getDomain lists them); it verifies by itself once they resolve. Receiving needs its MX record: on the domain itself that moves where the domain's existing mail goes, so confirm that with me first.`,
-    `- Once the domain receives, create a persistent inbox for the address with createInbox (POST ${origin}/v1/inboxes, {"type":"persistent","domain":…,"localPart":…}) and send me a test email from it.`,
-    ...mailServers ? [`- To read it in a mail app, I create an app password for that inbox under API keys in the dashboard (your key can't): the app signs in to ${mailServers.imap} (IMAP) and ${mailServers.smtp} (SMTP) with the inbox's address.`] : [],
-  ].join('\n')
 }
 
 const ADDRESS = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g

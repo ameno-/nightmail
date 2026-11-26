@@ -93,6 +93,8 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   regions: { label: 'SES regions', actions: {
     list: 'listRegions', configure: 'configureRegion', discover: 'discoverRegion', provision: 'provisionRegion', autoValidation: 'configureRegionAutoValidation',
   } },
+  // One action: listed as that action's own arguments, with no action argument (resolveAction in mcp.ts takes the one).
+  sendFeedback: { label: 'Tell Nightmail what got in your way (nobody replies)', actions: { send: 'sendFeedback' } },
   webhooks: { label: 'Outbound webhooks', actions: {
     list: 'listWebhooks', get: 'getWebhook', create: 'createWebhook', update: 'updateWebhook', delete: 'deleteWebhook', rotateSecret: 'rotateWebhookSecret', test: 'testWebhook', deliveries: 'listWebhookDeliveries', delivery: 'getWebhookDelivery', retry: 'retryWebhookDelivery',
   } },
@@ -173,6 +175,12 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
     // The optional retry key and the write confirmation, like pagination, are uniform. List them once per resource instead
     // of on every write; each write's branch still requires confirm.
     const shared=Object.fromEntries(['cursor','limit','idempotencyKey','confirm'].flatMap(k=>{const op=visible.find(x=>x.op.tool.inputSchema.properties?.[k])?.op;return op?[[k,k==='idempotencyKey'?{type:'string'}:k==='confirm'?{const:true}:{}]]:[]}));
+    // A resource with one action (sendFeedback) takes that action's arguments, summarized the same way, and no action.
+    if (Object.keys(actions).length === 1) {
+      const { properties: { action: _action, ...fields }, required } = oneOf[0]! as { properties: Schema; required?: string[] };
+      return [{ name, description, inputSchema: { type: 'object' as const, properties: { ...shared, ...fields }, ...(required ? { required } : {}) },
+      annotations: { readOnlyHint: visible.every(x => x.op.tool.annotations?.readOnlyHint), destructiveHint: visible.some(x => x.op.tool.annotations?.destructiveHint), openWorldHint: true } }];
+    }
     return [{ name, description, inputSchema: { type: 'object' as const, properties: { action: { enum: visible.map(x => x.action) },...shared }, required: ['action'], oneOf },
       annotations: { readOnlyHint: visible.every(x => x.op.tool.annotations?.readOnlyHint), destructiveHint: visible.some(x => x.op.tool.annotations?.destructiveHint), openWorldHint: true } }];
   }).concat([describeTool]);

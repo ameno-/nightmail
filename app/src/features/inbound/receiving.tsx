@@ -1,4 +1,4 @@
-// Receiving: Addresses, Rules and Destinations (the API's routes, rules and endpoints), in the order mail meets them:
+// Mail routing (/receiving): Addresses, Rules and Destinations (the API's routes, rules and endpoints), in the order mail meets them:
 // received, processed, delivered. One read (getInboundOverview) per screen.
 import { useEffect, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -288,13 +288,25 @@ export function ReceivingPage() {
     if (change.actor?.self && change.actor.type === 'member') return
     toast(`${change.versionMoved ? 'Addresses and rules' : 'Destinations'} updated by ${actorText(change.actor)}${change.versionMoved ? ` · version ${change.version}` : ''}`, 'info')
   }, { endpoints: true })
+  // Addresses and inboxes an agent makes or deletes don't move that version: coming back to the page (from the agent's
+  // terminal or another tab) reads the lists again, so nothing deleted meanwhile is still there to open.
+  useEffect(() => {
+    let last = 0
+    const catchUp = () => {
+      if (document.visibilityState !== 'visible' || Date.now() - last < 2000) return
+      last = Date.now()
+      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['inbound-overview', 'inbound-addresses', 'agent-inboxes'].includes(resourceOf(query.queryKey)) })
+    }
+    window.addEventListener('focus', catchUp); document.addEventListener('visibilitychange', catchUp)
+    return () => { window.removeEventListener('focus', catchUp); document.removeEventListener('visibilitychange', catchUp) }
+  }, [client])
   const counts = data && { addresses: kindCount(data.counts, 'all'), rules: data.rules.length, destinations: data.endpoints.length }
   return <div className="stack inbound-stack receiving-page">
     {/* The page's one action. An address's mail is on its own page; every address's mail is in Logs. */}
     {/* Until a domain receives, the first-run steps carry the way in; a dead button here would only say no. */}
-    <PageHeader title="Receiving" actions={manage && (!data || receivingDomains(data.domains).length > 0) && <Button variant="primary" disabled={!data} onClick={() => setCreating({ address: '' })}>New address</Button>} />
+    <PageHeader title="Mail routing" actions={manage && (!data || receivingDomains(data.domains).length > 0) && <Button variant="primary" disabled={!data} onClick={() => setCreating({ address: '' })}>New address</Button>} />
     {overview.error && !data ? <ErrorState error={overview.error} onRetry={() => void overview.refetch()} /> : !data || !counts ? <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion> : <div className="rcv-page">
-      <Tabs label="Receiving" value={tab} onValueChange={value => update({ tab: value, kind: null, address: null })}
+      <Tabs label="Mail routing" value={tab} onValueChange={value => update({ tab: value, kind: null, address: null })}
         items={[{ value: 'addresses', label: concepts.addresses.title, count: counts.addresses }, ...(data.manage ? [{ value: 'rules', label: concepts.rules.title, count: counts.rules }, { value: 'destinations', label: concepts.destinations.title, count: counts.destinations }] : [])]} />
       {tab === 'rules' && data.manage ? <RulesTab overview={data} refresh={() => overview.refetch()} />
         : tab === 'destinations' && data.manage ? <DestinationsTab overview={data} refresh={() => void overview.refetch()} />

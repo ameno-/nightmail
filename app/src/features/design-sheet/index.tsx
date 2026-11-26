@@ -93,7 +93,7 @@ function Specimen({ name, children, measure }: { name: string; children: ReactNo
 
 const coreIcons: [string, LucideIcon][] = [['LayoutGrid', LayoutGrid], ['ScrollText', ScrollText], ['Inbox', Inbox], ['Send', Send], ['Users', Users], ['Globe', Globe], ['KeyRound', KeyRound], ['BookOpen', BookOpen], ['Settings', Settings], ['LifeBuoy', LifeBuoy], ['ShieldCheck', ShieldCheck], ['Search', Search], ['Download', Download], ['Plus', Plus], ['Copy', Copy], ['Check', Check], ['X', X], ['MoreHorizontal', MoreHorizontal], ['ChevronDown', ChevronDown], ['ChevronRight', ChevronRight], ['ArrowLeft', ArrowLeft], ['ArrowUpRight', ArrowUpRight], ['Info', Info], ['Lock', Lock], ['Trash2', Trash2], ['Archive', Archive]]
 
-const navigationSample: [string, LucideIcon, boolean][] = [['Overview', LayoutGrid, false], ['Logs', ScrollText, true], ['Receiving', Inbox, false]]
+const navigationSample: [string, LucideIcon, boolean][] = [['Overview', LayoutGrid, false], ['Logs', ScrollText, true], ['Mail routing', Inbox, false]]
 
 const buttonRows: { name: string; props: ButtonProps; children: ReactNode; icon?: boolean }[] = [
   { name: 'Primary', props: { variant: 'primary' }, children: <><Icon icon={Plus} />Add domain</> },

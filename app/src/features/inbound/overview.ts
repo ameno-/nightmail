@@ -1,4 +1,4 @@
-// getInboundOverview: the Receiving screen in one read (routes page, counts, rules, endpoints, domains).
+// getInboundOverview: the Mail routing page in one read (routes page, counts, rules, endpoints, domains).
 import { useApiQuery } from '../../data/context'
 import { request } from '../../data/live'
 import type { InboundAddress, MailboxDomain } from '../../data/types'

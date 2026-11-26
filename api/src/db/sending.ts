@@ -38,10 +38,16 @@ export type EmailSnapshot = {
   unsubscribeUrl?: string;
   /** A sent required notice's email, which has no unsubscribe URL to keep: its body is re-rendered the same way. */
   requiredNotice?: true;
+  /** A campaign copy or campaign test: the origin of its links (src/link-domains.ts), where its inline pictures are linked
+   *  from (src/linked-images.ts). None: its pictures stay attached. */
+  linkOrigin?: string;
   /** Nightmail-authored notice with a recipient-only capability; reads withhold it. */
   sealed?: boolean;
   /** Sent from a receiving address or inbox: a reply, a new conversation, a forward or a mail-client submission. Reading it needs mailbox access. */
   mailbox?: boolean;
+  /** A mail app's SMTP submission (protocol-submit.ts): its files carry the labels the app gave them, so Hosted judges
+   *  them by their bytes (screened-html.ts mailAppAttachment). */
+  mailApp?: true;
   /** An ordinary send whose In-Reply-To names a stored message its sender could read: that message's thread (thread-view.ts joinReplies). */
   threadId?: string;
 };

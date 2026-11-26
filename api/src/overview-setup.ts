@@ -36,7 +36,8 @@ const Setup = z.object({
     newsletter: z.boolean().describe('A newsletter exists.'),
     readers: z.boolean().describe('A newsletter has a reader (a member of its list).'),
     issueSent: z.boolean().describe('A campaign to a newsletter was launched.'),
-  }).nullable().optional().describe('The first steps of each focus (focus in getWorkspaceSettings), as yes or no. Null unless the caller manages the whole workspace.'),
+    agent: z.boolean().describe('An agent is connected: an unrevoked API key an agent setup made (the agent prompt\'s setup token or a device code), or a member\'s active MCP sign-in that defaults to this workspace or made agent tokens here.'),
+  }).nullable().optional().describe('The first steps of each focus (focus in getWorkspaceSettings) and whether an agent is connected, as yes or no. Null unless the caller manages the whole workspace.'),
 }).openapi('OverviewSetup');
 type Counts = { api_keys: number | null; any_email: boolean; webhooks: number | null; invitations: number | null; domain_quota: { used: number; limit: number } | null; progress: z.infer<typeof Setup>['progress'] };
 const LAUNCHED = sql`('preparing','scheduled','sending','paused','done')`;
@@ -44,7 +45,7 @@ const LAUNCHED = sql`('preparing','scheduled','sending','paused','done')`;
 export function registerOverviewSetup(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/overview/setup', operationId: 'getOverviewSetup', tags: ['Settings'], security,
     summary: 'What this workspace has set up, in one read',
-    description: 'The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, and each focus\'s first steps. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.',
+    description: 'The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, each focus\'s first steps and whether an agent is connected. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.',
     responses: { 200: response(Setup), ...errors } }), async c => {
     const a = actor(c), w = a.workspaceId;
     const readable = (path: string, guard: () => unknown) => !memberRefused(a, 'GET', path) && admits(guard);
@@ -72,7 +73,10 @@ export function registerOverviewSetup(app: App) {
         'campaignSent',EXISTS (SELECT FROM sending_campaigns WHERE workspace_id=${w} AND state IN ${LAUNCHED}),
         'newsletter',EXISTS (SELECT FROM audience_lists WHERE workspace_id=${w} AND newsletter_from IS NOT NULL),
         'readers',EXISTS (SELECT FROM audience_lists l JOIN audience_list_members m ON m.workspace_id=l.workspace_id AND m.list_id=l.id WHERE l.workspace_id=${w} AND l.newsletter_from IS NOT NULL),
-        'issueSent',EXISTS (SELECT FROM sending_campaigns c JOIN audience_lists l ON l.workspace_id=c.workspace_id AND l.id=c.list_id WHERE c.workspace_id=${w} AND l.newsletter_from IS NOT NULL AND c.state IN ${LAUNCHED}))` : sql`NULL::json`} AS progress`)).rows[0]!;
+        'issueSent',EXISTS (SELECT FROM sending_campaigns c JOIN audience_lists l ON l.workspace_id=c.workspace_id AND l.id=c.list_id WHERE c.workspace_id=${w} AND l.newsletter_from IS NOT NULL AND c.state IN ${LAUNCHED}),
+        'agent',EXISTS (SELECT FROM ${apiKeys} WHERE ${and(eq(apiKeys.workspaceId, w), isNull(apiKeys.revokedAt))} AND ${apiKeys.agentSetupId} IS NOT NULL AND (${apiKeys.expiresAt} IS NULL OR ${apiKeys.expiresAt} > now()))
+          OR EXISTS (SELECT FROM workspace_members m JOIN nightmail_resource_grants g ON g.user_id=m.user_id WHERE m.workspace_id=${w} AND NOT g.revoked
+            AND (g.workspace_id=${w} OR EXISTS (SELECT FROM agent_tokens t WHERE t.workspace_id=${w} AND t.grant_id=g.id))))` : sql`NULL::json`} AS progress`)).rows[0]!;
     if (domains && row.domain_quota) domains = { ...domains, quota: row.domain_quota };
     return c.json({ domains, apiKeys: row.api_keys === null ? null : { active: row.api_keys }, emails: { any: row.any_email },
       webhooks: row.webhooks === null ? null : { total: row.webhooks }, invitations: row.invitations === null ? null : { pending: row.invitations }, progress: row.progress ?? null }, 200);

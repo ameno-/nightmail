@@ -261,7 +261,9 @@ export const foldListCounts = () => sql`WITH folded AS (DELETE FROM audience_lis
  */
 async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
   const cutoff = sql`now() - interval '30 days'`, { abuseExpired, linkExpired } = await import('./abuse.js');
-  const closedLongAgo = sql`SELECT id FROM support_conversations WHERE closed_at < now() - interval '90 days'`;
+  // Agent feedback (src/feedback.ts) is never closed: its transcript goes 90 days after its ticket was resolved.
+  const closedLongAgo = sql`SELECT id FROM support_conversations WHERE (closed_at < now() - interval '90 days'
+    OR (channel = 'agent_feedback' AND ticket_resolved_at < now() - interval '90 days'))`;
   const sent = { lane: 'sent' } as const, inbound = { lane: 'inbound' } as const;
   return [
     { name: 'expired_uploads', oldest: sql`SELECT min(expires_at) FROM sending_upload_reservations WHERE expires_at<=now()`, statement: () => sql`WITH expired AS (DELETE FROM sending_upload_reservations WHERE id IN
@@ -338,8 +340,10 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     // with it the sender address it kept; a Message-ID's binding once its Date is too old to bind anyway.
     expired('support_email_signins', 'support_email_signins', at('created_at'), sql`signed_in_at IS NULL AND created_at < now() - interval '7 days'`),
     expired('support_email_bindings', 'support_email_bindings', at('created_at'), sql`created_at < now() - interval '7 days'`),
-    // Support transcripts (src/support-inbox.ts) and their subjects go 90 days after the conversation closed.
-    expired('support_messages', 'support_messages', at('created_at'), sql`conversation_id IN (${closedLongAgo})`, unordered),
+    // Support transcripts (src/support-inbox.ts), their events and their subjects go 90 days after the conversation closed
+    // (agent feedback's, after its ticket was resolved).
+    expiredTogether('support_messages', [{ table: 'support_messages', by: at('created_at'), where: sql`conversation_id IN (${closedLongAgo})` },
+      { table: 'support_events', by: at('created_at'), where: sql`conversation_id IN (${closedLongAgo})` }]),
     { name: 'support_subjects', statement: () => sql`WITH gone AS (UPDATE support_conversations SET subject = NULL
         WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
     expired('audience_operation_plans', 'audience_operation_plans', at('expires_at'), sql`expires_at < now() - interval '1 day'`),

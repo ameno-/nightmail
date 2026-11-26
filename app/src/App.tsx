@@ -1,4 +1,4 @@
-import { Component, Suspense, useEffect, type ErrorInfo, type ReactNode } from 'react'
+import { Component, Suspense, useEffect, useRef, type ErrorInfo, type ReactNode } from 'react'
 import { Navigate, Route, Routes, Link, createRoutesFromChildren, useLocation, useParams, type Params } from 'react-router'
 import { AppShell } from './components/AppShell'
 import { BootLoader } from './components/BootLoader'
@@ -150,7 +150,12 @@ function DashboardGate() {
 }
 function OnboardingRoute() {
   const stage = useOnboardingStage()
-  return stage ? <ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><OnboardingPage stage={stage} /></Suspense></ChunkFallback.Provider> : <Navigate to="/overview" replace />
+  // The moment onboarding finishes, its screen stays up while the redirect lands (the router applies it in a render of its
+  // own): the dashboard then replaces it directly, with no empty frame between them.
+  const last = useRef(stage)
+  if (stage) last.current = stage
+  if (!last.current) return <Navigate to="/overview" replace />
+  return <>{!stage && <Navigate to="/overview" replace />}<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><OnboardingPage stage={last.current} /></Suspense></ChunkFallback.Provider></>
 }
 // "/" is the public homepage for everyone on a hosted installation; signed out, ApiProvider shows it before any route.
 // Signed in, it is this route, which loads none of the dashboard: its button opens Overview. A self-hosted installation

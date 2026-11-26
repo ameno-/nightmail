@@ -56,7 +56,7 @@ function ReceivingCell({ domain, receiving, unknown = false, card = false }: { d
   return <StatusDot tone={status.tone} note={receiving.status !== 'active' ? status.label : card ? `${receiving.addressCount.toLocaleString('en-US')} ${receiving.addressCount === 1 ? 'address' : 'addresses'}` : undefined} title={[`${status.label} at ${receiving.name}`, detail].filter(Boolean).join('. ')}>{receiving.name}</StatusDot>
 }
 
-/** Hosted: the hosts the domain receives on, each with its status, addresses (which open its routes in Receiving) and catch-all. Only once receiving is set up: before that the Receiving record above says how to turn it on. */
+/** Hosted: the hosts the domain receives on, each with its status, addresses (which open its routes in Mail routing) and catch-all. Only once receiving is set up: before that the Receiving record above says how to turn it on. */
 /** The page reads the receiving domain and its hosts before it shows (so this section arrives at its final height) and passes them in. */
 /** `onCheck`: the page's records check, run with Check MX now so the line above the records (and this button's notice)
  *  names what sending still waits for, such as a missing DKIM record: someone stuck presses whichever check is nearest. */
@@ -92,10 +92,11 @@ export function DomainsPage() {
 }
 // A newsletter created from an address on a domain the workspace hasn't verified sends its creator here (?add= opens Add
 // domain with the name filled in) and on to the domain's records; `then` is the newsletter's page, where Back returns.
+// ?add also opens it from Overview's setup step and from ⌘K, whether or not the page is open; it then leaves the URL.
 const returnTo = (params: URLSearchParams) => { const then = params.get('then') ?? ''; return /^\/newsletters\/[^/?#]+$/.test(then) ? then : '' }
 function DomainsList() {
   const { regionId } = useRegion()
-  const [params] = useSearchParams(), then = returnTo(params)
+  const [params, setParams] = useSearchParams(), then = returnTo(params)
   const warm = usePrefetchQueries()
   const { multiTenant } = useWorkspaceAccess()
   const columns = domainColumns(multiTenant)
@@ -110,7 +111,12 @@ function DomainsList() {
   const [open, setOpen] = useState(() => params.has('add'))
   const [name, setName] = useState(() => params.get('add') ?? '')
   const [invalid, setInvalid] = useState('')
-  function openCreate() { create.reset(); setName(''); setInvalid(''); setOpen(true) }
+  function openCreate(value = '') { create.reset(); setName(value); setInvalid(''); setOpen(true) }
+  useEffect(() => {
+    if (!params.has('add')) return
+    openCreate(params.get('add') ?? '')
+    setParams(previous => { const next = new URLSearchParams(previous); next.delete('add'); return next }, { replace: true })
+  }, [params, setParams]) // eslint-disable-line react-hooks/exhaustive-deps
   async function submit(event: FormEvent) {
     event.preventDefault()
     const value = normalizeDomain(name)
@@ -124,9 +130,9 @@ function DomainsList() {
     } catch { /* Shown inline. */ }
   }
   return <div className="stack">
-    <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate} data-analytics="domains/add">Add domain</Button>} />
+    <PageHeader title="Domains" actions={<Button variant="primary" onClick={() => openCreate()} data-analytics="domains/add">Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={builtinFirst(domains.data?.items ?? [])} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
+      <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={builtinFirst(domains.data?.items ?? [])} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={() => openCreate()}>Add domain</Button>} />} columns={[
         { ...columns[0], render: row => <span className="domain-name-cell"><span className="domain-name" title={row.name}>{row.name}</span>{row.builtIn && <BuiltinBadge />}</span> },
         { ...columns[1], render: row => <SendingCell domain={row} /> },
         { ...columns[2], render: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} />, cardRender: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} card /> },
@@ -321,7 +327,7 @@ function BuiltinDomainDetail({ domain, backTo }: { domain: Domain; backTo: strin
         <SectionHeader title="Built-in domain" />
         <p className="muted domain-builtin-copy">{[`${productName} set this domain up for your workspace, so it needs no DNS.`, builtin?.name === domain.name ? builtinStatus(builtin) : null,
           'Once a domain of your own verifies, it stops sending and keeps receiving.', `Mail to an address with no inbox or route of its own goes to ${BUILTIN_INBOX}@${domain.name}.`].filter(Boolean).join(' ')}</p>
-        <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving?domain=${encodeURIComponent(domain.name)}`}>Open in Receiving</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/domains?add">Add your own domain</Link></div>
+        <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving?domain=${encodeURIComponent(domain.name)}`}>Open in Mail routing</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/domains?add">Add your own domain</Link></div>
       </section>
     </div>
   </div>

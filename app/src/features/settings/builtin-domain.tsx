@@ -23,10 +23,6 @@ export function builtinStatus(builtin: BuiltinDomain) {
     default: return builtinSending(builtin)
   }
 }
-/** Its caps, for the daily limit's explainer on Overview. */
-export function builtinLimitText(builtin: Pick<BuiltinDomain, 'name' | 'perDay' | 'perMinute'>) {
-  return `${builtin.name} sends to at most ${number(builtin.perDay)} recipients a day and ${number(builtin.perMinute)} a minute, until a domain of your own verifies. Then the limits below apply.`
-}
 /** Whether the workspace sends from its built-in domain (or will, once it is set up): its daily cap is the one that applies then. */
 export const sendsFromBuiltin = (builtin: BuiltinDomain | null | undefined): builtin is BuiltinDomain => builtin?.sending === 'ready' || builtin?.sending === 'pending'
 /** Built-in first: it is the workspace's first domain wherever domains are listed. */

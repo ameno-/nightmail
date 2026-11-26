@@ -173,6 +173,8 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   getConnection: people('admin', 'dashboard'), createConnection: people('admin', 'dashboard'), deleteConnection: people('admin', 'dashboard'), listConnectionRegions: people('admin', 'dashboard'),
   refreshConnectionScan: people('admin', 'dashboard'), importConnectionDomains: people('admin', 'dashboard'), requestConnectionProductionAccess: people('admin', 'dashboard'), updateConnectionStack: people('admin', 'dashboard'), getConnectionRegionStatus: people('admin', 'dashboard'), verifyConnection: people('admin', 'dashboard'),
   getPublicStats: PUBLIC, getOverviewSetup: needs('sentMail', 'read', 'domain'), listActivity: signedIn('admin', 'write'), contactSupport: people('any', 'dashboard'),
+  // Any credential that can read, for its own workspace, including keys limited to sender domains (feedback.ts).
+  sendFeedback: needs('configuration', 'read'),
   // Billing: balance and usage read like settings; charges, the card and auto-recharge are an owner's or admin's in the dashboard.
   getBilling: needs('configuration', 'read', 'workspace'), getBillingUsage: needs('configuration', 'read', 'workspace'),
   listBillingLedger: needs('configuration', 'write', 'workspace', admin), listBillingPayments: needs('configuration', 'write', 'workspace', admin), getBillingPayment: needs('configuration', 'write', 'workspace', admin),

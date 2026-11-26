@@ -19,7 +19,7 @@ function LegacyRedirect({ to, address }: { to: string; address?: string }) {
 }
 export const LegacyMailboxesRedirect = () => <LegacyRedirect to="/receiving" />
 export function LegacyMailboxRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to="/receiving/inbox" address={id} /> } // InboundPage forwards it on.
-// Webhooks are destinations: their list is Receiving's Destinations tab, and an address's subscribers its address filter.
+// Webhooks are destinations: their list is Mail routing's Destinations tab, and an address's subscribers its address filter.
 export function WebhooksListRedirect() {
   const address = new URLSearchParams(useLocation().search).get('address')
   return <Navigate replace to={`/receiving?tab=destinations${address ? `&address=${encodeURIComponent(address)}` : ''}`} />

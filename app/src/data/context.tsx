@@ -432,7 +432,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     if (publicRoute || invitation || selectedWorkspace() || window.location.pathname === '/onboarding' || !dashboardLikelyReady(selectedWorkspace())) return
     void cache.prefetchQuery({ queryKey: regionCatalogKey(client), queryFn: ({ signal }) => client.regions.list(signal), staleTime: 30_000 })
   }, [cache, client, publicRoute, invitation])
-  // A landing link's focus with no onboarding left whose focus question it could answer: dropped.
+  // A landing link's focus with no onboarding left to save it: dropped.
   useEffect(() => { if (identity.data && !identity.isError && !identityOnboardingStage(identity.data)) clearLandingFocus() }, [identity.data, identity.isError, search])
   useEffect(() => {
     if (!identity.data || identityOnboardingStage(identity.data)) return

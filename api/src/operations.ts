@@ -43,7 +43,7 @@ import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, we
 import { BUILTIN_CAPS, BUILTIN_UNSUPPORTED, builtinLimitsText } from './builtin-limits.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
 import { PostalAddress, postalAddressText, unsubscribePageLink } from './outbound-content.js';
-import { checkLinkHost, forgetLinkHost, servesWorkspace, withLinkRecords } from './link-domains.js';
+import { checkLinkHost, forgetLinkHost, ownLinkHosts, servesWorkspace, withLinkRecords } from './link-domains.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -1000,11 +1000,11 @@ async function domainRows(c: Ctx, a: Actor, q: DomainQuery): Promise<z.infer<typ
 }
 
 /** Every domain a domain route returns, with its link record after its sending records (src/link-domains.ts): one read
- *  per response, while link hosts are on. It is not part of whether a domain is ready, so no route's own logic needs it. */
+ *  per response, while link hosts are on for the workspace. It is not part of whether a domain is ready, so no route's own logic needs it. */
 const domainLinkRecords = async (c: Ctx, next: () => Promise<void>) => {
   await next();
   const workspaceId = c.get('actor')?.workspaceId;
-  if (!c.env.config?.linkHosts || !workspaceId || c.res.status >= 300 || !c.res.headers.get('content-type')?.startsWith('application/json')) return;
+  if (!c.env.config || !workspaceId || !ownLinkHosts(c.env.config, workspaceId) || c.res.status >= 300 || !c.res.headers.get('content-type')?.startsWith('application/json')) return;
   const body = await c.res.clone().json().catch(() => null) as { name?: unknown; dns?: unknown; data?: unknown } | null;
   const domainLike = (value: unknown): value is { name: string; dns: Parameters<typeof withLinkRecords>[2][number]['dns'] } => typeof (value as { name?: unknown })?.name === 'string' && Array.isArray((value as { dns?: unknown }).dns);
   const reports = domainLike(body) ? [body] : Array.isArray(body?.data) ? body.data.filter(domainLike) : [];
