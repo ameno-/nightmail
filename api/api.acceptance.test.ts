@@ -5725,8 +5725,11 @@ describe('Hosted MCP OAuth and tools', () => {
       const emailIds: string[] = [], campaignIds: string[] = [];
       for (const name of domainNames) {
         const email = `email_${randomUUID().replaceAll('-', '')}`;
+        // A whole snapshot, as sending stores one: its readers answer with its content (a part-snapshot made them 500).
         await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
-          VALUES ($1,$2,$3,'fixture',$4,'["recipient@example.com"]','[]','[]','Permission table','{"testCampaignId":null,"kind":"transactional"}',true,now()+interval '1 day')`, [email, w, REGION, `sender@${name}`]);
+          VALUES ($1,$2,$3,'fixture',$4,'["recipient@example.com"]','[]','[]','Permission table',jsonb_build_object('testCampaignId',null,'kind','transactional','from',$4::text,
+            'to',jsonb_build_array('recipient@example.com'),'cc','[]'::jsonb,'bcc','[]'::jsonb,'replyTo','[]'::jsonb,'region',$3::text,'subject','Permission table','text','Permission table',
+            'attachments','[]'::jsonb,'tracking',false,'headers','[]'::jsonb),true,now()+interval '1 day')`, [email, w, REGION, `sender@${name}`]);
         emailIds.push(email);
         campaignIds.push(ok(await request('POST', '/v1/campaigns', MANAGER, { name: unique('permission-table'), from: `news@${name}`, region: REGION, subject: 'Hello', html: '<p>Hello</p>' }), 201).id);
       }
@@ -26310,6 +26313,60 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
 
   // PR #131 recheck: hostile values (proxies, overridden array methods, getters, toJSON) at the logging helpers.
+  // One of our own parses refusing a value (a route checking its answer, as GET /v1/campaigns/{id}/audience did with a
+  // fractional plan day) is logged where it failed and what kind of value it got, never the value, whatever it holds.
+  // A path keeps only the field names the API publishes: never a key a customer chose.
+  test('an unexpected failure from a schema says which field it refused and what kind of value, never the value', async t => {
+    const [{ logError, schemaIssues }, { z }] = await Promise.all([import('./src/core.js'), import('zod')]);
+    const lines: string[] = [];
+    for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => lines.push(String(line)));
+    const marker = 'schema-value-private-marker';
+    const Answer = z.object({ readiness: z.object({ plan: z.object({ batches: z.array(z.number().int()) }) }), counts: z.record(z.string(), z.number().int()),
+      name: z.string(), kind: z.enum(['ready', 'ramp_recommended']), limit: z.number().int().max(10), when: z.string() }).strict();
+    const refused = Answer.safeParse({ readiness: { plan: { batches: [1, 2, 2.5] } }, counts: { [`${marker}@example.net`]: 1.5 }, name: null, kind: marker, limit: 11,
+      when: new Date(), [marker]: marker }).error!;
+    // Keys a customer chose: records nested in a field (a metadata key, a contact property), a map's key whether its value
+    // or the key itself is refused, a key its record refused (even one equal to a published name), and an error function
+    // that quotes its input after "received".
+    const customerChose = ['johnsmith', 'acme_vip_customer', 'diagnosis', 'carol', 'alicejones', 'positive'];
+    const hostile = [
+      z.object({ metadata: z.record(z.string(), z.record(z.string(), z.number().int())), properties: z.record(z.string(), z.string().max(5)) })
+        .safeParse({ metadata: { johnsmith: { acme_vip_customer: 1.5 } }, properties: { diagnosis: 'positive' } }),
+      z.object({ scores: z.map(z.string(), z.number()), senderLists: z.map(z.string().email(), z.number()) })
+        .safeParse({ scores: new Map([['carol', 'x']]), senderLists: new Map([['carol', 1]]) }),
+      z.object({ params: z.record(z.string().email(), z.number()) }).safeParse({ params: { alicejones: 1, name: 2 } }),
+      z.object({ count: z.number({ error: () => 'Expected number, received johnsmith' }) }).safeParse({ count: 'johnsmith' }),
+    ].map(result => result.error!);
+    logError(refused, { code: 'INTERNAL_ERROR', requestId: 'req_fixture', route: '/v1/campaigns/:id/audience', status: 500 });
+    logError(new Error('wrapped', { cause: refused }), { code: 'INTERNAL_ERROR' });
+    logError(new TypeError('not a schema'), { code: 'INTERNAL_ERROR' });
+    for (const error of hostile) logError(error, { code: 'INTERNAL_ERROR' });
+    t.mock.restoreAll();
+    const [line, wrapped, plain, ...rest] = lines.map(text => JSON.parse(text) as Json);
+    // The first five issues in the schema's order (a record's key is *), then how many more.
+    const expected = 'readiness.plan.batches.2: expected int, received number; counts.*: expected int, received number; name: expected string, received null; '
+      + 'kind: not one of the 2 allowed values; limit: number above 10; and 2 more';
+    assert.deepEqual([line!.errorType, line!.schema, line!.route, wrapped!.schema, plain!.schema], ['ZodError', expected, '/v1/campaigns/:id/audience', expected, undefined]);
+    assert.deepEqual(rest.map(entry => entry.schema), [
+      'metadata.*.*: expected int, received number; properties.*: string above 5',
+      'scores.*: expected number, received string; senderLists.*: not a valid email',
+      'params.*: invalid_key; params.*: invalid_key',
+      'count: expected number',
+    ]);
+    assert.ok(!lines.some(text => [marker, 'example.net', ...customerChose].some(word => text.includes(word))), lines.join('\n'));
+    // An issue's own message (a custom refinement's can quote anything) is never logged, only its code, and a word that
+    // isn't Zod's own (an object dressed as a Zod error) is left out. A getter on the error never runs, and an error whose
+    // proxy throws gives nothing, never a throw.
+    assert.equal(schemaIssues(Object.assign(new Error('x'), { name: 'ZodError', issues: [{ code: 'custom', path: ['note', 3, 'x y'], message: marker }] })), 'note.3.*: custom');
+    assert.equal(schemaIssues(Object.assign(new Error('x'), { name: 'ZodError', issues: [{ code: 'johnsmith', path: [] },
+      { code: 'invalid_type', expected: 'johnsmith', path: ['name'], message: 'Invalid input: expected johnsmith, received alicejones' },
+      { code: 'invalid_format', format: 'carol', path: [] }] })), '(root): invalid; name: expected another type; (root): not a valid format');
+    let getterRuns = 0;
+    const trapped = Object.defineProperty(Object.assign(new Error('x'), { name: 'ZodError' }), 'issues', { get() { getterRuns++; return [{ code: 'custom', path: [marker] }]; } });
+    const throwing = new Proxy(new Error('x'), { getOwnPropertyDescriptor() { throw new Error(marker); } });
+    assert.deepEqual([schemaIssues(trapped), schemaIssues(throwing), schemaIssues(new Error('plain')), getterRuns], [undefined, undefined, undefined, 0]);
+  });
+
   test('logging never throws and never runs a method, getter or toJSON of what it logs', async t => {
     const { log, logError } = await import('./src/core.js');
     const lines: string[] = [];
@@ -35085,6 +35142,19 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           (SELECT count(*)::int FROM sending_campaign_reviews r WHERE r.campaign_id = c.id) AS reviews FROM sending_campaigns c WHERE c.id = $1`, [refusedId])).rows[0];
         assert.deepEqual(kept, { state: 'draft', review_id: null, expanded: 0, emails: 0, reviews: 0 });
       }
+      // Sizing that one of our own schemas refuses (a fractional plan day, before plans were whole): the preview still
+      // answers, and the failure's line says which field and what kind of value, never the value.
+      const { z } = await import('zod'), logged: Json[] = [];
+      const spies = (['error', 'warn', 'info'] as const).map(level => t.mock.method(console, level, (line: string) => { try { logged.push(JSON.parse(line)); } catch { /* not a log line */ } }));
+      runtime.config.rampLines = { get established(): never { z.object({ batches: z.array(z.number().int()) }).parse({ batches: [6_002, 9_003, 13_504.5] }); throw new Error('unreachable'); } } as never;
+      const refusedBySchema = await create('Unsized by a schema');
+      const stillAnswers = ok(await local('GET', `/v1/campaigns/${refusedBySchema.id}/audience?readiness=true`)).readiness;
+      for (const spy of spies) spy.mock.restore();
+      const failure = logged.find((line: Json) => line.code === 'SEND_REVIEW_PLAN_UNAVAILABLE');
+      assert.deepEqual([typeof stillAnswers.unavailable, failure?.stage, failure?.errorType, failure?.schema, failure?.cause],
+        ['string', 'preview', 'ZodError', 'batches.2: expected int, received number', undefined]);
+      assert.ok(typeof failure?.stack === 'string' && failure.stack.includes('src/'), JSON.stringify(failure));
+      assert.ok(!JSON.stringify(logged).includes('13504'), 'The value is never logged.');
       runtime.config.rampLines = {};
     });
   });

@@ -127,6 +127,88 @@ export function stackFrames(error: unknown, limit = 12) {
   return frames.join('\n') || undefined;
 }
 /**
+ * What a schema refused, when an error is a Zod error (one of our own parses, such as a route checking the answer it is
+ * about to send, refused a value): where and what kind, never the value. Up to 5 issues, each `path: what was wrong`,
+ * such as `readiness.plan.batches.2: expected int, received number`.
+ * - A path keeps indexes and only the keys in `fieldNames`, the field names the API itself publishes (core.ts passes
+ *   API_FIELD_NAMES, generated from openapi.json). Any other key reads `*`: a record's or a map's key is data a
+ *   customer chose (a contact property, a metadata key, an address). A customer's key that equals a published name is
+ *   written, and says nothing the API doesn't publish. The key a record refused is always `*`.
+ * - Every word after the path is one of Zod's own (its issue codes, types, formats), from the lists below; anything
+ *   else is left out. "received" comes from Zod's own message only when it ends in one of Zod's type words, so an
+ *   error function that quotes its input (", received johnsmith") adds nothing. An issue's message is never logged.
+ * - Read like `scrub`: own data properties only, along the cause chain; no getter, method or toString of the error or
+ *   its issues ever runs, and it never throws.
+ */
+const SCHEMA_ISSUES = 5, PATH_SEGMENTS = 12, COUNTED = 1_000;
+const ZOD_CODES = new Set(['invalid_type', 'too_big', 'too_small', 'invalid_format', 'not_multiple_of', 'unrecognized_keys', 'invalid_union',
+  'invalid_key', 'invalid_element', 'invalid_value', 'custom']);
+// Zod 4's `expected` types; the type of value it says it received (util.parsedType, and its message's names: NaN,
+// Infinity, a built-in's constructor; a class of our own is left out); the origins of a size issue; its string formats.
+const ZOD_TYPES = new Set(['string', 'number', 'int', 'boolean', 'bigint', 'symbol', 'undefined', 'null', 'never', 'void', 'date', 'array', 'object',
+  'tuple', 'record', 'map', 'set', 'file', 'nonoptional', 'nan', 'function', 'promise']);
+const RECEIVED = new Set(['string', 'number', 'boolean', 'bigint', 'symbol', 'undefined', 'null', 'object', 'array', 'function', 'NaN', 'Infinity',
+  '-Infinity', 'Date', 'Map', 'Set', 'RegExp', 'Promise', 'Error', 'Uint8Array', 'ArrayBuffer', 'Buffer', 'File', 'Blob', 'URL']);
+const ORIGINS = new Set(['number', 'int', 'bigint', 'date', 'string', 'array', 'set', 'file']);
+const FORMATS = new Set(['email', 'url', 'emoji', 'uuid', 'guid', 'nanoid', 'cuid', 'cuid2', 'ulid', 'xid', 'ksuid', 'datetime', 'date', 'time',
+  'duration', 'ipv4', 'ipv6', 'cidrv4', 'cidrv6', 'mac', 'base64', 'base64url', 'json_string', 'e164', 'credit_card', 'iban', 'lowercase', 'uppercase',
+  'regex', 'jwt', 'starts_with', 'ends_with', 'includes', 'hostname', 'hex', 'hash', 'int32', 'uint32', 'int64', 'uint64', 'float32', 'float64', 'safeint']);
+const ownValue = (target: unknown, key: string): unknown => {
+  if (target === null || (typeof target !== 'object' && typeof target !== 'function')) return undefined;
+  const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+  return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+};
+const known = (words: ReadonlySet<string>, value: unknown) => typeof value === 'string' && words.has(value) ? value : undefined;
+/** An array's own elements by index (at most `limit`), or null for anything that isn't a plain array. */
+function ownItems(value: unknown, limit: number): unknown[] | null {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+  const length = ownValue(value, 'length');
+  const items: unknown[] = [];
+  for (let index = 0; index < (typeof length === 'number' && length > 0 ? Math.min(Math.floor(length), limit) : 0); index++) items.push(ownValue(value, String(index)));
+  return items;
+}
+const counted = (items: unknown[] | null) => !items ? 0 : items.length > COUNTED ? `${COUNTED}+` : String(items.length);
+function issueText(issue: unknown, fieldNames: ReadonlySet<string>): string | undefined {
+  if (issue === null || typeof issue !== 'object') return undefined;
+  const prototype = Object.getPrototypeOf(issue);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  const code = known(ZOD_CODES, ownValue(issue, 'code')) ?? 'invalid';
+  const segments = ownItems(ownValue(issue, 'path'), PATH_SEGMENTS + 1) ?? [];
+  const shown = segments.slice(0, PATH_SEGMENTS).map(segment => typeof segment === 'number' && Number.isSafeInteger(segment) && segment >= 0 ? String(segment)
+    : typeof segment === 'string' && fieldNames.has(segment) ? segment : '*');
+  // A record's refused key is its path's last segment (a map's isn't in its path: Zod prefixes a string key's own issues).
+  if (code === 'invalid_key' && ownValue(issue, 'origin') !== 'map' && shown.length && segments.length <= PATH_SEGMENTS) shown[shown.length - 1] = '*';
+  const path = shown.join('.') + (segments.length > PATH_SEGMENTS ? '.…' : '');
+  const message = ownValue(issue, 'message');
+  const received = typeof message === 'string' ? known(RECEIVED, /, received (\S{1,30})$/.exec(message.slice(-50))?.[1]) : undefined;
+  const limit = (key: string) => { const n = ownValue(issue, key); return typeof n === 'number' && Number.isFinite(n) ? n : typeof n === 'bigint' ? String(n) : '?'; };
+  const what = code === 'invalid_type' ? `expected ${known(ZOD_TYPES, ownValue(issue, 'expected')) ?? 'another type'}${received ? `, received ${received}` : ''}`
+    : code === 'invalid_value' ? `not one of the ${counted(ownItems(ownValue(issue, 'values'), COUNTED + 1))} allowed values`
+    : code === 'too_big' ? `${known(ORIGINS, ownValue(issue, 'origin')) ?? 'value'} above ${limit('maximum')}`
+    : code === 'too_small' ? `${known(ORIGINS, ownValue(issue, 'origin')) ?? 'value'} below ${limit('minimum')}`
+    : code === 'not_multiple_of' ? `not a multiple of ${limit('divisor')}`
+    : code === 'invalid_format' ? `not a valid ${known(FORMATS, ownValue(issue, 'format')) ?? 'format'}`
+    : code === 'unrecognized_keys' ? `${counted(ownItems(ownValue(issue, 'keys'), COUNTED + 1))} unrecognized keys`
+    : code === 'invalid_union' ? 'no option of the union matched'
+    : code;
+  return `${path || '(root)'}: ${what}`;
+}
+export function schemaIssues(error: unknown, fieldNames: ReadonlySet<string>): string | undefined {
+  try {
+    let current: unknown = error;
+    for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++, current = ownValue(current, 'cause')) {
+      const name = ownValue(current, 'name');
+      if (name !== 'ZodError' && name !== '$ZodError') continue;
+      const issues = ownItems(ownValue(current, 'issues'), COUNTED + 1);
+      if (!issues?.length) return undefined;
+      const parts = issues.slice(0, SCHEMA_ISSUES).map(issue => issueText(issue, fieldNames)).filter((text): text is string => !!text);
+      if (issues.length > SCHEMA_ISSUES) parts.push(`and ${issues.length > COUNTED ? `${COUNTED - SCHEMA_ISSUES}+` : issues.length - SCHEMA_ISSUES} more`);
+      return parts.join('; ').slice(0, 500) || undefined;
+    }
+    return undefined;
+  } catch { return undefined; } // A proxy that throws from a trap, or a revoked one.
+}
+/**
  * An error's class name (`TypeError`, `DrizzleQueryError`) as a string, or `Error`. `name` is read once and used only
  * when it is a string that looks like a class name: an object with its own toString would be serialized whole.
  */

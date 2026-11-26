@@ -105,7 +105,7 @@ jobs:
         if: needs.changes.outputs.api == 'true' || needs.changes.outputs.sdk == 'true'
         run: |
           (cd api && bun run docs:check)
-          git diff --exit-code -- api/openapi.json sdk/src
+          git diff --exit-code -- api/openapi.json api/src/api-field-names.ts sdk/src
           test -z "$(git ls-files --others --exclude-standard -- sdk/src)"
       - name: Public API compatibility
         if: needs.changes.outputs.api == 'true' || needs.changes.outputs.sdk == 'true'
