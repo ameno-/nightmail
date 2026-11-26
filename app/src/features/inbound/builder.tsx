@@ -65,9 +65,9 @@ const LOCAL = /^[^\s@<>,;*]+$/
 function TurnOnReceiving({ host, domainId }: { host: string; domainId: string }) {
   const domain = useApiDef(queries.domain(domainId))
   const value = domain.data?.records.find(record => record.purpose === 'receiving' && record.type === 'MX')?.value
-  return <Alert tone="info" title={`Turn on receiving for ${host}`}>
+  return <Alert tone={isSubdomainName(host) ? 'info' : 'warning'} title={`Turn on receiving for ${host}`}>
     Creating this address turns receiving on at {host}. Then add this MX record at your DNS provider: <code>{host}</code> MX <code>{value ?? '…'}</code>.
-    {host === domain.data?.name && <> {rootMxWarning(host)}</>}
+    {' '}{rootMxWarning(host)}
   </Alert>
 }
 type CreatedReceiving = { domainId: string; host: string; turnedOn: boolean; status?: string; verified?: boolean; dns: { type: 'MX'; name: string; value: string; priority: number }[] }
@@ -454,27 +454,46 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     if (Object.keys(found).length) return
     setBusy(true); setProblem(null); setWaiting(null); setConflict(false)
     // Which write failed: a new destination's, or the new address's own (whose refusals go back to the address step).
-    let stage: 'destinations' | 'address' = 'destinations'
+    const at: { stage: 'destinations' | 'address' } = { stage: 'destinations' }
     try {
       const sides: Side[] = draft.split ? ['then', 'otherwise'] : ['then']
       // A rule names its own inbox by key; one destination reaches it with no route at all.
       const needsOwn = draft.split && sides.some(side => draft[side] === 'own')
       if (!editing) {
-        // A new address: its new destinations first, then the address and its flow in one call.
         const local = form.address.trim().toLowerCase().split('@')[0]!
-        const ownKey = needsOwn ? freeName(local, ownKeys()) : null
-        const endpoints: NewEndpoint[] = []
-        const r = await realize(sides, ownKey, undefined, endpoints)
-        if (r === 'waiting') return
-        const rule = plannedRule(r)
-        const flow = { ...(endpoints.length ? { endpoints } : {}), ...(rule ? { split: rule, deliver: [] } : r.then.route !== null ? { deliver: r.then.route } : {}) }
+        // Made by an earlier Save that waited for a forward's recipient: it keeps its key (given one if a rule now names it).
+        const ownKey = saved ? (needsOwn && !saved.key ? await keyed(saved) : saved.key) : needsOwn ? freeName(local, ownKeys()) : null
         const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase()
-        const body = { address: value, displayName: form.displayName.trim() || null, ...(ownKey ? { key: ownKey } : {}), ...(sender ? { publicAddress: sender } : {}), ...(form.lifetime ? { ttlSeconds: Number(form.lifetime) } : {}), ...(Object.keys(flow).length ? { flow } : {}) }
-        stage = 'address'
-        const { receiving: setup, ...self } = await request<InboundAddress & { receiving?: CreatedReceiving }>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body), scope })
-        setSaved(self); setEditing(true); setReceivingSetup(setup ?? null)
-        await refresh()
-        onSaved?.(self)
+        const create = async (flow: Record<string, unknown>) => {
+          const body = { address: value, displayName: form.displayName.trim() || null, ...(ownKey ? { key: ownKey } : {}), ...(sender ? { publicAddress: sender } : {}), ...(form.lifetime ? { ttlSeconds: Number(form.lifetime) } : {}), ...(Object.keys(flow).length ? { flow } : {}) }
+          at.stage = 'address'
+          const { receiving: setup, ...self } = await request<InboundAddress & { receiving?: CreatedReceiving }>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body), scope })
+          at.stage = 'destinations'
+          setSaved(self); setReceivingSetup(setup ?? null)
+          await refresh()
+          onSaved?.(self)
+          return self
+        }
+        const endpoints: NewEndpoint[] = []
+        const flowOf = (r: Record<Side, Resolved>) => { const rule = plannedRule(r); return { ...(endpoints.length ? { endpoints } : {}), ...(rule ? { split: rule, deliver: [] } : r.then.route !== null ? { deliver: r.then.route } : {}) } }
+        if (saved || sides.some(side => draft[side] === 'new:forward')) {
+          // A new forward asks its recipient from one of the workspace's addresses, so the address comes first (its mail
+          // stays in its inbox), then the forward: the API asks from the oldest address that can, which in a workspace that
+          // had none is this one. The flow follows once the forward takes mail: at once on a domain this workspace verified,
+          // else on the Save after they agree (or once another destination is chosen).
+          const self = saved ?? await create({})
+          const r = await realize(sides, ownKey, undefined, endpoints)
+          if (r === 'waiting') return
+          const flow = flowOf(r)
+          if (Object.keys(flow).length) await request(`/v1/inbound/addresses/${encodeURIComponent(self.id)}/flow`, { method: 'PATCH', body: flow, scope })
+          await refresh()
+        } else {
+          // A new address: its new destinations first, then the address and its flow in one call.
+          const r = await realize(sides, ownKey, undefined, endpoints)
+          if (r === 'waiting') return
+          await create(flowOf(r))
+        }
+        setEditing(true)
       } else {
         if (!base || !opened || !saved) return
         const ownKey = needsOwn ? await keyed(saved) : saved.key
@@ -504,7 +523,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         const host = form.address.trim().toLowerCase().split('@')[1]!, why = /another provider\. (.*?) To move it here anyway/.exec(error.detail)?.[1] ?? ''
         setMoveHost({ host, domainId: domainOf(host)!.id, message: moveReason(why, hosts) })
       }
-      else if (!editing && stage === 'address' && error instanceof ApiError && ADDRESS_REFUSALS.has(error.code)) {
+      else if (!editing && at.stage === 'address' && error instanceof ApiError && ADDRESS_REFUSALS.has(error.code)) {
         // The address can't be made as typed: back to it, the reason on its field and the API's suggestion one press away.
         const local = form.address.trim().toLowerCase().split('@')[0]!, instead = /Use (\S+?) for receiving instead/.exec(error.detail)?.[1]
         setStep('address'); setErrors({ address: error.message }); setCodes({ address: error.code.toLowerCase() }); setRefused(instead ? [`${local}@${instead}`] : [])
@@ -537,7 +556,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const stepsPath = saved ? `/receiving/addresses/${saved.id}?tab=flow&edit=1` : null
   const footer = step === 'address' ? <><Button onClick={() => close()}>Cancel</Button><Button variant="primary" type="submit" form="builder-address" loading={checkingAddress} disabled={boxes.isPending}>Next</Button></>
     : step === 'flow' && asking ? <><Button onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" onClick={() => { setReplace(true); setPlan({ ...base!.plan, split: true, condition: split!, value: '' }) }}>Replace it</Button></>
-    : step === 'flow' ? <>{editing ? <Button disabled={busy} onClick={() => close()}>Cancel</Button> : <Button disabled={busy} onClick={() => setStep('address')}>Back</Button>}{fits && <Button variant="primary" type="submit" form="builder-flow" loading={busy} disabled={!ready || conflict}>Save</Button>}</>
+    : step === 'flow' ? <>{editing || saved ? <Button disabled={busy} onClick={() => close()}>Cancel</Button> : <Button disabled={busy} onClick={() => setStep('address')}>Back</Button>}{fits && <Button variant="primary" type="submit" form="builder-flow" loading={busy} disabled={!ready || conflict}>Save</Button>}</>
     : <>{saved && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/addresses/${saved.id}`} onClick={() => onOpenChange(false)}>Open address</Link>}<Button variant="primary" onClick={() => onOpenChange(false)}>Done</Button></>
   const picker = (side: Side, routeOnly: boolean) => <div className="stack">
     {(boxes.hasMore || Boolean(boxSearch)) && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={boxSearch} onChange={event => setBoxSearch(event.target.value)} />}

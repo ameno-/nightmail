@@ -72,13 +72,15 @@ function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: 
   const live = overview.domains.filter(d => d.status === 'active'), sendOnly = overview.domains.filter(d => ['off', 'disabled'].includes(d.status))
   const step = (n: number, done: boolean, title: string, action: ReactNode) => <li className="rcv-step" data-done={done || undefined}>
     <span className="rcv-step__n" aria-hidden="true">{done ? <Check size={13} /> : n}</span><div className="rcv-step__body"><h3>{title}</h3>{action}</div></li>
-  // Each step is its heading and the action that starts it; the second waits on the first (its button is off until a
-  // domain receives). An agent inbox needs no DNS, so testing can start before any of it.
+  // Each step is its heading and the action that starts it; each waits on the one before (its buttons are off until then).
+  // This list shows only while there is no address, so the third always waits. An agent inbox needs no DNS, so testing
+  // can start before any of it.
   // The step to take now is the primary button; New address waits on the first, as the header's does.
   return <ol className="rcv-steps">
     {step(1, live.length > 0, 'Receive on a domain', !live.length && <Link className="ui-button ui-button--primary ui-button--md" to={sendOnly[0] ? `/domains/${sendOnly[0].id}` : '/domains'}>Set up receiving</Link>)}
     {step(2, false, 'Create an address', <Button variant={live.length ? 'primary' : 'secondary'} disabled={!live.length} onClick={onCreate}>New address</Button>)}
-    {step(3, false, 'Add a rule or a destination', <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rules/new">New rule</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving?tab=destinations&new=1">New destination</Link></div>)}
+    {/* Rules run on an address, and a forward asks its recipient from one: both wait on the second step, as it waits on the first. */}
+    {step(3, false, 'Add a rule or a destination', <div className="cluster"><Button variant="secondary" disabled>New rule</Button><Button variant="secondary" disabled>New destination</Button></div>)}
     <li className="rcv-steps__aside"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/inboxes">Try an agent inbox</Link></li>
   </ol>
 }

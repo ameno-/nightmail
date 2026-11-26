@@ -137,6 +137,11 @@ export const claimSends = (dc: SQL = sql`dc`) => sql`${dc}.sending_state IN ('ve
 export const claimReceives = (dc: SQL = sql`dc`) => sql`${dc}.receiving_state IN ('active','lost')`;
 export const claimReceivable = (dc: SQL = sql`dc`) => sql`${dc}.receiving_state<>'off'`;
 export const connectionReady = (pc: SQL = sql`pc`) => sql`${pc}.state='ready'`;
+/** Hosted: a new address can be made on receiving host row `md` as it is, nothing turned on: its domain's live claim in
+ *  workspace `w`, on a ready connection in the host's region, or the shared pool's once the host receives there. */
+export const hostTakesAddresses = (w: string, md: SQL = sql`md`) => sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND ${connectionReady()}
+  JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name WHERE d.id=${md}.domain_id AND dc.workspace_id=${w} AND NOT domain_claim_expired(dc)
+  AND (d.region=pc.region OR (pc.kind='shared' AND ${md}.region='us-east-2' AND ${md}.status='active' AND ${claimReceives()})))`;
 /** Hosted sends (and anything that queues one) stop here until the SES tenant exists; BYO connections are always ready. */
 export const poolSends = (p: SQL = sql`p`) => sql`${p}.sending_state='ready'`;
 export const poolReceives = (p: SQL = sql`p`) => sql`${p}.receiving_state='ready'`;

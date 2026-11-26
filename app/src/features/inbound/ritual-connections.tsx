@@ -163,12 +163,21 @@ export function CreatedEndpointDialog({ created, onClose, writeRule = true }: { 
   </Dialog>
 }
 export { statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }
-/** The address a refused forward could send its confirmation from (FORWARD_SENDER_REQUIRED's suggestion), or null. */
-export const forwardSenderNeeded = (error: unknown): { suggested: string | null } | null => error instanceof ApiError && error.code === 'FORWARD_SENDER_REQUIRED'
-  ? { suggested: typeof error.details?.[0]?.suggestedFrom === 'string' ? error.details[0].suggestedFrom : null } : null
+type SenderNeed = { suggested: string | null; reason: string | null; domain: string | null; domainId: string | null }
+const text = (value: unknown) => typeof value === 'string' ? value : null
+/** Why a refused forward has no address to ask its recipient from (FORWARD_SENDER_REQUIRED): an address to create, or
+ *  the reason none can be offered (a domain of its own that doesn't receive yet, a built-in domain that emails members
+ *  only, or no domain that receives), or null for any other error. */
+export const forwardSenderNeeded = (error: unknown): SenderNeed | null => {
+  if (!(error instanceof ApiError && error.code === 'FORWARD_SENDER_REQUIRED')) return null
+  const d = error.details?.[0] ?? {}
+  return { suggested: text(d.suggestedFrom), reason: text(d.reason), domain: text(d.domain), domainId: text(d.domainId) }
+}
 /**
  * A forward refused for want of an address to send its confirmation from: one click creates the suggested address
- * (forward@ on the workspace's own domain) and `onCreated` sends the forward again from it. Wherever a forward is made.
+ * (forward@ at a host that receives mail now, which turns nothing on) and `onCreated` sends the forward again from it.
+ * With no such host there is nothing to create here: it points to the addresses, where receiving is set up first.
+ * Wherever a forward is made.
  */
 export function ForwardSenderOffer({ error, onCreated }: { error: unknown; onCreated: (address: InboundAddress) => void | Promise<void> }) {
   const [busy, setBusy] = useState(false)
@@ -180,9 +189,18 @@ export function ForwardSenderOffer({ error, onCreated }: { error: unknown; onCre
     try { await onCreated(await request<InboundAddress>('/v1/inbound/addresses', { method: 'POST', body: { address: need!.suggested } })) }
     catch (e) { setFailed(e) } finally { setBusy(false) }
   }
-  return <Alert tone="info" title="It needs an address to send from">
-    {need.suggested ? <>Forwarding first emails them a request to confirm, from one of your addresses, and you don’t have one yet.</> : errorText(error)}
-    {need.suggested && <div className="cluster forward-sender-offer"><Button size="sm" variant="primary" loading={busy} onClick={() => void create()}>Create <PrivateAddress value={need.suggested} /> and continue</Button></div>}
+  // What to do next is a control of its own (a tap target), never a link inside the sentence.
+  const next = need.suggested ? null
+    : need.reason === 'domain_not_receiving' ? { to: need.domainId ? `/domains/${need.domainId}` : '/domains', label: 'Set up receiving' }
+    : need.reason === 'builtin_members_only' ? { to: '/domains', label: 'Add your domain' }
+    : { to: '/receiving', label: 'Set up receiving' }
+  return <Alert tone="info" title={need.reason === 'builtin_members_only' ? 'It can’t ask them yet' : 'It needs an address to send from'}>
+    {need.suggested ? <>Forwarding first emails them a request to confirm, from one of your addresses, and you don’t have one yet. It can come from <span className="forward-sender-offer__from"><PrivateAddress value={need.suggested} /></span>, a new address.</>
+      : need.reason === 'domain_not_receiving' && need.domain ? <>The request to confirm comes from one of your addresses at {need.domain}, which doesn’t receive mail yet.</>
+      : need.reason === 'builtin_members_only' ? <>Your built-in domain emails only members of this workspace. Forward to your sign-in address, or add your own domain.</>
+      : <>Forwarding first emails them a request to confirm, from one of your addresses, and no domain of yours receives mail yet.</>}
+    {need.suggested && <div className="cluster forward-sender-offer"><Button size="sm" variant="primary" loading={busy} onClick={() => void create()}>Create it and continue</Button></div>}
+    {next && <div className="cluster forward-sender-offer"><Link className="ui-button ui-button--secondary ui-button--sm" to={next.to}>{next.label}</Link></div>}
     {failed !== null && <p className="ui-field__error" role="alert">{errorText(failed)}</p>}
   </Alert>
 }

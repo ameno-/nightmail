@@ -28186,7 +28186,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('forwards: with no permanent address to send the confirmation from, the 422 names the address to create and the calls (forward@ on its own domain); created, the forward goes out from it', async t => {
+  test('forwards: with no permanent address to send the confirmation from, the 422 names an address to create at a host that receives now, never one that would turn receiving on; created, the forward goes out from it', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const wid = runtime.config.workspaceId;
       Object.assign(runtime.config, { multiTenant: true });
@@ -28202,20 +28202,51 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const identity = { proven: true, mx: null, note: null, ses: { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { SigningEnabled: true, Status: 'SUCCESS', Tokens: tokens, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com' } } };
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,ever_proven,identity,receiving_proved_at,receiving_identity_at)
         VALUES ($1,$2,$2,'verified','off',true,$3,now(),now())`, [name, wid, JSON.stringify(identity)]);
-      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [unique('dom'), wid, name, REGION]);
+      const ownDomain = unique('dom');
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [ownDomain, wid, name, REGION]);
       const forward = (extra: Json = {}) => local('POST', '/v1/endpoints', { type: 'forward', name: 'team', address: 'team@outside.example', ...extra });
+      const hosts = async () => (await db.query('SELECT id, name, receiving_host, status FROM mailbox_domains WHERE workspace_id=$1 ORDER BY id', [wid])).rows;
+      const notReceiving = { reason: 'domain_not_receiving', domain: name, domainId: ownDomain };
 
+      // Its own domain sends but nothing receives: no address to offer. Creating forward@ there would turn receiving on at
+      // the domain (its MX record to publish, its mail moved here), so the answer says what to do first instead (the
+      // dashboard's "Create forward@… and continue" did exactly that, then failed).
+      const none = error(await forward(), 422, 'FORWARD_SENDER_REQUIRED');
+      assert.equal(none.field, 'from');
+      assert.deepEqual(none.details, [notReceiving]);
+      assert.ok(none.message.startsWith(`Forwarding first emails the recipient a confirmation request from one of your permanent addresses, and this workspace has none yet. It needs an address at ${name}, which doesn’t receive mail yet. Turn receiving on at ${name} or a subdomain of it with POST /v1/inbound/domains/${ownDomain}/hosts`), none.message);
+
+      // Its built-in domain receives, but stopped sending when its own domain verified: no address there is offered either,
+      // and one it already has there isn't taken as the sender (the send would refuse it: OWN_DOMAIN_VERIFIED).
+      const parent = `${unique('fwdparent')}.email`, label = unique('fwdbox'), builtin = `${label}.${parent}`, builtinDomain = unique('dom');
+      Object.assign(runtime.config, { builtinDomain: parent, builtinScope: 'anyone' });
+      const builtinIdentity = { builtin: true, proven: true, mx: null, note: null, ses: { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES' } } };
+      await db.query('INSERT INTO builtin_domains(workspace_id,label,name) VALUES ($1,$2,$3)', [wid, label, builtin]);
+      await db.query(`INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,receiving_host,identity,receiving_proved_at,receiving_identity_at) VALUES ($1,$2,$1,'verified','active',$2,$3::jsonb,now(),now())`, [wid, builtin, JSON.stringify(builtinIdentity)]);
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [builtinDomain, wid, builtin, REGION]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status,catch_all,enabled_at) VALUES ($1,$2,$3,$4,$5,$4,'active','store',now())`, [unique('mdom'), wid, builtinDomain, builtin, REGION]);
+      assert.deepEqual(error(await forward(), 422, 'FORWARD_SENDER_REQUIRED').details, [notReceiving]);
+      const hello = ok(await local('POST', '/v1/inbound/addresses', { address: `hello@${builtin}` }), 201);
+      const unable = error(await forward(), 422, 'FORWARD_SENDER_REQUIRED');
+      assert.deepEqual(unable.details, [notReceiving]);
+      assert.ok(unable.message.startsWith('Forwarding first emails the recipient a confirmation request from one of your permanent addresses, and none of them can send it to team@outside.example.'), unable.message);
+
+      // Its own domain receives at a subdomain: the address is offered there.
+      const reply = `reply.${name}`;
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status,catch_all,enabled_at) VALUES ($1,$2,$3,$4,$5,$4,'active','store',now())`, [unique('mdom'), wid, ownDomain, reply, REGION]);
       const refused = error(await forward(), 422, 'FORWARD_SENDER_REQUIRED');
-      const suggested = `forward@${name}`;
-      assert.equal(refused.field, 'from');
+      const suggested = `forward@${reply}`;
       assert.deepEqual(refused.details, [{ suggestedFrom: suggested }]);
-      assert.ok(refused.message.startsWith('Forwarding first emails the recipient a confirmation request from one of your permanent addresses, and this workspace has none yet.'), refused.message);
       assert.ok(refused.message.includes(`POST /v1/inbound/addresses and {"address":"${suggested}"}, then send this again with "from":"${suggested}".`), refused.message);
       // A from that isn't one of its addresses says so, with the same fix.
       assert.match(error(await forward({ from: `nobody@${name}` }), 422, 'FORWARD_SENDER_REQUIRED').message, new RegExp(`^nobody@${name.replace(/\./g, '\\.')} isn’t one of this workspace’s addresses\\.`));
 
-      // The suggested call works as written, and the forward then goes out from the new address.
+      // The suggested call works as written and turns nothing on: every receiving host is as it was. The forward then goes
+      // out from the new address.
+      const before = await hosts();
       const box = ok(await local('POST', '/v1/inbound/addresses', { address: suggested }), 201);
+      assert.equal(box.receiving, undefined, 'Creating it turned no receiving host on.');
+      assert.deepEqual(await hosts(), before);
       const made = ok(await forward({ from: suggested }), 201);
       assert.equal(made.status, 'pending');
       assert.equal((await db.query('SELECT request_from FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [wid, 'team'])).rows[0].request_from, box.address);
@@ -28256,9 +28287,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         [{ action: 'endpoint.verification', actor_type: 'support', actor_id: conv, user_id: owner, internal: false, ticket_ref: conv, summary: { endpoint: 'team' } },
           { action: 'support.action', actor_type: 'support', actor_id: conv, user_id: owner, internal: true, ticket_ref: conv, summary: { kind: 'resend_forward', endpoint: 'team' } }]);
       assert.deepEqual((await db.query(`SELECT kind, details FROM support_events WHERE conversation_id = $1`, [conv])).rows, [{ kind: 'action', details: { kind: 'resend_forward', target: { type: 'endpoint', id: team.id }, endpoint: 'team' } }]);
+      // A workspace that took the old offer has an address at its own domain itself, where creating it turned receiving on
+      // and no MX points here: older than the one at the subdomain that receives, it isn't the default sender while that
+      // one exists (nor is hello@ at the built-in domain, which can't send).
+      const stray = ok(await local('POST', '/v1/inbound/addresses', { address: `forward@${name}` }), 201);
+      assert.equal(stray.receiving?.turnedOn, true);
+      await db.query("UPDATE mailboxes SET created_at=now()-interval '1 day' WHERE workspace_id=$1 AND id=$2", [wid, stray.id]);
+      ok(await local('POST', '/v1/endpoints', { type: 'forward', name: 'team-3', address: 'third@outside.example' }), 201);
+      assert.equal((await db.query('SELECT request_from FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [wid, 'team-3'])).rows[0].request_from, box.address);
       // The next suggestion skips the address now taken.
-      await db.query("UPDATE mailboxes SET kind='inbox' WHERE workspace_id=$1 AND id=$2", [wid, box.id]);
-      assert.deepEqual(error(await local('POST', '/v1/endpoints', { type: 'forward', name: 'team-2', address: 'other@outside.example' }), 422, 'FORWARD_SENDER_REQUIRED').details, [{ suggestedFrom: `forward-2@${name}` }]);
+      await db.query("UPDATE mailboxes SET kind='inbox' WHERE workspace_id=$1 AND id = ANY($2)", [wid, [box.id, stray.id]]);
+      assert.deepEqual(error(await local('POST', '/v1/endpoints', { type: 'forward', name: 'team-2', address: 'other@outside.example' }), 422, 'FORWARD_SENDER_REQUIRED').details, [{ suggestedFrom: `forward-2@${reply}` }]);
+      // The address builder's order: a new address first, then its forward, which asks from it (the only one that can).
+      const fresh = ok(await local('POST', '/v1/inbound/addresses', { address: `orders@${reply}` }), 201);
+      assert.equal(ok(await local('POST', '/v1/endpoints', { type: 'forward', name: 'orders-team', address: 'orders@outside.example' }), 201).status, 'pending');
+      assert.equal((await db.query('SELECT request_from FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [wid, 'orders-team'])).rows[0].request_from, fresh.address);
+
+      // With no domain of its own that sends, the built-in domain sends again, to members only while that is its scope: an
+      // address there is offered for a member's sign-in address, and for anyone else the answer says why none can be.
+      await db.query("UPDATE mailboxes SET kind='inbox' WHERE workspace_id=$1 AND id = ANY($2)", [wid, [fresh.id, hello.id]]);
+      await db.query("UPDATE domain_claims SET sending_state='failed' WHERE workspace_id=$1 AND name=$2", [wid, name]);
+      runtime.config.builtinScope = 'members';
+      assert.deepEqual(error(await local('POST', '/v1/endpoints', { type: 'forward', name: 'outsider', address: 'stranger@outside.example' }), 422, 'FORWARD_SENDER_REQUIRED').details, [{ reason: 'builtin_members_only' }]);
+      assert.deepEqual(error(await local('POST', '/v1/endpoints', { type: 'forward', name: 'member', address: AUTH_EMAIL }), 422, 'FORWARD_SENDER_REQUIRED').details, [{ suggestedFrom: `forward@${builtin}` }]);
+      runtime.config.builtinScope = 'anyone';
     });
   });
 
