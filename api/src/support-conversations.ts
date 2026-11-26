@@ -282,6 +282,8 @@ async function mailboxStep(c: Ctx, error: unknown, conversationId: string, messa
 }
 /** Sign-in links one email's Continue page may have sent (POST …/sign-in-link), a day: per conversation, and per address over every conversation. */
 export const SUPPORT_LINKS = { perConversation: 3, perAddress: 5 } as const;
+/** "Answer me by email instead" requests per conversation and per network: auth_state_slots' 8 in 11 minutes. */
+const ANSWER_SLOTS = 8;
 
 /** What releaseGeneralAnswer did. */
 export type GeneralAnswerRelease = 'released' | 'already_answered' | 'already_released' | 'not_waiting';
@@ -588,6 +590,47 @@ export function registerSupportConversations(app: App) {
     await new Promise(resolve => setTimeout(resolve, Math.max(0, answerAt - Date.now())));
     c.header('Cache-Control', 'no-store');
     return c.json({ requested: true as const, address: await shownAddress(c, address) }, 202);
+  });
+
+  const AnsweredByEmail = z.object({
+    outcome: z.enum(['released', 'already_released', 'already_answered']).describe('released: support answers by email now; already_released: it was asked before, nothing new; already_answered: support already answered that email, nothing new.'),
+    address: z.string().describe('Where the answer goes: the address the email came from, as getSupportConversationClaim’s 403 shows it.'),
+  });
+  app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: [], method: 'post', path: '/v1/support-conversations/{id}/answer-by-email', operationId: 'answerSupportConversationByEmail',
+    description: `"Answer me by email instead", on one email's Continue page: whoever holds the link support emailed to the conversation's address (its conversation and message IDs) asks to be answered by email, signed in as anyone or not at all, from the dashboard. Support then answers in general, with no account access, at the stored address in the same thread, once per conversation (releaseGeneralAnswer). Nothing is attached to any account and nothing of the email is shown; the body names only the message, and anything else in it is ignored. Never on GET. The answer comes at a fixed time and is the same whatever account the address has; an email that isn't waiting (unknown, claimed, closed, or older than ${SIGNIN_DAYS} days) gets 404. At most ${ANSWER_SLOTS} requests per conversation and per network in 11 minutes, past which 429 ANSWER_BY_EMAIL_LIMIT.`,
+    request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the Continue page is for.') })) },
+    responses: { 200: response(AnsweredByEmail), ...errors } }), async c => {
+    if (!c.env.config.multiTenant) return notFound('Endpoint');
+    if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use the dashboard.', { credential: 'dashboard' });
+    const [{ LINK_ANSWER_MS, requireDashboardOrigin }, { wakeSupport }] = await Promise.all([import('./account-login.js'), import('./support-inbox.js')]);
+    requireDashboardOrigin(c.env, c.req.raw);
+    const conversationId = c.req.valid('param').id, messageId = c.req.valid('json').messageId, answerAt = Date.now() + LINK_ANSWER_MS;
+    // Per network and per conversation (as many as pending sign-ins, in 11 minutes), before anything is looked up.
+    for (const peer of [`answer-by-email:${c.req.header(clientIpHeader) ?? 'unknown'}`, `answer-by-email:${conversationId}`]) {
+      const { rows: [slot] } = await c.env.db.execute<{ ok: boolean }>(sql`SELECT reserve_auth_state(${await digest(peer)}) AS ok`);
+      if (!slot?.ok) throw new ApiError(429, 'ANSWER_BY_EMAIL_LIMIT', 'Too many requests to answer by email. Try again in a few minutes.');
+    }
+    // Nobody is acting as a person here: the trail names the request, internal, with no person.
+    const context = { ...auditContext(c), actor: { type: 'system' as const, id: null, via: 'dashboard' as const, label: 'Answer me by email instead' } };
+    const answered = await c.env.db.transaction(async tx => {
+      const outcome = await releaseGeneralAnswer(tx, conversationId, messageId);
+      if (outcome === 'not_waiting') return null;
+      const { rows: [row] } = await tx.execute<{ address: string }>(sql`SELECT address FROM support_email_signins WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+      // A trail row needs a workspace or a person: it is the support address's workspace's (Nightmail's own), internal.
+      if (outcome === 'released') await tx.execute(auditInsert(context, { action: 'support.answer_by_email', workspaceId: sql`w.id`, target: { type: 'support_conversation', id: conversationId }, details: { message: messageId }, ticketRef: conversationId, internal: true },
+        { from: sql`(SELECT coalesce((SELECT t.workspace_id FROM support_conversations s JOIN mail_threads t ON t.id = s.thread_id WHERE s.id = ${conversationId}), ${c.env.config.platformDomainWorkspace ?? null}::text) AS id) w`, where: sql`w.id IS NOT NULL` }));
+      return { outcome, address: row!.address };
+    });
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, answerAt - Date.now())));
+    if (!answered) return notFound('Support conversation');
+    // Committed: wake the support platform with the conversation's ID, as a claim does (its sweep finds the release anyway).
+    if (answered.outcome === 'released') {
+      if (c.env.deferNudge) c.env.deferNudge(async () => { await wakeSupport(c.env.config, conversationId); });
+      else await wakeSupport(c.env.config, conversationId);
+    }
+    log('info', { code: 'SUPPORT_ANSWER_BY_EMAIL', conversationId, outcome: answered.outcome });
+    c.header('Cache-Control', 'no-store');
+    return c.json({ outcome: answered.outcome, address: await shownAddress(c, answered.address) }, 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/content-access', operationId: 'shareSupportConversationContent',
