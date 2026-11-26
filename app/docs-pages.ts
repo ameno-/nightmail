@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { Plugin } from 'vite'
 import { productName, publicOrigin } from '../api/src/brand.ts'
+import { RENAMED_OPERATIONS } from '../api/src/site-index.ts'
 import { GUIDE_NAMES } from './src/features/docs/guide-names.ts'
 import { docsTitle, operationDescription, operationEntries } from './src/features/docs/meta.ts'
 
@@ -47,6 +48,8 @@ export function docsPages(): Plugin {
         set(/(<link rel="alternate" type="text\/markdown" href="[^"]*" title=")[^"]*/, attr(`${page.title}, in Markdown`))
         this.emitFile({ type: 'asset', fileName: `${page.path.slice(1)}.html`, source: html })
       }
+      // An old name redirects to its new page (site-index.ts): the page must exist, and the old name must be no operation's.
+      for (const [old, now] of Object.entries(RENAMED_OPERATIONS)) if (!pages.some(page => page.path === `/docs/api/${now}`) || pages.some(page => page.path === `/docs/api/${old}`)) this.error(`RENAMED_OPERATIONS (api/src/site-index.ts) sends ${old} to ${now}, which has no reference page, or ${old} is an operation again.`)
       if (!pages.some(page => page.path === '/docs/api/sendEmail')) this.error(`The docs pages have no sendEmail: api/openapi.json isn't ${productName}'s API definition.`)
     } },
   }
