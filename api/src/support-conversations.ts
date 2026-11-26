@@ -1,10 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, dashboardSession, denied, errors, json, log, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, denied, digest, errors, json, log, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
 import { auditContext, auditInsert, operatorContext, recordAudit, requireOperator } from './audit.js';
 import { CONVERSATION_ID, verifyHandoffToken, type RegisteredConversation } from './support-platform.js';
 import type { MailHeader, Verdicts } from './db/mailbox.js';
-import { loopHeaderNames, productName } from './brand.js';
+import { clientIpHeader, loopHeaderNames, productName } from './brand.js';
 import { mailboxProven } from './account-policy.js';
 
 // Support conversations (api/README.md "Support integration"). The support platform registers each chat or email
@@ -249,6 +249,42 @@ async function signinFor(db: DbExecutor, conversationId: string, messageId: stri
   return target;
 }
 
+/** The address one email's sign-in waits for, while it can still be confirmed (signinFor's checks but the person's), or null. */
+async function waitingAddress(db: DbExecutor, conversationId: string, messageId: string) {
+  const { rows: [row] } = await db.execute<{ address: string }>(sql`SELECT si.address FROM support_conversations s
+    JOIN support_email_signins si ON si.conversation_id = s.id AND si.message_id = ${messageId}
+    WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND si.created_at > now() - make_interval(days => ${SIGNIN_DAYS}::int)`);
+  return row?.address ?? null;
+}
+/** An address as it is shown to someone who hasn't proved it: its first character and its domain's, and the last label (r•••@e•••.com). */
+export function maskedAddress(address: string) {
+  const at = address.lastIndexOf('@'), domain = address.slice(at + 1), dot = domain.lastIndexOf('.'), first = (part: string) => [...part][0] ?? '';
+  return `${first(address.slice(0, at))}•••@${first(domain)}•••${dot > 0 ? domain.slice(dot) : ''}`;
+}
+/** The address as this session may see it: whole when its own sign-in proved that mailbox, else masked. */
+async function shownAddress(c: Ctx, address: string) {
+  const { accountSessionMailbox } = await import('./account-login.js');
+  return (await accountSessionMailbox(c.env, c.req.raw.headers))?.toLowerCase() === address.toLowerCase() ? address : maskedAddress(address);
+}
+/**
+ * A session whose sign-in proves no mailbox (403 MAILBOX_SIGN_IN_REQUIRED) asks about an email that still waits for its
+ * sender: the refusal says the way through, in error.details[0] (address: where the email came from, as shownAddress shows
+ * it; nextStep: the request that emails a sign-in link there). It stays 403 and not retryable: asking again as it is gets
+ * the same. For an email that waits for nobody it is the plain 403.
+ */
+async function mailboxStep(c: Ctx, error: unknown, conversationId: string, messageId: string) {
+  if (!(error instanceof ApiError) || error.code !== 'MAILBOX_SIGN_IN_REQUIRED') return error;
+  const address = await waitingAddress(c.env.db, conversationId, messageId);
+  error.retryable = false;
+  if (address) error.details = [{ address: await shownAddress(c, address),
+    nextStep: { operationId: 'sendSupportSignInLink', method: 'POST', path: `/v1/support-conversations/${conversationId}/sign-in-link`, body: { messageId } } }];
+  return error;
+}
+/** Sign-in links one email's Continue page may have sent (POST …/sign-in-link), a day: per conversation, and per address over every conversation. */
+export const SUPPORT_LINKS = { perConversation: 3, perAddress: 5 } as const;
+/** "Answer me by email instead" requests per conversation and per network: auth_state_slots' 8 in 11 minutes. */
+const ANSWER_SLOTS = 8;
+
 /** What releaseGeneralAnswer did. */
 export type GeneralAnswerRelease = 'released' | 'already_answered' | 'already_released' | 'not_waiting';
 /** How long a release stays on the support platform's due list (GET /v1/operator/support/general-answers) unanswered. */
@@ -449,14 +485,14 @@ export function registerSupportConversations(app: App) {
     receivedAt: z.string().nullable().describe('When support received it.') });
   const MessageQuery = z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the sign-in link was for.') });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'get', path: '/v1/support-conversations/{id}/claim', operationId: 'getSupportConversationClaim',
-    description: `The email a sign-in link is for, before you confirm it (its subject, a plain-text excerpt and when it arrived), with the same checks as confirming it: only the person whose verified email sent it. Anyone else gets 404.`,
+    description: `The email a sign-in link is for, before you confirm it (its subject, a plain-text excerpt and when it arrived), with the same checks as confirming it: only the person whose verified email sent it. Anyone else gets 404. A session whose sign-in proves no mailbox gets 403 MAILBOX_SIGN_IN_REQUIRED (not retryable), and while the email waits, error.details[0] holds address (masked) and nextStep: sendSupportSignInLink.`,
     request: { params: ConversationParam, query: MessageQuery }, responses: { 200: response(Pending), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     // Reads like reviewing an invitation: the session's sign-in must prove the account's address (no Origin on a GET).
     const { verifiedDashboardUser } = await import('./dashboard-auth.js');
-    const user = await verifiedDashboardUser(c.env, c.req.raw.headers, true);
     const conversationId = c.req.valid('param').id, messageId = c.req.valid('query').messageId;
+    const user = await verifiedDashboardUser(c.env, c.req.raw.headers, true).catch(async error => { throw await mailboxStep(c, error, conversationId, messageId); });
     const target = await signinFor(c.env.db, conversationId, messageId, user, false);
     if (!target) return notFound('Support conversation');
     const preview = target.text ? target.text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500) || null : null;
@@ -464,7 +500,7 @@ export function registerSupportConversations(app: App) {
     return c.json({ id: conversationId, messageId, subject: target.subject?.slice(0, 200) ?? null, preview, receivedAt: target.received_at ? new Date(target.received_at).toISOString() : null }, 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/claim', operationId: 'claimSupportConversation',
-    description: `Confirm, signed in, that you wrote one email ${productName} support couldn’t verify: when your verified email is the address it came from, support answers that email from your account, once (when it already sent a general answer, only what needed your account), and the conversation is yours. Anyone else gets 404.`,
+    description: `Confirm, signed in, that you wrote one email ${productName} support couldn’t verify: when your verified email is the address it came from, support answers that email from your account, once (when it already sent a general answer, only what needed your account), and the conversation is yours. Anyone else gets 404. A session whose sign-in proves no mailbox gets 403 MAILBOX_SIGN_IN_REQUIRED with the same details as getSupportConversationClaim.`,
     request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the sign-in link was for.') }).strict()) },
     responses: { 200: response(Claimed), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -472,8 +508,8 @@ export function registerSupportConversations(app: App) {
     // workspace, from the dashboard's own origin. Never a bearer credential (refused inside) or the support platform.
     if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     const { invitationRecipient } = await import('./dashboard-auth.js');
-    const user = await invitationRecipient(c.env, c.req.raw), userId = user.userId;
     const conversationId = c.req.valid('param').id, messageId = c.req.valid('json').messageId;
+    const user = await invitationRecipient(c.env, c.req.raw).catch(async error => { throw await mailboxStep(c, error, conversationId, messageId); }), userId = user.userId;
     const context = { ...auditContext(c), actor: { type: 'member' as const, id: userId, userId, via: 'dashboard' as const } };
     const claimed = await c.env.db.transaction(async tx => {
       await admit(tx, userId);
@@ -501,6 +537,100 @@ export function registerSupportConversations(app: App) {
     if (c.env.deferNudge) c.env.deferNudge(async () => { await wakeSupport(c.env.config, conversationId); });
     else await wakeSupport(c.env.config, conversationId);
     return c.json(claimed, 200);
+  });
+
+  const LinkRequested = z.object({ requested: z.literal(true), address: z.string().describe('Where the link goes, as getSupportConversationClaim’s 403 shows it.') });
+  app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/sign-in-link', operationId: 'sendSupportSignInLink',
+    description: `The way through 403 MAILBOX_SIGN_IN_REQUIRED on one email's Continue page: emails a sign-in link to the address that email came from (never another: the body names only the message, and anything else in it is ignored). Following the link and signing in with the account for that address proves its mailbox, and the page opens again to confirm the email. Signed in, from the dashboard. The answer is the same 202 whether or not a link went out (one is made and sent only when an account has that address; otherwise nothing is); at most ${SUPPORT_LINKS.perConversation} a day per conversation and ${SUPPORT_LINKS.perAddress} per address, and as many as pending sign-ins per network, past which it is 429. An email that waits for nobody gets 404.`,
+    request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the Continue page is for.') })) },
+    responses: { 202: response(LinkRequested), ...errors } }), async c => {
+    if (!c.env.config.multiTenant) return notFound('Endpoint');
+    if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
+    // Someone signed in, with any sign-in (it is the one that can't confirm), from the dashboard's own origin, who holds
+    // this email's link. Never a bearer credential.
+    const [{ LINK_ANSWER_MS, requireDashboardOrigin }, { verifiedDashboardUser }] = await Promise.all([import('./account-login.js'), import('./dashboard-auth.js')]);
+    requireDashboardOrigin(c.env, c.req.raw);
+    await verifiedDashboardUser(c.env, c.req.raw.headers);
+    // Every network's allowance of sign-in links (account-login.ts /api/auth/sign-in/link), before anything is looked up.
+    const slots = await c.env.db.execute(sql`SELECT reserve_auth_state(${await digest(`signin-link:${c.req.header(clientIpHeader) ?? 'unknown'}`)}) AS ok`);
+    if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
+    const conversationId = c.req.valid('param').id, messageId = c.req.valid('json').messageId, answerAt = Date.now() + LINK_ANSWER_MS;
+    const { LINK_MINUTES, newLinkId } = await import('./signups.js'), { signinLink } = await import('./account-notices.js');
+    const address = await c.env.db.transaction(async tx => {
+      const { rows: [target] } = await tx.execute<{ address: string; user_id: string | null; signed_by: string | null }>(sql`SELECT si.address, s.user_id, si.user_id AS signed_by
+        FROM support_conversations s JOIN support_email_signins si ON si.conversation_id = s.id AND si.message_id = ${messageId}
+        WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND si.created_at > now() - make_interval(days => ${SIGNIN_DAYS}::int)`);
+      if (!target) return null;
+      const email = target.address.toLowerCase();
+      // One request per address at a time (the waitlist's links take the same lock), so both counts hold. Every request
+      // counts, whether or not a link is made, so a refusal never says whether an account has the address.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${email},46400))`);
+      const today = sql`link_window_at > now() - interval '1 day'`;
+      const { rows: [asked] } = await tx.execute<{ conversation: number; address: number }>(sql`SELECT
+        (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE conversation_id = ${conversationId} AND ${today}) AS conversation,
+        (SELECT coalesce(sum(link_requests), 0)::int FROM support_email_signins WHERE address = ${target.address} AND ${today}) AS address`);
+      if (asked!.conversation >= SUPPORT_LINKS.perConversation || asked!.address >= SUPPORT_LINKS.perAddress)
+        throw new ApiError(429, 'SIGN_IN_LINK_LIMIT', 'Too many sign-in links were asked for today. Use one already sent, or try again tomorrow.');
+      await tx.execute(sql`UPDATE support_email_signins SET link_requests = CASE WHEN ${today} THEN link_requests + 1 ELSE 1 END,
+        link_window_at = CASE WHEN ${today} THEN link_window_at ELSE now() END WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+      // A link, and its email, only for an account's verified address that can confirm this email (nobody else bound it):
+      // a link to anyone else would prove nothing. Otherwise nothing is made or sent, and the answer is the same.
+      const workspaceId = c.env.config.platformDomainWorkspace, id = newLinkId();
+      const { rows: [link] } = workspaceId ? await tx.execute<{ id: string }>(sql`INSERT INTO nightmail_signin_links(id, email, conversation_id, message_id, expires_at)
+        SELECT ${id}, ${email}, ${conversationId}, ${messageId}, now() + make_interval(mins => ${LINK_MINUTES}::int)
+        WHERE EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email) = ${email}
+          AND (${target.user_id}::text IS NULL OR u.id = ${target.user_id}) AND (${target.signed_by}::text IS NULL OR u.id = ${target.signed_by}))
+        RETURNING id`) : { rows: [] };
+      if (link) await tx.execute(signinLink(workspaceId!, link.id));
+      return target.address;
+    });
+    if (!address) return notFound('Support conversation');
+    log('info', { code: 'SUPPORT_SIGNIN_LINK_REQUESTED', conversationId });
+    // A link and its email take a few writes more than none: the answer waits until a fixed time after the request.
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, answerAt - Date.now())));
+    c.header('Cache-Control', 'no-store');
+    return c.json({ requested: true as const, address: await shownAddress(c, address) }, 202);
+  });
+
+  const AnsweredByEmail = z.object({
+    outcome: z.enum(['released', 'already_released', 'already_answered']).describe('released: support answers by email now; already_released: it was asked before, nothing new; already_answered: support already answered that email, nothing new.'),
+    address: z.string().describe('Where the answer goes: the address the email came from, as getSupportConversationClaim’s 403 shows it.'),
+  });
+  app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: [], method: 'post', path: '/v1/support-conversations/{id}/answer-by-email', operationId: 'answerSupportConversationByEmail',
+    description: `"Answer me by email instead", on one email's Continue page: whoever holds the link support emailed to the conversation's address (its conversation and message IDs) asks to be answered by email, signed in as anyone or not at all, from the dashboard. Support then answers in general, with no account access, at the stored address in the same thread, once per conversation (releaseGeneralAnswer). Nothing is attached to any account and nothing of the email is shown; the body names only the message, and anything else in it is ignored. Never on GET. The answer comes at a fixed time and is the same whatever account the address has; an email that isn't waiting (unknown, claimed, closed, or older than ${SIGNIN_DAYS} days) gets 404. At most ${ANSWER_SLOTS} requests per conversation and per network in 11 minutes, past which 429 ANSWER_BY_EMAIL_LIMIT.`,
+    request: { params: ConversationParam, body: json(z.object({ messageId: z.string().regex(/^msg_[0-9a-f]{32}$/).describe('The email the Continue page is for.') })) },
+    responses: { 200: response(AnsweredByEmail), ...errors } }), async c => {
+    if (!c.env.config.multiTenant) return notFound('Endpoint');
+    if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use the dashboard.', { credential: 'dashboard' });
+    const [{ LINK_ANSWER_MS, requireDashboardOrigin }, { wakeSupport }] = await Promise.all([import('./account-login.js'), import('./support-inbox.js')]);
+    requireDashboardOrigin(c.env, c.req.raw);
+    const conversationId = c.req.valid('param').id, messageId = c.req.valid('json').messageId, answerAt = Date.now() + LINK_ANSWER_MS;
+    // Per network and per conversation (as many as pending sign-ins, in 11 minutes), before anything is looked up.
+    for (const peer of [`answer-by-email:${c.req.header(clientIpHeader) ?? 'unknown'}`, `answer-by-email:${conversationId}`]) {
+      const { rows: [slot] } = await c.env.db.execute<{ ok: boolean }>(sql`SELECT reserve_auth_state(${await digest(peer)}) AS ok`);
+      if (!slot?.ok) throw new ApiError(429, 'ANSWER_BY_EMAIL_LIMIT', 'Too many requests to answer by email. Try again in a few minutes.');
+    }
+    // Nobody is acting as a person here: the trail names the request, internal, with no person.
+    const context = { ...auditContext(c), actor: { type: 'system' as const, id: null, via: 'dashboard' as const, label: 'Answer me by email instead' } };
+    const answered = await c.env.db.transaction(async tx => {
+      const outcome = await releaseGeneralAnswer(tx, conversationId, messageId);
+      if (outcome === 'not_waiting') return null;
+      const { rows: [row] } = await tx.execute<{ address: string }>(sql`SELECT address FROM support_email_signins WHERE conversation_id = ${conversationId} AND message_id = ${messageId}`);
+      // A trail row needs a workspace or a person: it is the support address's workspace's (Nightmail's own), internal.
+      if (outcome === 'released') await tx.execute(auditInsert(context, { action: 'support.answer_by_email', workspaceId: sql`w.id`, target: { type: 'support_conversation', id: conversationId }, details: { message: messageId }, ticketRef: conversationId, internal: true },
+        { from: sql`(SELECT coalesce((SELECT t.workspace_id FROM support_conversations s JOIN mail_threads t ON t.id = s.thread_id WHERE s.id = ${conversationId}), ${c.env.config.platformDomainWorkspace ?? null}::text) AS id) w`, where: sql`w.id IS NOT NULL` }));
+      return { outcome, address: row!.address };
+    });
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, answerAt - Date.now())));
+    if (!answered) return notFound('Support conversation');
+    // Committed: wake the support platform with the conversation's ID, as a claim does (its sweep finds the release anyway).
+    if (answered.outcome === 'released') {
+      if (c.env.deferNudge) c.env.deferNudge(async () => { await wakeSupport(c.env.config, conversationId); });
+      else await wakeSupport(c.env.config, conversationId);
+    }
+    log('info', { code: 'SUPPORT_ANSWER_BY_EMAIL', conversationId, outcome: answered.outcome });
+    c.header('Cache-Control', 'no-store');
+    return c.json({ outcome: answered.outcome, address: await shownAddress(c, answered.address) }, 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/content-access', operationId: 'shareSupportConversationContent',

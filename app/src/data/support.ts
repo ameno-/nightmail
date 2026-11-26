@@ -23,6 +23,12 @@ export const supportApi = {
   pending: (conversationId: string, messageId: string) => request<SupportPendingEmail>(`/v1/support-conversations/${encodeURIComponent(conversationId)}/claim?messageId=${encodeURIComponent(messageId)}`),
   /** Confirm one emailed support request signed in: Nightmail answers it when this person's verified address wrote it. */
   claim: (conversationId: string, messageId: string) => request<{ id: string; messageId: string; mode: string }>(`/v1/support-conversations/${encodeURIComponent(conversationId)}/claim`, { method: 'POST', body: { messageId } }),
+  /** A sign-in link to the address that email came from, for a sign-in that proves no mailbox. The answer is the same
+   *  whether or not one went out; address is where it goes, masked unless this session's sign-in proved it. */
+  signInLink: (conversationId: string, messageId: string) => request<{ requested: true; address: string }>(`/v1/support-conversations/${encodeURIComponent(conversationId)}/sign-in-link`, { method: 'POST', body: { messageId } }),
+  /** A general answer by email, with no account access, to the address that email came from, once: whoever holds the
+   *  link may ask, signed in or not. address as signInLink shows it. */
+  answerByEmail: (conversationId: string, messageId: string) => request<{ outcome: 'released' | 'already_released' | 'already_answered'; address: string }>(`/v1/support-conversations/${encodeURIComponent(conversationId)}/answer-by-email`, { method: 'POST', body: { messageId } }),
 }
 
 /** A change support proposed to the signed-in person (api/src/support-actions.ts): its sentence is
