@@ -11,7 +11,7 @@ import { renderLegal } from './legal-markdown.ts'
 import { homeFirstFiles, homeShell } from './home-shell.ts'
 import { televisionFirstFiles, televisionHome } from './home-tv.ts'
 import { priceFirstFiles, pricePages, verdictApp } from './price-pages.ts'
-import { docsPages } from './docs-pages.ts'
+import { sitePages } from './site-pages.ts'
 import { VERDICT_PAGES } from './src/features/pricing/page/switch.ts'
 import * as televisionWords from './src/features/home/tv/readable.ts'
 import { headerPrefix, publicOrigin as hostedOrigin } from '../api/src/brand.ts'
@@ -123,7 +123,7 @@ const publicBeacon: Plugin = {
   },
 }
 
-// Every page made from index.html (home.html, the price pages, the docs pages) keeps each script index.html carries inline byte for
+// Every page made from index.html (home.html, the price pages, the docs and legal pages) keeps each script index.html carries inline byte for
 // byte: the CSP allows an inline script by the hash of its exact bytes, so one rewritten on the way would be refused.
 const inlineScriptsKept = (): Plugin => ({
   name: 'nightmail:inline-scripts-kept', apply: 'build', enforce: 'post',
@@ -148,7 +148,7 @@ export default defineConfig(({ command, mode }) => {
     define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha), 'import.meta.env.VITE_DESIGN_SHEET': JSON.stringify(process.env.VITE_DESIGN_SHEET ?? '') },
     // (The homepage's station kit is inlined whatever its size: it is one lazily loaded stylesheet, features/home/machines.tsx.)
     build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)) } } },
-    plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(tv ? televisionFirstFiles : homeFirstFiles), publicOrigin, brandedBootScript(), publicBeacon, ...tv ? televisionHome() : [homeShell()], pricePages(tv ? televisionWords : undefined, VERDICT_PAGES), ...VERDICT_PAGES ? [verdictApp()] : [], docsPages(), inlineScriptsKept()],
+    plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(tv ? televisionFirstFiles : homeFirstFiles), publicOrigin, brandedBootScript(), publicBeacon, ...tv ? televisionHome() : [homeShell()], pricePages(tv ? televisionWords : undefined, VERDICT_PAGES), ...VERDICT_PAGES ? [verdictApp()] : [], sitePages(), inlineScriptsKept()],
     server: {
       host: '127.0.0.1', port: 5173, strictPort: true,
       proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json', '/internal'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),

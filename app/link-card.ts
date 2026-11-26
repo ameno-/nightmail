@@ -263,6 +263,8 @@ export type CardWords = { name: string; lines: [string] | [string, string]; capt
 export type Card = { file: string; alt: string; type: 'image/png'; width: number; height: number; source: Buffer }
 
 const made = new Map<string, Card>()
+/** The alt reads as sentences: a title's lines are one, and its caption another ("Terms of Service. Updated …"). */
+const sentence = (text: string) => /[.!?:]$/.test(text) ? text : `${text}.`
 /** The card for these words, drawn once a build: its file (under the build's root), its alt text (the words), its type
  *  and size, and its bytes. Throws when the words can't make one. */
 export function linkCard(words: CardWords): Card {
@@ -288,7 +290,7 @@ export function linkCard(words: CardWords): Card {
   const mark = new Layer(), k = GRID.mark.cap / WORDMARK.h
   for (const shape of svgPath(WORDMARK.d, (x, y) => [GRID.left + x * k, GRID.mark.top + y * k])) mark.path(shape)
   mark.paint(rgb, rgbOf(THEME.soft), true)
-  const source = png(rgb), card: Card = { file: `og/${words.name}-${createHash('sha256').update(rgb).digest('hex').slice(0, 10)}.png`, alt: [...words.lines, words.caption].join(' '), type: 'image/png', width: W, height: H, source }
+  const source = png(rgb), card: Card = { file: `og/${words.name}-${createHash('sha256').update(rgb).digest('hex').slice(0, 10)}.png`, alt: [words.lines.join(' '), words.caption].map(sentence).join(' '), type: 'image/png', width: W, height: H, source }
   made.set(key, card)
   return card
 }
