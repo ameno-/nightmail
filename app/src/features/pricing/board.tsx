@@ -17,7 +17,7 @@ import { play, wake } from './sound'
 import { OFFERS } from './compare'
 import { ownPages } from './docs/registry'
 import { comparisonQuestions } from './questions'
-import { claim, formatCount, listOf, money, nightmail, nightmailBill, offerSize, sourcesOf, theirPrice, ucOf, UNITS, usageLines, type Comparison, type Usage } from './prices'
+import { claim, formatCount, listOf, money, nightmail, nightmailBill, offerSize, shownSources, sourcesOf, theirPrice, ucOf, UNITS, usageLines, type Comparison, type Usage } from './prices'
 
 // The price pages' hall (Hall): a dark wall under one pendant lamp, with the board and its console hung in it, the same
 // for the three pages, so moving between them changes the board, not the room (scene.tsx; calculator.tsx is the
@@ -243,7 +243,7 @@ export function BoardEnd({ comparison: c }: { comparison?: Comparison | null }) 
         <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} sent and {formatCount(nightmail.freeReceived)} received free a month.</p>
         <Terms floor={null} />
         <ul className="price-facts">{c.rows.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
-        <p className="price-note cb-read"><ReadOn sources={sourcesOf(c)} /></p>
+        <p className="price-note cb-read"><ReadOn sources={shownSources(sourcesOf(c), c.offer)} /></p>
         {ownPages(c.slug).map(path => <p key={path} className="price-note cb-read">Every {c.vendor} plan, and what a month costs at each size: <Link to={path}>{c.vendor} pricing</Link>.</p>)}
       </> : <p className="price-note">Monthly billing, list prices before tax, no promotions: each vendor’s cheapest plan that holds your numbers. <CheckedPages offers={OFFERS} />.</p>}
       <p className="price-note">Product names belong to their owners and only identify their products. Nightmail isn’t affiliated with them.</p>

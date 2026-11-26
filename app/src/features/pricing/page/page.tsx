@@ -90,7 +90,6 @@ function Checked({ sources }: { sources: Source[] }) {
 }
 
 export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNode; start?: Start }) {
-  const comparisons = doc.related.length > 0 && doc.related.every(page => page.path.startsWith('/compare/'))
   return <div className="pp" data-set={set ? '' : undefined}>
     <Crumbs doc={doc} />
     {set}
@@ -112,7 +111,7 @@ export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNo
         {doc.questions.map(item => <details key={item.id} className="pp-qa"><summary><h3>{item.question}</h3></summary><p>{item.answer}</p></details>)}
       </section>}
       {doc.related.length > 0 && <nav className="pp-section" aria-labelledby="related-title">
-        <h2 id="related-title" className="pp-h2">{comparisons ? 'More comparisons' : 'More'}</h2>
+        <h2 id="related-title" className="pp-h2">More</h2>
         <ul className="pp-more">{doc.related.map(page => <li key={page.path}><a href={page.path}>{page.title}</a></li>)}</ul>
       </nav>}
       <footer className="pp-print">

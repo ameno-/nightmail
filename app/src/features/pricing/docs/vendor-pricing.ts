@@ -1,6 +1,6 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { productName } from '../../../../../api/src/brand.ts'
-import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, quote, sourcesOf, ucOf, type Comparison, type Plan, type Source, type Tier } from '../prices.ts'
+import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, quote, shownSources, sourceNote, sourcesOf, ucOf, type Comparison, type Plan, type Source, type Tier } from '../prices.ts'
 import { billAt, middle, perSize, priceTable, verdictHeading, verdictOf } from '../page/comparison.ts'
 import { factsSection, rowLines } from '../page/facts.ts'
 import { comparisonQuestions } from '../questions.ts'
@@ -44,13 +44,16 @@ function readOn(read: { source: Source; what: string }[]): Text {
   }
   const list = [...pages.values()], days = [...new Set(list.map(page => page.source.checked))]
   return [days.length === 1 ? `Read ${dayOf(days[0]!)}: ` : 'Read ', ...list.flatMap(({ source, what }, i) => [
-    i === 0 ? '' : i === list.length - 1 ? '; and ' : '; ', `${listOf([...what])} on `, link(source, label(source.url)), days.length === 1 ? '' : `, ${dayOf(source.checked)}`,
+    i === 0 ? '' : i === list.length - 1 ? '; and ' : '; ', `${listOf([...what])} on `, link(source, label(source.url)), sourceNote(source.url), days.length === 1 ? '' : `, ${dayOf(source.checked)}`,
   ]), '.']
 }
 
 export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendor: string }[]): Doc {
   const { offer, model: m } = c, vendor = offer.vendor, day = dayOf(offer.checked), contacts = offer.unit === 'contacts'
   const all: Priced[] = offer.plans.flatMap(plan => plan.tiers.map(tier => ({ plan, tier })))
+  // Priced by contacts, a plan sells each contact count once; a plan that repeats one across its tiers (Brevo: 500,000
+  // contacts from 20,000 to 500,000 emails) prices by emails, and its contacts are a limit.
+  const byEmails = contacts && offer.plans.some(plan => plan.tiers.some((tier, i) => i > 0 && tier.size === plan.tiers[i - 1]!.size))
   const paid = all.filter(p => p.tier.cents > 0), free = all.filter(p => p.tier.cents === 0)
   // A size in the vendor's own unit, and a usage as the page prices it: the assumption first, so no figure needs working out.
   const count = (n: number) => `${formatCount(n)} ${offer.unit}`, size = (n: number) => offer.unit === 'emails' ? `${count(n)} a month` : count(n)
@@ -68,6 +71,8 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
   const freeDetails = (p: Priced) => [contacts ? `up to ${size(p.tier.size)}` : size(p.tier.size), ...p.tier.sends !== undefined && contacts ? [`${formatCount(p.tier.sends)} emails a month`] : [], ...p.plan.note ? [p.plan.note] : []]
   const freePlans = free.map(p => ({ text: `${vendor}’s ${p.plan.name} plan costs $0 for ${freeDetails(p).join(', ')}.`, source: p.tier.source }))
   const freeSaid = c.rows.flatMap(row => row.source && row.short === 'Free every month' ? [{ text: row.note ?? row.text, source: row.source }] : [])
+    // (Said once: a quote that repeats a free plan's own limit, Brevo's "300 emails a day", is left out.)
+    .filter(fact => !free.some(p => p.plan.note && fact.text.includes(p.plan.note)))
   const freeFacts = [...freePlans, ...freeSaid]
 
   // Each size the vendor prices (the comparison's steps: the pre-merge check proves the vendor prices each one), with both
@@ -96,6 +101,19 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
 
   // Two tables, each with its note under it in a line or two: what its figures assume, and where and when they were read.
   const capped = offer.plans.filter(plan => plan.max)
+  // A ladder sold by the unit (Mandrill: each number of blocks a plan of its own, at its band's rate) reads as its bands:
+  // one-tier plans in a row, read from the same quote at the same price per email, are one row from the first to the last.
+  const seatsOf = (plan: Plan) => plan.seats ? plan.seats.count === null ? 'Unlimited' : formatCount(plan.seats.count) : '—'
+  const bands: { first: Priced; last: Priced }[] = []
+  for (const p of all) {
+    const band = bands.at(-1), low = band?.first.tier, high = band?.last.tier
+    const alike = band && low && high && p.plan.tiers.length === 1 && band.last.plan.tiers.length === 1 && p.tier.overage === undefined && high.overage === undefined
+      && p.tier.sends === undefined && high.sends === undefined && !p.plan.seats && !band.last.plan.seats
+      && p.tier.source.url === low.source.url && p.tier.source.quote === low.source.quote && p.tier.cents * low.size === low.cents * p.tier.size
+    if (alike) band.last = p; else bands.push({ first: p, last: p })
+  }
+  // "1 block" to "20 blocks": "1 to 20 blocks".
+  const spanName = (from: string, to: string) => { const a = /^([\d,]+) /.exec(from), b = /^([\d,]+) (.+)$/.exec(to); return a && b ? `${a[1]} to ${b[1]} ${b[2]}` : `${from} to ${to}` }
   const plansTable: Section = {
     id: 'plans', title: offer.ladder === 'complete' ? `Every ${vendor} plan` : `Every ${vendor} price read`,
     blocks: [{ kind: 'table',
@@ -106,19 +124,23 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
         ...capped.map(plan => ({ source: plan.max!.source, what: 'the largest size' })),
         ...offer.beyond ? [{ source: offer.beyond.source, what: 'custom pricing' }] : [],
       ])],
-      head: ['Plan', contacts ? 'Contacts' : 'Emails a month', ...contacts ? ['Emails a month'] : [], 'Price a month', ...rates.length ? ['Each 1,000 past it'] : [], ...seated.length ? [capital(seatWord)] : []],
+      head: ['Plan', ...byEmails ? ['Emails a month', 'Contact limit'] : contacts ? ['Contacts', 'Emails a month'] : ['Emails a month'], 'Price a month', ...rates.length ? ['Each 1,000 past it'] : [], ...seated.length ? [capital(seatWord)] : []],
       numeric: [1, 2, 3, 4, 5].slice(0, (contacts ? 3 : 2) + (rates.length ? 1 : 0) + (seated.length ? 1 : 0)),
-      rows: all.map(p => ({ cells: [
-        [p.plan.name], [formatCount(p.tier.size)], ...contacts ? [[p.tier.sends === undefined ? '—' : formatCount(p.tier.sends)]] : [], [money(p.tier.cents)],
-        ...rates.length ? [[p.tier.overage === undefined ? '—' : money(p.tier.overage)]] : [],
-        ...seated.length ? [[p.plan.seats ? p.plan.seats.count === null ? 'Unlimited' : formatCount(p.plan.seats.count) : '—']] : [],
-      ] })) }],
+      rows: bands.map(({ first, last }) => {
+        const span = (n: (tier: Tier) => string) => first === last ? n(first.tier) : `${n(first.tier)} to ${n(last.tier)}`
+        const sends = [span(tier => tier.sends === undefined ? '—' : formatCount(tier.sends))], held = [span(tier => formatCount(tier.size))]
+        return { cells: [
+          [first === last ? first.plan.name : spanName(first.plan.name, last.plan.name)], ...byEmails ? [sends, held] : contacts ? [held, sends] : [held], [span(tier => money(tier.cents))],
+          ...rates.length ? [[first.tier.overage === undefined ? '—' : money(first.tier.overage)]] : [],
+          ...seated.length ? [[seatsOf(first.plan)]] : [],
+        ] }
+      }) }],
   }
   // Where the sizes' figures were read: the plans' prices, the rate past a plan where a size uses it, and the teammates
-  // where the size assumes some.
-  const tableRead = rows.flatMap(({ q }) => q.kind !== 'price' ? [] : [
+  // where the size assumes some; a data file as the pricing page it belongs to (prices.ts, shownSources).
+  const tableRead = shownSources(rows.flatMap(({ q }) => q.kind !== 'price' ? [] : [
     q.tier.source, ...q.payg?.tier.overageSource ? [q.payg.tier.overageSource] : [], ...m.per === 'contact' && m.seats > 1 && q.plan.seats ? [q.plan.seats.source] : [],
-  ])
+  ]), offer)
   const sizesTable: Section = {
     id: 'sizes', title: `What ${vendor} costs at each size`, quiet: true,
     blocks: [
@@ -148,11 +170,14 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
     `${vendor} pricing (${when}): every plan and its monthly cost`, `${vendor} pricing (${when}): plans and monthly cost`, `${vendor} pricing (${when})`,
   ], 60)
   const from = `from ${money(start.tier.cents)} a month for ${count(start.tier.size)}`
+  const perThousand = [...new Set(paid.map(p => Math.round(p.tier.cents * 1000 / p.tier.size)))]
   const freeShort = free.length ? `${free[0]!.plan.name} plan: $0 for ${count(free[0]!.tier.size)}` : freeSaid.length ? freeSaid[0]!.text.replace(/\.$/, '') : null
   const oursShort = verdictAt === open ? `${productName} ${open.b.ours} at ${count(open.n)}, ${vendor} ${open.b.theirs}` : `${productName}: ${verdictAt.b.ours} for the same ${count(verdictAt.n)}`
   const description = fitWords([
     ...freeShort ? [`${vendor} pricing, read ${day}: ${from}. ${freeShort}. ${oursShort}.`] : [],
     ...rateRange ? [`${vendor} pricing, read ${day}: ${from}, ${rateRange} per 1,000 past it. ${oursShort}.`] : [],
+    // (A ladder priced by volume with no overage, Mandrill's blocks: what 1,000 emails cost from its dearest size to its cheapest.)
+    ...offer.unit === 'emails' && perThousand.length > 1 ? [`${vendor} pricing, read ${day}: ${from}, ${money(Math.min(...perThousand))} to ${money(Math.max(...perThousand))} per 1,000 by volume. ${oursShort}.`] : [],
     `${vendor} pricing, read ${day}: every plan, ${from}. ${oursShort}.`,
     `${vendor} pricing, read ${day}: every plan and its price, ${from}, and what a month costs at each size.`,
   ], 160, 140)

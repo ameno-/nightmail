@@ -1,6 +1,6 @@
 import { CREDIT, perThousandUsd, RATES, STORAGE_AFTER_DAYS, usd } from '../../../../api/src/billing/rates.ts'
 import type { WorkspaceFocus } from '../../../../api/src/workspace-focus.ts'
-import { ownPages } from './docs/registry.ts'
+import { ALTERNATIVES_VENDORS, PRICING_VENDORS } from './docs/registry.ts'
 
 // The price pages' arithmetic (features/pricing): Nightmail's prices, from the billing code (api/src/billing/rates.ts) so a
 // page can't drift from what is billed, and the shape of a competitor's, which each competitor's entry fills in
@@ -271,19 +271,26 @@ export function opening(entry: Pick<Entry, 'offer' | 'model'>, u: Usage) {
 export const fitWords = (texts: string[], max: number, min = 0) => texts.find(text => text.length <= max && text.length >= min) ?? texts.find(text => text.length <= max) ?? texts.at(-1)!
 /** A comparison's title and description in search results and link previews, made from its data: led by what someone
  *  types ("<vendor> alternative", "<vendor> pricing"), then the board's opening size with both monthly prices and the day
- *  the vendor's were read, and how the vendor charges (its lead's first sentence) or what else the page has. A vendor with
- *  a page of its own for those searches (docs/registry.ts: /pricing/<slug>) leaves them to it, and its comparison is the
- *  head-to-head: "Nightmail vs <vendor>: price at every size". The title fits 60 characters and the description 160
- *  (price-pages.ts checks both): the first of these that fits. */
+ *  the vendor's were read, and how the vendor charges (its lead's first sentence) or what else the page has. A search
+ *  the vendor's own page answers (docs/registry.ts) is left to it: with a pricing page (/pricing/<slug>) the comparison
+ *  drops "pricing" and keeps "alternative" ("<vendor> alternative: Nightmail vs <vendor>"); with an alternatives page
+ *  as well, it is the head-to-head ("Nightmail vs <vendor>: price at every size"). The title fits 60 characters and the
+ *  description 160 (price-pages.ts checks both): the first of these that fits. */
 function searchWords(entry: Entry, u: Usage): { searchTitle: string; description: string } {
   const { vendor } = entry, { size, theirs, plan, ours, day } = opening(entry, u)
   const named = entry.aka ? `${vendor} (${entry.aka})` : vendor, how = entry.lead.split(/(?<=\.) /)[0]!
-  if (ownPages(entry.slug).length) {
+  const pricing = PRICING_VENDORS.includes(entry.slug), alternatives = ALTERNATIVES_VENDORS.includes(entry.slug)
+  const sideBySide = (head: string) => [
+    `${head} (${plan}), Nightmail ${ours}. Every size ${vendor} prices, side by side.`, `${head}, Nightmail ${ours}. Every size ${vendor} prices, side by side.`,
+    `${head} (${plan}), Nightmail ${ours}. ${how}`, `${head}, Nightmail ${ours}. ${how}`, `${head}, Nightmail ${ours}. Both prices at every size.`, `${head}, Nightmail ${ours}.`,
+  ]
+  if (pricing && !alternatives) return {
+    searchTitle: fitWords([`${named} alternative: Nightmail vs ${vendor}`, `${vendor} alternative: Nightmail vs ${vendor}`, `${vendor} alternative · Nightmail`], 60),
+    description: fitWords(sideBySide(`${named} alternative, checked ${day}: at ${size}, ${vendor} ${theirs}`), 160, 140),
+  }
+  if (pricing) {
     const head = `Nightmail vs ${named}, checked ${day}: at ${size}, ${vendor} ${theirs}`
-    return { searchTitle: fitWords([`Nightmail vs ${vendor}: price at every size`, `Nightmail vs ${vendor}`], 60), description: fitWords([
-      `${head} (${plan}), Nightmail ${ours}. Every size ${vendor} prices, side by side.`, `${head}, Nightmail ${ours}. Every size ${vendor} prices, side by side.`,
-      `${head} (${plan}), Nightmail ${ours}. ${how}`, `${head}, Nightmail ${ours}. ${how}`, `${head}, Nightmail ${ours}. Both prices at every size.`, `${head}, Nightmail ${ours}.`,
-    ], 160, 140) }
+    return { searchTitle: fitWords([`Nightmail vs ${vendor}: price at every size`, `Nightmail vs ${vendor}`], 60), description: fitWords(sideBySide(head), 160, 140) }
   }
   const title = `${named} alternative: Nightmail vs ${vendor} pricing`, head = `${named} pricing vs Nightmail, checked ${day}: ${size}, `
   const prices = [`${head}${vendor} ${theirs} (${plan}), Nightmail ${ours}.`, `${head}${vendor} ${theirs}, Nightmail ${ours}.`]
@@ -309,6 +316,16 @@ export const sourcesOf = (entry: Pick<Entry, 'offer' | 'rows'>): Source[] => [
   ...entry.offer.plans.flatMap(plan => [...plan.tiers.flatMap(tier => [tier.source, ...tier.overageSource ? [tier.overageSource] : [], ...tier.extra ? [tier.extra.source] : []]), ...plan.seats ? [plan.seats.source] : [], ...plan.max ? [plan.max.source] : []]),
   ...entry.offer.beyond ? [entry.offer.beyond.source] : [], ...entry.rows.flatMap(row => row.source ? [row.source] : []),
 ]
+/** A script or data file a vendor's pricing page reads its prices from (Postmark's pricing.<hash>.js, Ghost's
+ *  pricing.min.js): where the figures were read, but not a page a person opens, and its address changes when the vendor
+ *  deploys. (A PDF, a Markdown page or an llms.txt is text a person can read.) */
+export const isDataFile = (url: string) => /\.(?:m?js|json|csv|xml)$/i.test(new URL(url).pathname)
+/** The sources a page shows a visitor, in its note or its list of pages read: a data file is shown as the vendor's
+ *  pricing page it belongs to, read the same day. The entry keeps it, and the Markdown copies name it (sourceNote). */
+export const shownSources = (sources: Source[], offer: Pick<Offer, 'pricing'>): Source[] =>
+  sources.map(source => isDataFile(source.url) && !isDataFile(offer.pricing) ? { ...source, url: offer.pricing } : source)
+/** What a Markdown copy says after a source that is a data file. */
+export const sourceNote = (url: string) => isDataFile(url) ? ' (the pricing page’s own price data)' : ''
 /** The last day any of an entry's figures was read: when its page last changed (the sitemap's lastmod). */
 export const lastChecked = (entry: Pick<Entry, 'offer' | 'rows'>) => [entry.offer.checked, ...sourcesOf(entry).map(source => source.checked)].sort().at(-1)!
 /** The tier sizes an offer's page lists from `from` to `to`, in order: a fader's usual steps. */

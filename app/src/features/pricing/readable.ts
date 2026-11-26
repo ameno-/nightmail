@@ -7,7 +7,7 @@ import { PRICE_PAGES, type PricePage } from './pages.ts'
 import { comparisonQuestions, faqPage } from './questions.ts'
 import { START } from './start.ts'
 import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
-import { billMath, claim, dayOf, formatCount, listOf, money, nightmail, nightmailBill, opening, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
+import { billMath, claim, dayOf, formatCount, listOf, money, nightmail, nightmailBill, opening, shownSources, sourceNote, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
 
 // What the public pages say, for readers that aren't browsers (app/price-pages.ts writes each file): a Markdown twin of
 // the homepage (/index.md), the calculator (/pricing.md) and each comparison (/compare/<slug>.md) with the same facts
@@ -71,7 +71,7 @@ export function comparisonMarkdown(c: Comparison): string {
     `## ${productName}’s pricing terms`,
     terms(),
     `## Sources`,
-    pagesRead(c).map(source => `- [${host(source.url)}${new URL(source.url).pathname.replace(/\/$/, '')}](${source.url}), checked ${dayOf(source.checked)}`).join('\n'),
+    pagesRead(c).map(source => `- [${host(source.url)}${new URL(source.url).pathname.replace(/\/$/, '')}](${source.url})${sourceNote(source.url)}, checked ${dayOf(source.checked)}`).join('\n'),
     trademarks,
     `## More`,
     `${ownPages(c.slug).map(path => { const own = PRICE_PAGES.find(page => page.path === path)!.doc!; return `- [${own.title}](${url(markdownPath(path))}): ${own.llms}\n` }).join('')}- [Price calculator](${url('/pricing.md')}): ${productName} and the other vendors at your own numbers\n${comparisonLinks(c.slug)}`,
@@ -179,7 +179,7 @@ export function structuredData(page: Pick<PricePage, 'path' | 'searchTitle' | 'd
     '@graph': [
       { '@type': 'WebPage', '@id': url(page.path), url: url(page.path), name: page.searchTitle, description: page.description, inLanguage: 'en',
         isPartOf: { '@id': url('/#website') }, about: { '@id': url('/#app') }, dateModified: page.modified,
-        ...c ? { mentions: { '@type': 'SoftwareApplication', name: c.vendor, url: c.offer.pricing }, citation: pagesRead(c).map(source => source.url) } : {} },
+        ...c ? { mentions: { '@type': 'SoftwareApplication', name: c.vendor, url: c.offer.pricing }, citation: [...new Set(shownSources(pagesRead(c), c.offer).map(source => source.url))] } : {} },
       site(), app(),
       ...c ? [faqPage(url(page.path), comparisonQuestions(c))] : [],
     ],
