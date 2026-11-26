@@ -195,21 +195,24 @@ function ApprovalPrompt({ conversationId, canAct }: { conversationId: string; ca
     setBusy(decision)
     try {
       const decided = await supportInboxApi.decideApproval(conversationId, a!.id, token!, decision, key.current)
-      toast(decided.state === 'approved' ? `Done: ${decided.label.toLowerCase()}.` : decided.state === 'failed' ? `${decided.label} failed. Try it from the conversation.` : 'Declined.', decided.state === 'failed' ? 'error' : 'success')
+      const why = typeof decided.result?.message === 'string' ? decided.result.message : 'Try it from the conversation.'
+      toast(decided.state === 'approved' ? `Done: ${decided.label.toLowerCase()}.` : decided.state === 'failed' ? `${decided.label} didn’t go through. ${why}` : 'Declined.', decided.state === 'failed' ? 'error' : 'success')
       void client.invalidateQueries({ queryKey: inboxKeys.detail(conversationId) })
       close()
     } catch (error) { toast(error instanceof ApiError ? error.message : failedText, 'error') }
     finally { setBusy(null) }
   }
-  const waiting = a.state === 'proposed', by = a.decidedBy?.name ?? 'Staff'
+  const waiting = a.state === 'proposed', by = a.decidedBy?.name ?? 'Staff', blocked = waiting ? a.preview?.blocked ?? null : null
   const status = a.state === 'expired' ? 'Expired. Act on it from the conversation if it still needs doing.'
     : a.state === 'approved' ? `${by} approved it${a.decidedAt ? ` ${shortDateTime(a.decidedAt)}` : ''}.` : a.state === 'declined' ? `${by} declined it.` : a.state === 'failed' ? `${by} approved it, and it failed.` : null
   return <Dialog open onOpenChange={open => { if (!open && !busy) close() }} title={a.label} description={a.effect}
     footer={waiting && canAct ? <><Button variant="ghost" disabled={busy !== null} loading={busy === 'decline'} onClick={() => void decide('decline')}>Decline</Button>
-      <Button disabled={busy !== null} onClick={close}>Not now</Button><Button variant="primary" disabled={busy !== null} loading={busy === 'approve'} onClick={() => void decide('approve')}>Approve</Button></>
+      <Button disabled={busy !== null} onClick={close}>Not now</Button><Button variant="primary" disabled={busy !== null || blocked !== null} loading={busy === 'approve'} onClick={() => void decide('approve')}>Approve</Button></>
       : <Button onClick={close}>Close</Button>}>
     <KeyValues items={[['Why', a.reason], ['Proposed by', a.proposedBy === 'agent' ? 'The support agent' : `${productName}, in the email to staff`],
       [waiting ? 'Expires' : 'State', status ?? shortDateTime(a.expiresAt)], ...(!canAct && waiting ? [['Who can approve', 'Staff with the operator role']] as [string, string][] : [])]} />
+    {waiting && a.preview?.text && <blockquote className="sinbox-approval__preview" aria-label="What would be sent">{a.preview.text}</blockquote>}
+    {blocked && <p className="sinbox-approval__blocked" role="status">{blocked}</p>}
   </Dialog>
 }
 

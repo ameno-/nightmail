@@ -10328,10 +10328,11 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual([opened.ticket_type, opened.status, opened.staff_thread, first.threadId], ['staff', 'ticketed', `conv:${held}`, null]);
           const sender = (await db.query('SELECT pending_address FROM support_conversations WHERE id = $1', [held])).rows[0].pending_address;
           assert.equal(first.subject, `Review a held answer to ${sender}`);
-          const text = first.text as string, order = ['email, unverified sender', 'They wrote on', '> Why did my bounce rate jump?', 'The agent wrote an answer, but it wasn’t sent: the output check held it.',
-            'Decide: send the held answer as written, or write your own.', `Open the conversation: ${new URL(runtime.config.publicUrl).origin}/support/${held}`, `Ticket ${opened.ticket_id}.`];
+          const text = first.text as string, order = ['email, unverified sender', '> Why did my bounce rate jump?', 'Send the agent’s held answer, or write your own.', 'The output check held it: read it before sending.',
+            `Open the conversation: ${new URL(runtime.config.publicUrl).origin}/support/${held}`, `Ticket ${opened.ticket_id}\n`];
           assert.deepEqual(order.map(part => text.indexOf(part) >= 0), order.map(() => true), text);
-          assert.ok(order.every((part, i) => i === 0 || text.indexOf(part) > text.indexOf(order[i - 1]!)), 'Who, their words, what was found, the decision, the link.');
+          assert.ok(order.every((part, i) => i === 0 || text.indexOf(part) > text.indexOf(order[i - 1]!)), 'Who, their words, the decision and its recommendation, the buttons, the ticket.');
+          assert.ok(!text.includes('Sent to') && !text.includes('Later changes'), 'The footer is the ticket alone.');
           assert.ok(text.includes('https://nightmail.example@evil.example/x (links to evil.example)'), 'A link in their words shows where it really goes.');
           assert.ok(first.html.includes('&lt;b&gt;See https:\u200b//nightmail.\u200bexample@evil.\u200bexample/x (links to evil.\u200bexample)') && !first.html.includes('<b>See') && !/href="https:\/\/[^"]*evil/.test(first.html),
             'Their words are escaped, never a link, and nothing of theirs loads.');
@@ -10345,7 +10346,7 @@ describe('Hosted MCP OAuth and tools', () => {
           await db.query("UPDATE support_staff_threads SET last_sent_at = now() - interval '31 minutes' WHERE key = $1", [`conv:${held}`]);
           const [update] = await due();
           assert.deepEqual([update?.threadId, update?.replyToMessageId, update?.subject], [`thr_staff_${sends}`, `msg_staff_${sends}`, first.subject]);
-          assert.ok(update.text.includes('Since the last email: they wrote again.') && update.text.includes('> Hello? Anyone there?'), update.text);
+          assert.ok(update.text.includes('Since the last email, they wrote again.') && update.text.includes('> Hello? Anyone there?'), update.text);
           await sent(update);
           // The agent's own ticket, mirrored later, takes the place of the one opened here.
           const agentTicket = ticketId();
@@ -10364,16 +10365,24 @@ describe('Hosted MCP OAuth and tools', () => {
           await later();
 
           // A held answer staff already discarded is not asked about again; the agent's own words (its summary and
-          // recommendation) are quoted as theirs are: escaped, each link with its real host, never a link.
+          // recommendation) are protected as theirs are: escaped, each link with its real host, never a link.
           const dropped = await stranger(), draft = msg();
           ok(reply(await platform.mirrorMessages(dropped, [{ id: msg(), author: 'customer', text: 'Can I get a refund?', at: at(30) }, { id: draft, author: 'agent', kind: 'held', text: 'Yes.', delivery: 'held', reason: 'gate', at: at(29) }])));
           ok(reply(await platform.mirrorState(dropped, { ticket: { id: ticketId(), type: 'billing', severity: 'P3', brief: { title: 'Refund', summary: 'They asked at https://pay-now.example/refund.', ask: 'A refund.', recommendation: 'Refund it at refunds.example.' } } })));
           ok(await send('POST', `${inbox}/${dropped}/drafts/${draft}/discard`, keyed(operator)));
           const [asked] = await due();
           assert.ok(!asked.subject.startsWith('Review a held answer') && !asked.text.includes('send the held answer'), asked.subject);
-          assert.ok(asked.text.includes('> They asked at https://pay-now.example/refund. (links to pay-now.example)') && asked.text.includes('The agent recommends:\n\n> Refund it at refunds.example.'), asked.text);
+          assert.ok(asked.text.includes('They asked at https://pay-now.example/refund. (links to pay-now.example)') && asked.text.includes('It recommends: Refund it at refunds.example.'), asked.text);
           assert.ok(asked.html.includes('pay-now.\u200bexample') && asked.html.includes('refunds.\u200bexample') && !asked.html.includes('refunds.example'), 'The agent’s words are never a link.');
           await sent(asked);
+          await later();
+          // Cut short, a link is left out rather than cut inside its host (which would name the wrong one).
+          const cut = await stranger();
+          ok(reply(await platform.mirrorMessages(cut, [{ id: msg(), author: 'customer', text: 'Help.', at: at(30) }])));
+          ok(reply(await platform.mirrorState(cut, { ticket: { id: ticketId(), type: 'account', severity: 'P3', brief: { title: 'Help', summary: `${'word '.repeat(40)}https://nightmail.dev.evil.example/reset`, ask: 'Help.', recommendation: `${'/'.repeat(205)}https://nightmail.dev.evil.example/x` } } })));
+          const [clipped] = await due();
+          assert.ok(clipped.text.includes('word word…') && !clipped.text.includes('links to nightmail') && !clipped.html.includes('nightmail.\u200bd'), clipped.text);
+          await sent(clipped);
           await later();
 
           // Stuck work: the email's button is an approve link, and opening it changes nothing.
@@ -10442,6 +10451,50 @@ describe('Hosted MCP OAuth and tools', () => {
           const [next] = await due();
           assert.equal(next?.subject, `${(await db.query('SELECT pending_address FROM support_conversations WHERE id = $1', [waiting])).rows[0].pending_address} got no reply`);
           await sent(next);
+        });
+
+        await t.test('14 send the held answer from the email: its link opens a confirm step showing exactly what would go, and only an operator\u2019s Approve sends it, as Send does; one a newer reply overtook is refused; one that needs a fresh reply is never proposed', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const due = async () => ok(reply(await platform.staffMail())).data as Json[];
+          let n = 0;
+          const sent = async (mail: Json) => { n++; return ok(reply(await platform.staffMailSent(mail.key, { threadId: mail.threadId ?? `thr_held_${n}`, messageId: `msg_held_${n}` }))); };
+          await db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'");
+          for (let i = 0; i < 30; i++) { const batch = await due(); if (!batch.length) break; for (const mail of batch) await sent(mail); await db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'"); }
+          const held = async (reason: 'gate' | 'paused' | 'access', text: string) => {
+            const id = await chat(member), draft = msg();
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Why are my bounces up?', at: at(20) }, { id: draft, author: 'agent', kind: 'held', text, delivery: 'held', reason, at: at(19) }])));
+            return { id, draft };
+          };
+          const fresh = await held('gate', 'Gmail hard-bounced **61** sends from one import.'), overtaken = await held('paused', 'Your domain is verified.'), shrunk = await held('access', 'Your Beta workspace has 3 domains.');
+          const mails = await due(), mailOf = (id: string) => mails.find((m: Json) => m.text.includes(`/support/${id}`))!;
+          const linkOf = (mail: Json) => { const found = /Send the held answer: (\S+)/.exec(mail.text); return found ? new URL(found[1]!) : null; };
+          assert.equal(linkOf(mailOf(shrunk.id)), null, 'One that needs a fresh reply is never proposed.');
+          assert.ok(mailOf(shrunk.id).text.includes('Write them a fresh reply.'));
+          for (const mail of mails) await sent(mail);
+          const staffReplies = async (id: string) => (await db.query("SELECT text FROM support_messages WHERE conversation_id = $1 AND author = 'staff'", [id])).rows.map(r => r.text);
+
+          // The link only opens the confirm step, with exactly what would go (a chat keeps the agent's Markdown).
+          const link = linkOf(mailOf(fresh.id))!, path = `${inbox}/${fresh.id}/approvals/${link.searchParams.get('approval')}`, token = link.searchParams.get('token')!;
+          const shown = ok(await send('GET', `${path}?token=${token}`, session(reader)));
+          assert.deepEqual([shown.kind, shown.label, shown.preview], ['send_held_answer', 'Send the held answer', { text: 'Gmail hard-bounced **61** sends from one import.', blocked: null }]);
+          assert.deepEqual(await staffReplies(fresh.id), [], 'Opening it sent nothing.');
+          error(await send('POST', path, keyed(reader), { token, decision: 'approve' }), 403, 'OPERATOR_REQUIRED');
+          const wakesBefore = wakes.length, approved = ok(await send('POST', path, keyed(operator), { token, decision: 'approve' }));
+          assert.equal(approved.state, 'approved');
+          assert.deepEqual(await staffReplies(fresh.id), ['Gmail hard-bounced **61** sends from one import.'], 'Sent as the operator\u2019s reply, as written.');
+          assert.deepEqual((await db.query('SELECT draft_outcome, draft_by, draft_reply FROM support_messages WHERE id = $1', [fresh.draft])).rows[0], { draft_outcome: 'sent', draft_by: operator.userId, draft_reply: approved.result.replyId });
+          assert.equal(wakes.length - wakesBefore, 1, 'The support platform is woken to deliver it.');
+          error(await send('POST', path, keyed(operator), { token, decision: 'approve' }), 409, 'SUPPORT_APPROVAL_DECIDED');
+
+          // A newer reply reached them first: the confirm step says so, and approving sends nothing.
+          ok(await send('POST', `${inbox}/${overtaken.id}/replies`, keyed(operator), { text: 'Checking now.' }), 201);
+          const late = linkOf(mailOf(overtaken.id))!, latePath = `${inbox}/${overtaken.id}/approvals/${late.searchParams.get('approval')}`, lateToken = late.searchParams.get('token')!;
+          assert.equal(ok(await send('GET', `${latePath}?token=${lateToken}`, session(reader))).preview.blocked, 'A newer reply already reached the customer, so this held answer can\u2019t be sent as written.');
+          const refused = ok(await send('POST', latePath, keyed(operator), { token: lateToken, decision: 'approve' }));
+          assert.deepEqual([refused.state, refused.result.error], ['failed', 'SUPPORT_DRAFT_STALE']);
+          assert.deepEqual(await staffReplies(overtaken.id), ['Checking now.']);
+          assert.equal((await db.query('SELECT draft_outcome FROM support_messages WHERE id = $1', [overtaken.draft])).rows[0].draft_outcome, null, 'Still held: staff edit or discard it.');
         });
       } finally { globalThis.fetch = previous; }
     });

@@ -12,7 +12,12 @@ import type { Config, DbExecutor } from './core.js';
 /** How long a proposal can be approved. */
 export const APPROVAL_HOURS = 72;
 
-type Deps = { wake: (conversationId: string) => Promise<boolean> };
+/**
+ * What a kind runs with: the same code as the dashboard's own buttons, inside the decision's transaction, as the operator
+ * who approved it. wake: Retry now; sendDraft: Send on a held answer, as the agent wrote it (refused when it needs a fresh
+ * reply, or a newer reply reached the customer first).
+ */
+type Deps = { wake: (conversationId: string) => Promise<boolean>; sendDraft: (messageId: string) => Promise<{ id: string }> };
 export type ApprovalKind = {
   /** The button and the confirm step's title: what approving does, in a few words. */
   label: string;
@@ -22,11 +27,18 @@ export type ApprovalKind = {
   risky: boolean;
   run(deps: Deps, conversationId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>>;
 };
-export const KINDS: Record<'retry_work', ApprovalKind> = {
+export const KINDS: Record<'retry_work' | 'send_held_answer', ApprovalKind> = {
   retry_work: {
     label: 'Retry the stuck work', risky: false,
     effect: 'The support platform is woken for this conversation and tries the work it could not finish again, as Retry now does.',
     run: async (deps, conversationId) => ({ woken: await deps.wake(conversationId) }),
+  },
+  // payload: { messageId } of the held answer. Only proposed for one held by the output check or a pause; one held
+  // because access shrank or written by an earlier build needs a fresh reply, and sendDraft refuses it anyway.
+  send_held_answer: {
+    label: 'Send the held answer', risky: false,
+    effect: 'The answer the agent wrote goes to the customer as written, as a staff reply in your name (by email as plain text). It isn’t sent if a newer reply reached them first.',
+    run: async (deps, _conversationId, payload) => ({ replyId: (await deps.sendDraft(String(payload.messageId ?? ''))).id }),
   },
 };
 export type KindName = keyof typeof KINDS;
@@ -54,7 +66,7 @@ export const approvalLink = (config: Pick<Config, 'publicUrl' | 'authSecret'>, a
  */
 export async function propose(tx: DbExecutor, p: { conversationId: string; kind: KindName; reason: string; proposedBy: 'nightmail' | 'agent'; payload?: Record<string, unknown> }) {
   const { rows: [open] } = await tx.execute<{ id: string; expires_ms: number }>(sql`SELECT id, ${EXPIRES_MS} FROM support_approvals
-    WHERE conversation_id = ${p.conversationId} AND kind = ${p.kind} AND state = 'proposed' AND expires_at > now() + interval '1 hour' ORDER BY created_at DESC LIMIT 1`);
+    WHERE conversation_id = ${p.conversationId} AND kind = ${p.kind} AND payload = ${JSON.stringify(p.payload ?? {})}::jsonb AND state = 'proposed' AND expires_at > now() + interval '1 hour' ORDER BY created_at DESC LIMIT 1`);
   if (open) return { id: open.id, conversationId: p.conversationId, expiresAt: new Date(Number(open.expires_ms)) };
   const { rows: [made] } = await tx.execute<{ id: string; expires_ms: number }>(sql`INSERT INTO support_approvals(id, conversation_id, kind, payload, proposed_by, reason, expires_at)
     VALUES (${approvalId()}, ${p.conversationId}, ${p.kind}, ${JSON.stringify(p.payload ?? {})}::jsonb, ${p.proposedBy}, ${p.reason.slice(0, 400)}, date_trunc('milliseconds', now() + make_interval(hours => ${APPROVAL_HOURS})))

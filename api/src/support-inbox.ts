@@ -632,15 +632,44 @@ export function registerSupportInbox(app: App) {
   // details they can no longer see: it is never sent, as written or edited. Staff write a fresh reply, which replaces it.
   const DraftParams = ConversationParam.extend({ messageId: z.string().regex(MESSAGE_ID) });
   const FRESH_REPLY: Record<string, string> = { access: 'This person’s access changed after the agent wrote this answer', earlier: 'An earlier version of the agent wrote this answer' };
-  async function heldDraft(tx: DbExecutor, id: string, messageId: string) {
+  async function heldDraft(tx: DbExecutor, id: string, messageId: string, lock = true) {
     // answered: a reply written after it reached the customer (a staff reply, or an agent answer not held or failed).
     const { rows: [draft] } = await tx.execute<{ text: string; held: boolean; outcome: string | null; reason: string | null; answered: boolean }>(sql`SELECT m.text, m.author = 'agent' AND m.delivery = 'held' AS held,
         m.draft_outcome AS outcome, m.held_reason AS reason, EXISTS (SELECT 1 FROM support_messages o WHERE o.conversation_id = m.conversation_id AND o.seq > m.seq AND o.kind IS DISTINCT FROM 'note'
           AND ((o.author = 'staff' AND o.delivery IN ('queued','sent')) OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed'))) AS answered
-      FROM support_messages m WHERE m.id = ${messageId} AND m.conversation_id = ${id} FOR UPDATE OF m`);
+      FROM support_messages m WHERE m.id = ${messageId} AND m.conversation_id = ${id} ${lock ? sql`FOR UPDATE OF m` : sql``}`);
     if (!draft?.held) notFound('Held answer');
     if (draft!.outcome) throw new ApiError(409, 'SUPPORT_DRAFT_DECIDED', 'This held answer was already sent or discarded.');
     return draft!;
+  }
+  /**
+   * Sends a held answer as a staff reply: as the agent wrote it (text omitted; by email as plain text) or edited. As
+   * written, it is refused when it needs a fresh reply (the person's access shrank, or an earlier build wrote it) or when
+   * a newer reply already reached the customer. The draft records what became of it. The dashboard's Send and an
+   * approved "Send the held answer" (support-approvals.ts) both send through here.
+   */
+  async function sendDraft(tx: DbExecutor, operator: OperatorIdentity, conversation: Locked, id: string, messageId: string, edited?: string) {
+    const draft = await heldDraft(tx, id, messageId), written = draft.text.trim(), asWritten = conversation.channel === 'email' ? plainText(written) : written;
+    const unchanged = edited === undefined || edited === written || edited === asWritten, fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
+    if (fresh && unchanged) throw new ApiError(409, 'SUPPORT_DRAFT_FRESH_REPLY', `${fresh}, so it can’t be sent. Write a fresh reply.`, 'text');
+    // As written, it would answer an earlier moment than a reply the customer already has: staff edit it, or discard it.
+    if (draft.answered && unchanged) throw new ApiError(409, 'SUPPORT_DRAFT_STALE', 'A newer reply already reached the customer, so this held answer can’t be sent as written. Edit it, or discard it.', 'text');
+    const text = edited ?? asWritten;
+    if (text.length > 8000) throw new ApiError(422, 'VALIDATION_FAILED', 'This answer is longer than a reply can be: edit it before sending.', 'text');
+    const queued = await queueReply(tx, operator, conversation, id, text);
+    await tx.execute(sql`UPDATE support_messages SET draft_outcome = ${fresh ? 'replaced' : unchanged ? 'sent' : 'edited'}, draft_by = ${operator.userId}, draft_at = now(), draft_reply = ${queued.id} WHERE id = ${messageId}`);
+    return queued;
+  }
+  /** What sending a held answer as written would send, and why it can't be sent, if it can't: read only, for a confirm step. */
+  async function draftPreview(db: DbExecutor, id: string, messageId: string, channel: string) {
+    try {
+      const draft = await heldDraft(db, id, messageId, false), written = draft.text.trim(), fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
+      return { text: channel === 'email' ? plainText(written) : written, blocked: fresh ? `${fresh}, so it can’t be sent. Write a fresh reply.`
+        : draft.answered ? 'A newer reply already reached the customer, so this held answer can’t be sent as written.' : null };
+    } catch (error) {
+      if (error instanceof ApiError) return { text: null, blocked: error.code === 'SUPPORT_DRAFT_DECIDED' ? error.message : 'This held answer is gone.' };
+      throw error;
+    }
   }
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/drafts/{messageId}/send', operationId: 'operatorSendSupportDraft',
     description: 'Send a held agent answer to the customer as a staff reply (the operator role): as the agent wrote it (by email as plain text, as the agent’s email answers are; in chat as written), or with text (edited). One held because the person’s access shrank, or written by an earlier build, is never sent: send a fresh reply as text (not its text), which replaces it; anything else is 409 SUPPORT_DRAFT_FRESH_REPLY. It is queued, pauses the agent and wakes the support platform like any staff reply, and the held answer records who sent or replaced it. Needs an Idempotency-Key. Refused once decided, on a closed conversation, or while the support platform is not pulling replies.',
@@ -648,18 +677,7 @@ export function registerSupportInbox(app: App) {
     responses: { 201: response(Message), ...errors } }), async c => {
     const { id, messageId } = c.req.valid('param'), body: { text?: string } = c.req.valid('json') ?? {};
     const reply = await change(c, id, 'support.draft_send', async (tx, operator, conversation) => {
-      const draft = await heldDraft(tx, id, messageId), written = draft.text.trim(), asWritten = conversation.channel === 'email' ? plainText(written) : written;
-      const fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
-      if (fresh && (body.text === undefined || body.text === written || body.text === asWritten))
-        throw new ApiError(409, 'SUPPORT_DRAFT_FRESH_REPLY', `${fresh}, so it can’t be sent. Write a fresh reply.`, 'text');
-      // As written, it would answer an earlier moment than a reply the customer already has: staff edit it, or discard it.
-      if (draft.answered && (body.text === undefined || body.text === written || body.text === asWritten))
-        throw new ApiError(409, 'SUPPORT_DRAFT_STALE', 'A newer reply already reached the customer, so this held answer can’t be sent as written. Edit it, or discard it.', 'text');
-      const text = body.text ?? asWritten;
-      if (text.length > 8000) throw new ApiError(422, 'VALIDATION_FAILED', 'This answer is longer than a reply can be: edit it before sending.', 'text');
-      const queued = await queueReply(tx, operator, conversation, id, text);
-      const outcome = fresh ? 'replaced' : body.text === undefined || body.text === written || body.text === asWritten ? 'sent' : 'edited';
-      await tx.execute(sql`UPDATE support_messages SET draft_outcome = ${outcome}, draft_by = ${operator.userId}, draft_at = now(), draft_reply = ${queued.id} WHERE id = ${messageId}`);
+      const queued = await sendDraft(tx, operator, conversation, id, messageId, body.text);
       return { result: queued, message: queued.id };
     }, body);
     await wakeAfter(c, id);
@@ -827,6 +845,8 @@ export function registerSupportInbox(app: App) {
     risky: z.boolean(), reason: z.string().describe('Why it was proposed.'), proposedBy: z.enum(['nightmail', 'agent']),
     state: z.enum(['proposed', 'approved', 'declined', 'failed', 'expired']), createdAt: z.string(), expiresAt: z.string(), decidedAt: z.string().nullable(),
     decidedBy: z.object({ userId: z.string(), name: z.string().nullable() }).nullable(), result: z.record(z.string(), z.unknown()).nullable(),
+    preview: z.object({ text: z.string().nullable().describe('Exactly what would be sent.'), blocked: z.string().nullable().describe('Why it can\u2019t be, now.') }).nullable()
+      .describe('Send the held answer: the answer as it would go, and why it can\u2019t go, when it can\u2019t (it needs a fresh reply, a newer reply reached them, or it was decided).'),
   }).openapi('SupportApproval');
   type ApprovalRow = { id: string; conversation_id: string; kind: string; payload: Record<string, unknown>; proposed_by: 'nightmail' | 'agent'; reason: string; state: 'proposed' | 'approved' | 'declined' | 'failed';
     created_at: string; expires_at: string; expires_ms: number; expired: boolean; decided_at: string | null; decided_by: string | null; decided_by_name: string | null; result: Record<string, unknown> | null };
@@ -838,38 +858,54 @@ export function registerSupportInbox(app: App) {
     if (!r || !isKind(r.kind) || !validToken(secret, { id: r.id, conversationId: r.conversation_id, expiresAt: new Date(Number(r.expires_ms)) }, token)) notFound('Approval');
     return r!;
   }
-  const approvalView = (r: ApprovalRow): z.infer<typeof Approval> => {
+  const approvalView = (r: ApprovalRow, preview: z.infer<typeof Approval>['preview'] = null): z.infer<typeof Approval> => {
     const kind = KINDS[r.kind as keyof typeof KINDS];
-    return { id: r.id, conversationId: r.conversation_id, kind: r.kind, label: kind.label, effect: kind.effect, risky: kind.risky, reason: r.reason, proposedBy: r.proposed_by,
+    return { preview, id: r.id, conversationId: r.conversation_id, kind: r.kind, label: kind.label, effect: kind.effect, risky: kind.risky, reason: r.reason, proposedBy: r.proposed_by,
       state: r.state === 'proposed' && r.expired ? 'expired' : r.state, createdAt: isoTime(r.created_at)!, expiresAt: isoTime(r.expires_at)!, decidedAt: isoTime(r.decided_at),
       decidedBy: r.decided_by ? { userId: r.decided_by, name: r.decided_by_name } : null, result: r.result };
   };
+  /** A held answer's approval shows what would go, and why it can't, while it waits. */
+  async function previewOf(db: DbExecutor, a: ApprovalRow) {
+    if (a.kind !== 'send_held_answer' || a.state !== 'proposed') return null;
+    const { rows: [conversation] } = await db.execute<{ channel: string }>(sql`SELECT channel FROM support_conversations WHERE id = ${a.conversation_id}`);
+    return draftPreview(db, a.conversation_id, String(a.payload.messageId ?? ''), conversation?.channel ?? 'email');
+  }
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'get', path: '/v1/operator/support-inbox/{id}/approvals/{approvalId}', operationId: 'operatorGetSupportApproval',
     description: 'An approval an email linked to (operator:read): what it does and where it stands. token is the link\u2019s; without the right one it is 404. Reading it changes nothing.',
     request: { params: ApprovalParams, query: z.object({ token: z.string().min(1).max(100) }) }, responses: { 200: response(Approval), ...errors } }), async c => {
     await staff(c, 'operator:read');
-    return c.json(approvalView(await approvalOf(c.env.db, c.env.config.authSecret, c.req.valid('param'), c.req.valid('query').token)), 200);
+    const params = c.req.valid('param'), a = await approvalOf(c.env.db, c.env.config.authSecret, params, c.req.valid('query').token);
+    return c.json(approvalView(a, await previewOf(c.env.db, a)), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/approvals/{approvalId}', operationId: 'operatorDecideSupportApproval',
     description: 'Approve or decline it (the operator role), once, before it expires: approving runs it as the dashboard\u2019s own button for it would. On the audit trail and the conversation\u2019s timeline.',
     request: { params: ApprovalParams, headers: changeHeaders, body: json(z.object({ token: z.string().min(1).max(100), decision: z.enum(['approve', 'decline']) }).strict()) },
     responses: { 200: response(Approval), ...errors } }), async c => {
     const params = c.req.valid('param'), body = c.req.valid('json');
-    return c.json(await change(c, params.id, `support.approval.${body.decision}`, async (tx, operator) => {
+    let sent = false;
+    const view = await change(c, params.id, `support.approval.${body.decision}`, async (tx, operator, conversation) => {
       const a = await approvalOf(tx, c.env.config.authSecret, params, body.token, true);
       if (a.state !== 'proposed') throw new ApiError(409, 'SUPPORT_APPROVAL_DECIDED', 'This was already decided.');
       if (a.expired) throw new ApiError(409, 'SUPPORT_APPROVAL_EXPIRED', 'This proposal expired. Open the conversation to act on it.');
       let state: 'approved' | 'declined' | 'failed' = 'declined', result: Record<string, unknown> | null = null;
       if (body.decision === 'approve') {
-        try { result = await KINDS[a.kind as keyof typeof KINDS].run({ wake: id => wakeSupport(c.env.config, id) }, a.conversation_id, a.payload); state = 'approved'; }
-        catch (error) { state = 'failed'; result = { error: error instanceof ApiError ? error.code : 'FAILED' }; }
+        try {
+          result = await KINDS[a.kind as keyof typeof KINDS].run({ wake: id => wakeSupport(c.env.config, id), sendDraft: messageId => sendDraft(tx, operator, conversation, params.id, messageId) }, a.conversation_id, a.payload);
+          state = 'approved'; sent = a.kind === 'send_held_answer';
+        } catch (error) {
+          // Refused as the dashboard's own button would be (a stale draft, one that needs a fresh reply, a closed conversation): said, not thrown.
+          if (!(error instanceof ApiError)) throw error;
+          state = 'failed'; result = { error: error.code, message: error.message };
+        }
       }
       const { rows: [decided] } = await tx.execute<ApprovalRow>(sql`UPDATE support_approvals SET state = ${state}, decided_by = ${operator.userId}, decided_at = now(), result = ${result ? JSON.stringify(result) : null}::jsonb
         WHERE id = ${a.id} RETURNING id, conversation_id, kind, payload, proposed_by, reason, state, created_at::text AS created_at, expires_at::text AS expires_at, ${EXPIRES_MS}, false AS expired,
           decided_at::text AS decided_at, decided_by, (SELECT name FROM nightmail_users WHERE id = ${operator.userId}) AS decided_by_name, result`);
       await tx.execute(event(params.id, body.decision === 'approve' ? 'approved' : 'declined', operator.userId, { approval: a.id, kind: a.kind, ...state === 'failed' ? { failed: true } : {} }));
       return { result: approvalView(decided!) };
-    }, body), 200);
+    }, body);
+    if (sent) await wakeAfter(c, params.id);
+    return c.json(view, 200);
   });
 
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/wake', operationId: 'operatorWakeSupportConversation',
