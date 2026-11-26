@@ -1,24 +1,30 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import type { Plugin } from 'vite'
+import { runnerImport, type Plugin } from 'vite'
 import { productName, publicOrigin } from '../api/src/brand.ts'
 import { RENAMED_OPERATIONS } from '../api/src/site-index.ts'
-import { renderLegal } from './legal-markdown.ts'
+import { legalMarkdown, renderLegal } from './legal-markdown.ts'
 import { linkCard, maxLine, shareTitle, withCard, type CardWords } from './link-card.ts'
+import { appFiles, pageCss, paint } from './painted-page.ts'
 import { GUIDE_NAMES } from './src/features/docs/guide-names.ts'
 import { docsTitle, operationDescription, operationEntries, operationTitle } from './src/features/docs/meta.ts'
 
 // The site's own pages beside the price pages (price-pages.ts), each index.html with its own title, description,
 // canonical address, Markdown twin and link-preview card in its head, so a search engine, an agent or a link preview
-// reading the first response knows which page it is. The body is the dashboard's, byte for byte, and the page renders
-// in it as before, signed in or out.
+// reading the first response knows which page it is. A docs page's body is the dashboard's, byte for byte, and the page
+// renders in it as before, signed in or out.
 // - The docs (features/docs): docs.html for /docs, docs/<guide>.html for each guide (guide-names.ts) and
 //   docs/api/<id>.html for every operation in api/openapi.json (the definition the docs render), with the titles and
 //   descriptions the page sets as it renders (features/docs/meta.ts). Cards: one for /docs, one for each guide; the
 //   operations share the docs' card.
 // - The legal pages (features/legal): legal.html for /legal and legal/<slug>.html for each document in
 //   features/legal/content, named and described by its front matter, its card dated by its `updated`. Each document's
-//   Markdown is its twin (legal/<slug>.md), and the index's is legal.md.
+//   Markdown is its twin (legal/<slug>.md), and the index's is legal.md. Their body isn't the dashboard's: the page
+//   itself is painted in it for a visitor (features/legal/prerender.tsx, painted-page.ts), so a reader, a search engine
+//   or an agent gets the document's words in the first response. It is drawn by the app's own page from the same
+//   compiled Markdown the app shows (legal-markdown.ts), and the build stops if a document's HTML isn't in it byte for
+//   byte. The app takes its place at the first touch, key or scroll (useShellTakeover). A browser that has signed in
+//   gets the app from the start, as before (public/theme.js, data-members).
 // Each is listed in sitemap.xml (below). Workers Assets and api/src/server.ts serve each file at its address; an
 // operation or a legal document with no page is not found (api/src/site-index.ts). The canonical address names the hosted site on every stage, as the price pages' does;
 // the card is fetched from the stage's own host, as index.html's is; a stage on another host still asks not to be
@@ -26,10 +32,23 @@ import { docsTitle, operationDescription, operationEntries, operationTitle } fro
 const attr = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
 const openApi = fileURLToPath(new URL('../api/openapi.json', import.meta.url))
 const legalContent = fileURLToPath(new URL('./src/features/legal/content/', import.meta.url))
+const legalShell = fileURLToPath(new URL('./src/features/legal/prerender.tsx', import.meta.url))
+const bootScript = fileURLToPath(new URL('./src/features/home/shell/boot.js', import.meta.url))
+/** A painted legal page shows the theme switch theme.js's theme has (features/legal/prerender.tsx draws one for each); with
+ *  no script, the light one. */
+const THEME_SWITCH = 'html:not([data-theme=dark]) #page-shell [data-theme-only=dark],html[data-theme=dark] #page-shell [data-theme-only=light]{display:none}'
 
 /** names: a docs page's own names, without the docs', longest first (a link preview's title falls back to them).
  *  modified: the sitemap's lastmod (YYYY-MM-DD), where the page has a date of its own. */
-type SitePage = { path: string; title: string; names?: string[]; description: string; markdown: string; card: CardWords; twin?: string; modified?: string }
+type SitePage = { path: string; title: string; names?: string[]; description: string; markdown: string; card: CardWords; twin?: string; modified?: string; painted?: { html?: string } }
+
+/** Where a page is drawn at build time, its stylesheets are the bundle's (painted-page.ts inlines them), not modules: Vite's
+ *  module runner has no CSS pipeline. */
+const noCss: Plugin = {
+  name: 'nightmail:no-css', enforce: 'pre',
+  resolveId: source => /\.css(?:\?|$)/.test(source) ? '\0no-css' : null,
+  load: id => id === '\0no-css' ? 'export default ""' : null,
+}
 
 /** A legal document's date as its front matter writes it ("26 November 2026"), as a sitemap's lastmod (2026-11-26). */
 function isoDay(day: string): string {
@@ -49,9 +68,11 @@ function titleLines(title: string): CardWords['lines'] {
 }
 
 export function sitePages(): Plugin {
+  let root = ''
   return {
     name: 'nightmail:site-pages', apply: 'build', enforce: 'post',
-    generateBundle: { order: 'post', handler(_options, bundle) {
+    configResolved(config) { root = config.root },
+    generateBundle: { order: 'post', async handler(_options, bundle) {
       const index = bundle['index.html']
       if (index?.type !== 'asset') return this.error('The site\'s pages are made from index.html, and the bundle has none.')
       const source = String(index.source)
@@ -72,16 +93,30 @@ export function sitePages(): Plugin {
         ...GUIDE_NAMES.map(guide => ({ path: `/docs/${guide.id}`, title: docsTitle(guide.title), names: [guide.title], description: guide.summary, markdown: '/docs.md', card: { name: `docs-${guide.id}`, lines: titleLines(guide.title), caption: `Guide · ${productName} API docs` } })),
         ...operations.map(operation => ({ path: `/docs/api/${operation.id}`, title: docsTitle(operation.summary), names: [operation.summary, operationTitle(operation.id)], description: operationDescription(operation), markdown: `/docs/operations/${operation.id}.md`, card: docsCard })),
         { path: '/legal', title: legalTitle('Legal'), modified: isoDay(latest), description: `The terms and policies that apply to ${productName}: ${legal.map(doc => doc.title).join(', ')}.`, markdown: '/legal.md',
-          card: { name: 'legal', lines: ['Terms and policies'], caption: `${legal.length} documents, last updated ${latest}.` },
+          card: { name: 'legal', lines: ['Terms and policies'], caption: `${legal.length} documents, last updated ${latest}.` }, painted: {},
           twin: [`# Legal`, `Canonical page: ${publicOrigin}/legal`, `The terms and policies that apply to ${productName}.`, legal.map(doc => `- [${doc.title}](${publicOrigin}/legal/${doc.slug}.md): ${doc.description} Updated ${doc.updated}.`).join('\n')].join('\n\n') + '\n' },
         ...legal.map(doc => ({ path: `/legal/${doc.slug}`, title: legalTitle(doc.title), modified: isoDay(doc.updated), description: doc.description, markdown: `/legal/${doc.slug}.md`,
-          card: { name: `legal-${doc.slug}`, lines: titleLines(doc.title), caption: `Updated ${doc.updated}.` },
+          card: { name: `legal-${doc.slug}`, lines: titleLines(doc.title), caption: `Updated ${doc.updated}.` }, painted: { html: doc.html },
           twin: [`# ${doc.title}`, `Canonical page: ${publicOrigin}/legal/${doc.slug}`, `Updated ${doc.updated}. Effective ${doc.effective}.`, doc.body].join('\n\n') + '\n' })),
       ]
+      // The painted pages: the app's files out of them (the boot script starts them), the CSS the legal page loads in the
+      // app, and the page drawn by the app's own components (prerender.tsx, with the same Markdown plugin as the app's build).
+      const files = appFiles(source)
+      if (!files) return this.error('index.html is not shaped as a painted page expects: one entry module and one stylesheet, and #root.')
+      // The boot script the price pages load (the television homepage has its own of the same name).
+      const bootSource = readFileSync(bootScript, 'utf8'), text = (source: string | Uint8Array) => typeof source === 'string' ? source : new TextDecoder().decode(source)
+      const boot = Object.values(bundle).find(file => file.type === 'asset' && text(file.source) === bootSource)?.fileName
+        ?? this.getFileName(this.emitFile({ type: 'asset', name: 'home-boot.js', source: bootSource }))
+      const legalCss = [...new Set([files.css.slice(1), ...pageCss(bundle, ['/features/legal/index.tsx'])])].map(file => {
+        const asset = bundle[file]
+        if (asset?.type !== 'asset') this.error(`The legal pages' stylesheet ${file} isn't in the bundle.`)
+        return String((asset as { source: string | Uint8Array }).source)
+      }).join('')
+      const { module: shell } = await runnerImport<typeof import('./src/features/legal/prerender.tsx')>(legalShell, { root, configFile: false, logLevel: 'error', plugins: [legalMarkdown(), noCss] })
       for (const page of pages) {
         const card = linkCard(page.card)
         if (!bundle[card.file]) this.emitFile({ type: 'asset', fileName: card.file, source: card.source })
-        let html = withCard(source, card, origin)
+        let html = withCard(page.painted ? files.template : source, card, origin)
         const set = (pattern: RegExp, value: string) => {
           if (!pattern.test(html)) this.error(`index.html has no ${pattern.source} for ${page.path}.`)
           html = html.replace(pattern, (_match, start: string) => start + value)
@@ -97,6 +132,12 @@ export function sitePages(): Plugin {
         set(/(<meta property="og:type" content="website" \/>)/, `\n    <meta property="og:url" content="${attr(canonical)}" />\n    <link rel="canonical" href="${attr(canonical)}" />`)
         set(/(<link rel="alternate" type="text\/markdown" href=")[^"]*(?=" title=")/, attr(publicOrigin + page.markdown))
         set(/(<link rel="alternate" type="text\/markdown" href="[^"]*" title=")[^"]*/, attr(`${page.title}, in Markdown`))
+        if (page.painted) {
+          const body = shell.renderLegalShell(page.path)
+          // The document the app shows, as the page says it: its compiled Markdown, byte for byte.
+          if (page.painted.html !== undefined && !body.includes(page.painted.html)) return this.error(`${page.path} is painted without its document's HTML as legal-markdown.ts compiles it: the app's page and this one would differ.`)
+          html = paint(html, { shell: 'page-shell', body, css: legalCss, extraCss: THEME_SWITCH, keep: '.boot-loader, .legal-page', boot: `/${boot}`, files, members: true, wholeFaces: true })
+        }
         this.emitFile({ type: 'asset', fileName: `${page.path.slice(1)}.html`, source: html })
         if (page.twin) this.emitFile({ type: 'asset', fileName: page.markdown.slice(1), source: page.twin })
       }

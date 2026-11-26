@@ -346,9 +346,11 @@ const pages = ids => [
   ['Signed out · waitlist, link expired', '/?auth=waitlist&link=expired', { user: null, waitlist: 'tomas.berg@example.net' }],
   // The emailed sign-in link opens Overview signed out, saying a place is held.
   ['Signed out · sign-in link', '/overview?link=AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', { user: null }],
-  // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
+  // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar. Each
+  // paints from its HTML first for a visitor (app/site-pages.ts), opened at a section too; signed in the app draws it.
   ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
   ['Legal · terms', '/legal/terms', { user: null, from: '/', still: true }],
+  ['Legal · terms, at a section', '/legal/terms#arbitration-agreement', { user: null }],
   ['Legal · terms, signed in', '/legal/terms', { from: '/settings' }],
   ['Legal · acceptable use', '/legal/acceptable-use', { user: null, from: '/legal/terms' }],
   ['Legal · privacy', '/legal/privacy', { user: null, from: '/legal' }],
@@ -621,7 +623,11 @@ const phonePages = new Set([
   'Signed out · sign-in link',
   'Legal',
   'Legal · terms',
+  'Legal · terms, at a section',
+  'Legal · terms, signed in',
+  'Legal · acceptable use',
   'Legal · privacy',
+  'Legal · subprocessors',
   'Pricing',
   'Pricing · large',
   'Pricing · SendGrid',
@@ -954,12 +960,12 @@ async function measure(browser, job, fx) {
       await page.waitForFunction(() => !document.getElementById('home-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the homepage\'s first screen'));
       await settle(page, net);
     }
-    // A price page paints from its HTML first and its app takes over at the reader's first key or touch (app/price-pages.ts,
-    // features/pricing/index.tsx): wake it, as a reader would, so the painted page and the takeover are both measured and
-    // an in-app click lands in the app.
-    if (await page.evaluate(() => !!document.getElementById('price-shell'))) {
+    // A price page or a legal page paints from its HTML first and its app takes over at the reader's first key or touch
+    // (app/painted-page.ts, lib/shell-takeover.ts): wake it, as a reader would, so the painted page and the takeover are
+    // both measured and an in-app click lands in the app.
+    if (await page.evaluate(() => !!document.querySelector('#price-shell, #page-shell'))) {
       await page.keyboard.press('Shift');
-      await page.waitForFunction(() => !document.getElementById('price-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the painted page'));
+      await page.waitForFunction(() => !document.querySelector('#price-shell, #page-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the painted page'));
       await settle(page, net);
     }
     if (job.support) {

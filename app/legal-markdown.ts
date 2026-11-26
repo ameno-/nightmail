@@ -4,6 +4,7 @@
 // and a hover anchor; prose gets curly quotes and apostrophes; a table scrolls inside its own box on a phone.
 // The source is ours and trusted, so the HTML is rendered as is.
 import { Marked, type Tokens } from 'marked'
+import type { Plugin } from 'vite'
 
 export type LegalHeading = { id: string; depth: number; html: string }
 export type LegalDocument = { title: string; description: string; updated: string; effective: string; html: string; headings: LegalHeading[] }
@@ -50,3 +51,13 @@ export function renderLegal(source: string, file: string): LegalDocument {
   if (headings.length === 0 || headings.some(h => h.depth === 1)) throw new Error(`${file}: use ## headings and below; the title comes from the front matter`)
   return { ...fields, html, headings }
 }
+
+// Each legal page's Markdown becomes { title, description, updated, effective, html, headings } at build time, so the page
+// ships HTML and no Markdown parser: in the app's build (vite.config.ts) and where site-pages.ts draws the pages.
+export const legalMarkdown = (): Plugin => ({
+  name: 'nightmail:legal-markdown',
+  transform(source, id) {
+    if (!id.endsWith('.md')) return null
+    return { code: `export default ${JSON.stringify(renderLegal(source, id))}`, map: null }
+  },
+})
