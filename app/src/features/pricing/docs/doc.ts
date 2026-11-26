@@ -4,6 +4,7 @@ import type { WorkspaceFocus } from '../../../../../api/src/workspace-focus.ts'
 import { linesOf, plain, type Block, type PageDoc, type Question, type Section, type Text } from '../page/shape.ts'
 import { dayOf, type Source } from '../prices.ts'
 import { faqPage } from '../questions.ts'
+import { START } from '../start.ts'
 
 // A public page that answers a question about email prices (docs/: a vendor's pricing page, vendor-pricing.ts), as one
 // piece of data in the price pages' shape (page/shape.ts, PageDoc), which page/page.tsx draws as it draws the comparisons.
@@ -66,6 +67,7 @@ export function docMarkdown(doc: Doc): string {
     `# ${doc.title}`,
     `> ${inline(verdict).replaceAll('\u00a0', ' ')}`,
     `Canonical page: ${url(doc.path)}`,
+    START,
     ...[...doc.sections, ...doc.copy.sections].flatMap(section => [`## ${section.title}`, ...section.blocks.map(block)]),
     ...doc.copy.questions.length ? ['## Questions', doc.copy.questions.map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n')] : [],
     '## Sources',

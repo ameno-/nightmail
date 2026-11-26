@@ -2,6 +2,7 @@
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
 import { dayOf, formatCount, type Comparison } from '../prices.ts'
 import { billAt, GROUPS, ORDERED } from './comparison.ts'
+import { START } from '../start.ts'
 import { factsSection } from './facts.ts'
 import type { CardWords } from '../../../../link-card.ts'
 import { plain, type PageDoc, type Table, type Text } from './shape.ts'
@@ -59,7 +60,7 @@ export function hubDoc(): PageDoc {
 export function hubMarkdown(doc = hubDoc()): string {
   const cell = (text: Text) => text.map(part => typeof part === 'string' ? part : 'href' in part ? `[${part.text}](${publicOrigin}${part.href}.md)` : part.ours).join('').replaceAll('|', '\\|')
   return [
-    `# ${(typeof doc.h1 === 'string' ? [[doc.h1]] : doc.h1).map(plain).join(' ')}`, `> ${doc.answer.map(plain).join(' ')}`, `Canonical page: ${publicOrigin}${doc.path}`,
+    `# ${(typeof doc.h1 === 'string' ? [[doc.h1]] : doc.h1).map(plain).join(' ')}`, `> ${doc.answer.map(plain).join(' ')}`, `Canonical page: ${publicOrigin}${doc.path}`, START,
     ...doc.sections.flatMap(section => [`## ${section.title}`, ...section.blocks.flatMap(block => block.kind === 'list' ? [block.items.map(item => `- ${plain(item)}`).join('\n')] : block.kind !== 'table' ? [] : [plain(block.caption), [
       `| Service | ${block.head.slice(1).join(' | ')} |`, `| --- | ${block.head.slice(1).map(() => '---:').join(' | ')} |`, ...block.rows.map(row => `| ${row.cells.map(cell).join(' | ')} |`),
     ].join('\n')])]),
