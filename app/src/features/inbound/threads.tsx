@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
-import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router'
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { Archive, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, Pagination, Select, SkeletonText, StatusBadge, Textarea, useToast, fieldError, MutationError, ErrorText } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
-import { useApi, useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useApiMutation, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
 import { request } from '../../data/live'
 import { OutcomeFlow, outcomeOf } from './flow'
@@ -257,6 +257,11 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   const extra = withAll ? withAll.to.length + withAll.cc.length - (resolved?.to.length ?? 0) - (resolved?.cc.length ?? 0) : 0
   const people = useMemo(() => new Map([target.from, ...target.replyTo, ...target.to, ...target.cc].map(person => [person.address.toLowerCase(), person])), [target])
   const redirected = target.direction !== 'outbound' && target.replyTo.length > 0 && target.replyTo.some(person => person.address.toLowerCase() !== target.from.address.toLowerCase())
+  // From the built-in domain while it sends to members only, said before the reply is written, not after Send
+  // (BUILTIN_DOMAIN_RECIPIENT): an agent and a person both took the refusal for a broken reply.
+  const builtin = useSession()?.identity?.connection?.builtinDomain
+  const fromHost = senderAddress ? senderOf(senderAddress).address.toLowerCase().split('@')[1] : undefined
+  const membersOnly = !!builtin && builtin.scope === 'members' && !!fromHost && (fromHost === builtin.name || fromHost.endsWith(`.${builtin.name}`))
   async function submit(event?: FormEvent, allowAutomated = false) {
     event?.preventDefault()
     if (!text.trim() || !sender || !resolved?.to.length || send.isPending) return
@@ -281,6 +286,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
           <RecipientList label="From" values={[senderOf(senderAddress).address.toLowerCase()]} people={new Map([[senderOf(senderAddress).address.toLowerCase(), senderOf(senderAddress)]])} />
           {resolved.to.length ? <RecipientList label="To" values={resolved.to} people={people} /> : <p className="mailbox-composer__to">This reply has no recipients outside your own addresses.</p>}
           {resolved.cc.length > 0 && <RecipientList label="Cc" values={resolved.cc} people={people} />}
+          {membersOnly && <p className="mailbox-composer__to inbound-recipients__warning">{builtin!.name} is your built-in domain: for now it replies only to members of this workspace. To answer anyone else, <Link to="/domains">add a domain of your own</Link>.</p>}
           {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to a different address than the one it came from (<bdi><PrivateAddress value={target.from.address} /></bdi>).</p>}
         </>}
     </div>

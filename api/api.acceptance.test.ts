@@ -25510,13 +25510,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // (Production's setting for now.) Anyone else is refused once, named, with the next step.
       runtime.config.builtinScope='members';await age('24 hours');
       const outsider=error(await local('POST','/v1/emails/send',{from,to:'stranger@example.net',subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
-      assert.deepEqual([outsider.field,outsider.details],['to',[{notMembers:['stranger@example.net']}]]);
-      assert.equal(outsider.message,`${host} only sends to your workspace members’ own sign-in addresses for now, and stranger@example.net is not one of them. To email anyone, add your own domain: POST /v1/domains with {"name":"yourdomain.com"} (or Domains → Add domain in the dashboard), publish the DNS records it returns, then send from an address at it once it verifies.`);
+      // A standing limit, not a failure to retry: not retryable, and details say who it sends to and what to call next.
+      assert.deepEqual([outsider.field,outsider.retryable,outsider.details],['to',false,[{notMembers:['stranger@example.net'],sendsTo:'workspaceMembers',nextStep:{operationId:'createDomain',method:'POST',path:'/v1/domains'}}]]);
+      assert.equal(outsider.message,`${host} is a built-in domain: for now it sends only to members of this workspace, at their own sign-in addresses, so it can’t send to stranger@example.net. To send or reply to anyone else, add your own domain: POST /v1/domains with {"name":"yourdomain.com"} (or Domains → Add domain in the dashboard), publish the DNS records it returns, then send from an address at it once it verifies. Trying again won’t change this.`);
       const copied=error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,cc:['stranger@example.net'],bcc:['other@example.net'],subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
-      assert.deepEqual(copied.details,[{notMembers:['stranger@example.net','other@example.net']}]);
-      assert.match(copied.message,/ for now, and stranger@example\.net and other@example\.net are not among them\. To email anyone, add your own domain: POST \/v1\/domains /);
+      assert.deepEqual(copied.details,[{notMembers:['stranger@example.net','other@example.net'],sendsTo:'workspaceMembers',nextStep:{operationId:'createDomain',method:'POST',path:'/v1/domains'}}]);
+      assert.match(copied.message,/, so it can’t send to stranger@example\.net and other@example\.net\. To send or reply to anyone else, add your own domain: POST \/v1\/domains /);
       const batched=error(await local('POST','/v1/emails/batch',{emails:[{from,to:AUTH_EMAIL,subject:'Mine',text:'Mine.'},{from,to:'stranger@example.net',subject:'No',text:'No.'}]}),422,'BUILTIN_DOMAIN_RECIPIENT');
-      assert.deepEqual([batched.field,batched.details],['emails.1.to',[{index:1,notMembers:['stranger@example.net']}]]);
+      assert.deepEqual([batched.field,batched.details],['emails.1.to',[{index:1,notMembers:['stranger@example.net'],sendsTo:'workspaceMembers',nextStep:{operationId:'createDomain',method:'POST',path:'/v1/domains'}}]]);
       // A member's own address goes out: a send to it, and onboarding's first email (the dashboard's send to yourself).
       ok(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL.toUpperCase(),subject:'Mine',text:'Mine.'}),202);
       ok(await local('POST',`/v1/domains/${row.id}/test-send`,{}),202);
@@ -25562,7 +25563,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query("UPDATE mailboxes SET send_limits='{\"perDay\":20}' WHERE id=$1",[inbox.id]);
       // Sending to members only, a reply to someone outside the workspace is refused the same way.
       runtime.config.builtinScope='members';
-      assert.deepEqual(error(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),422,'BUILTIN_DOMAIN_RECIPIENT').details,[{notMembers:['someone@sender.example']}]);
+      // (An agent retried this three times in production: the answer says it's a standing limit and what lifts it.)
+      const replied=error(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
+      assert.deepEqual([replied.retryable,replied.details],[false,[{notMembers:['someone@sender.example'],sendsTo:'workspaceMembers',nextStep:{operationId:'createDomain',method:'POST',path:'/v1/domains'}}]]);
+      assert.match(replied.message,/so it can’t send to someone@sender\.example\. To send or reply to anyone else, add your own domain: .* Trying again won’t change this\.$/);
       runtime.config.builtinScope='anyone';
       ok(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),202);
       assert.deepEqual((await db.query("SELECT from_address,to_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{from_address:from,to_addresses:['someone@sender.example']}]);
@@ -25571,7 +25575,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // member, refused the same way while it sends to members only; to a member's own address, sent.
       runtime.config.builtinScope='members';runtime.config.linkHost='links.builtin-fixture.example';
       const forwarder=ok(await local('POST','/v1/inbound/addresses',{address:`forward@${host}`}),201);
-      assert.deepEqual(error(await local('POST','/v1/endpoints',{type:'forward',name:'builtin-outsider',address:'stranger@example.net',from:forwarder.id}),422,'BUILTIN_DOMAIN_RECIPIENT').details,[{notMembers:['stranger@example.net']}]);
+      assert.deepEqual(error(await local('POST','/v1/endpoints',{type:'forward',name:'builtin-outsider',address:'stranger@example.net',from:forwarder.id}),422,'BUILTIN_DOMAIN_RECIPIENT').details,[{notMembers:['stranger@example.net'],sendsTo:'workspaceMembers',nextStep:{operationId:'createDomain',method:'POST',path:'/v1/domains'}}]);
       assert.equal((await db.query("SELECT count(*)::int AS n FROM mailbox_webhooks WHERE workspace_id=$1 AND key='builtin-outsider'",[wid])).rows[0].n,0,'Nothing is kept.');
       ok(await local('POST','/v1/endpoints',{type:'forward',name:'builtin-member',address:AUTH_EMAIL,from:forwarder.id}),201);
       assert.match((await db.query("SELECT snapshot->>'text' AS text FROM sending_emails WHERE workspace_id=$1 AND subject=$2 ORDER BY created_at DESC LIMIT 1",[wid,`Confirm forwarding from forward@${host}`])).rows[0].text,/https:\/\/links\.builtin-fixture\.example\/v1\/forwarding\/confirm\/fwd_/);
