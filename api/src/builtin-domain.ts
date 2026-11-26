@@ -544,10 +544,14 @@ export function builtinRefusal(config: Pick<Config, 'builtinScope'>, d: { code: 
   const host = d.host ?? 'This workspace’s built-in domain', limits = SEND_LIMITS.builtin[config.builtinScope];
   switch (d.code) {
     case 'BUILTIN_DOMAIN_RECIPIENT': {
-      // assertBuiltinRecipients names the recipients; send_admission's backstop can't.
+      // assertBuiltinRecipients names the recipients; send_admission's backstop can't. An agent replying to mail its built-in
+      // address received retried this three times: the answer says it's a standing limit, the step that lifts it, and (in
+      // details) the same as fields: who it sends to and the operation to call next.
       const others = d.notMembers ?? [], shown = others.length > 3 ? [...others.slice(0, 3), `${others.length - 3} more`] : others;
-      const who = !others.length ? '' : others.length === 1 ? `, and ${others[0]} is not one of them` : `, and ${and(shown)} are not among them`;
-      return new ApiError(422, d.code, `${host} only sends to your workspace members’ own sign-in addresses for now${who}. To email anyone, ${ADD_OWN_DOMAIN}.`, 'to');
+      const who = !others.length ? '' : `, so it can’t send to ${and(shown)}`;
+      const error = new ApiError(422, d.code, `${host} is a built-in domain: for now it sends only to members of this workspace, at their own sign-in addresses${who}. To send or reply to anyone else, ${ADD_OWN_DOMAIN}. Trying again won’t change this.`, 'to');
+      error.details = [{ ...(others.length ? { notMembers: others } : {}), ...BUILTIN_RECIPIENT_HINT }];
+      return error;
     }
     case 'BUILTIN_DOMAIN_LIMIT': {
       const at = d.resetAt ? new Date(d.resetAt).toISOString() : undefined;
@@ -572,6 +576,8 @@ export function builtinRefusal(config: Pick<Config, 'builtinScope'>, d: { code: 
     default: return new ApiError(409, 'BUILTIN_DOMAIN_UNAVAILABLE', `Sending from ${host} is unavailable right now. Verify a domain of your own to send.`, 'from', true);
   }
 }
+/** BUILTIN_DOMAIN_RECIPIENT's fields beside notMembers: who a built-in domain sends to, and what to call to email anyone. */
+export const BUILTIN_RECIPIENT_HINT = { sendsTo: 'workspaceMembers', nextStep: { operationId: 'createDomain', method: 'POST', path: '/v1/domains' } } as const;
 const and = (items: string[]) => items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0] ?? '';
 /**
  * A send from the built-in domain once a domain of the workspace's own is verified (or verified before and lost): refused
@@ -615,7 +621,7 @@ export async function assertBuiltinRecipients(runtime: Runtime, db: DbExecutor, 
   if (!found.length) return;
   const first = found[0]!, error = builtinRefusal(runtime.config, { code: 'BUILTIN_DOMAIN_RECIPIENT', host: first.host, notMembers: first.notMembers });
   if (batch) error.field = `emails.${first.index}.to`;
-  error.details = found.map(m => ({ ...(batch ? { index: m.index } : {}), notMembers: m.notMembers }));
+  error.details = found.map(m => ({ ...(batch ? { index: m.index } : {}), notMembers: m.notMembers, ...BUILTIN_RECIPIENT_HINT }));
   throw error;
 }
 /** What a send from a built-in domain uses that it can't send, by request field: every one, not only the first. */

@@ -97,7 +97,7 @@ export const guides: Guide[] = [
         </ol>
       </Section>
       <Section title="Over the API">
-        <p>Create an address with <Link to="/docs/api/createInboundAddress">createInboundAddress</Link>, list conversations with <Link to="/docs/api/listInboundThreads">listInboundThreads</Link> and reply with <Link to="/docs/api/replyToInboundThread">replyToInboundThread</Link>. To get each message as it arrives, subscribe a URL to <code>message.received</code> with <Link to="/docs/api/createInboundWebhook">createInboundWebhook</Link>.</p>
+        <p>Create an address with <Link to="/docs/api/createInboundAddress">createInboundAddress</Link>, list conversations with <Link to="/docs/api/listInboundThreads">listInboundThreads</Link> and reply with <Link to="/docs/api/replyToInboundThread">replyToInboundThread</Link>. From the built-in domain, a reply goes only to members of your workspace for now; to answer anyone else, <Link to="/domains">add a domain of your own</Link>. To get each message as it arrives, subscribe a URL to <code>message.received</code> with <Link to="/docs/api/createInboundWebhook">createInboundWebhook</Link>.</p>
       </Section>
     </>,
   },
