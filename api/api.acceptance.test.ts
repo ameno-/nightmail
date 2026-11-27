@@ -1,6 +1,6 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, createPublicKey, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature, X509Certificate } from 'node:crypto';
+import { createHash, createHmac, createPublicKey, generateKeyPairSync, hkdfSync, randomBytes, randomUUID, sign, verify as verifySignature, X509Certificate } from 'node:crypto';
 import pg from 'pg';
 import { readFile } from 'node:fs/promises';
 import { SnsCertificateState } from './src/operations.js';
@@ -4202,7 +4202,11 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         assert.equal(normalized(result), normalized(reference));
         const headers = (reply: Reply) => {
           assert.equal(reply.headers.get('sunset'), 'Thu, 25 Feb 2027 23:59:59 GMT');
-          assert.equal(reply.headers.get('deprecation'), '@' + Date.parse('2027-02-25T23:59:59Z') / 1000);
+          assert.equal(reply.headers.get('deprecation'), '@1795737600');
+          // A client reading the notice on its release day sees an active deprecation and a future sunset.
+          const asOf = Date.parse('2026-11-27T12:00:00Z');
+          assert.ok(Number(reply.headers.get('deprecation')!.slice(1)) * 1000 < asOf);
+          assert.ok(Date.parse(reply.headers.get('sunset')!) > asOf);
           assert.equal(reply.headers.get('link'), '</docs/operations/createWorkspaceInvitation.md>; rel="successor-version"');
         };
         headers(older);
@@ -4222,6 +4226,61 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         assert.equal(writes.length, 3);
         const losses = errors.mock.calls.map(c => JSON.parse(String(c.arguments[0]))).filter(v => v.code === 'DEPRECATED_CALL_WRITE_LOST');
         assert.deepEqual(losses.map(v => [v.operation, v.lostWrites]), [['inviteWorkspaceMember', 1]]);
+      });
+      await mx.test('50 sequential deprecated calls give 50 recorded calls and a complete usage window, including a budget refusal', async t => {
+        const { nodeRuntime } = await import('./src/adapters/node.js');
+        const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+        const { execFileSync } = await import('node:child_process');
+        const { tmpdir } = await import('node:os'), { join } = await import('node:path');
+        const owner = await workspaceFixture(address(), true), schema = 'notice_' + randomUUID().replaceAll('-', '');
+        const url = new URL(FIXTURE_DATABASE_URL!);
+        url.searchParams.set('options', '-csearch_path=' + schema + ',public');
+        await pool.query(`CREATE SCHEMA ${schema}`);
+        cleanup(t, async () => { await pool.query(`DROP SCHEMA ${schema} CASCADE`); });
+        await pool.query(`CREATE TABLE ${schema}.deprecated_call_days (LIKE public.deprecated_call_days INCLUDING ALL);
+          CREATE TABLE ${schema}.nightmail_migrations AS SELECT name,now()-interval '40 days' AS applied_at FROM public.nightmail_migrations;
+          CREATE FUNCTION ${schema}.slow_counter() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN PERFORM pg_sleep(0.06); RETURN NULL; END$$;
+          CREATE TRIGGER slow_counter BEFORE INSERT ON ${schema}.deprecated_call_days FOR EACH STATEMENT EXECUTE FUNCTION ${schema}.slow_counter()`);
+        const instance = nodeRuntime({ ...process.env, DATABASE_URL: url.href });
+        cleanup(t, instance.close);
+        const rt = instance.runtime;
+        rt.config = { ...runtime.config, apiRateLimitPerMinute: 100 };
+        const key = 'os_' + Buffer.from(randomBytes(32)).toString('hex'), keyId = unique('notice-key');
+        await pool.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$2,'notice',$3,$4,'["read"]','[]')`,
+          [keyId, owner.org.id, createHash('sha256').update(key).digest('hex'), key.slice(0, 14)]);
+        cleanup(t, async () => { await pool.query('DELETE FROM api_keys WHERE id=$1', [keyId]); });
+        const events: Json[] = [];
+        const capture = (line: string) => { const event = JSON.parse(line); if (event.deprecationEvent) events.push(event); };
+        t.mock.method(console, 'warn', capture); t.mock.method(console, 'error', capture);
+        // Await only the response, never the previous count. Each write takes longer than a call.
+        for (let i = 1; i <= 50; i++) {
+          if (i === 50) rt.config.apiRateLimitPerMinute = 0;
+          const reply = await http('GET', '/v1/segments/missing', key, undefined, {}, 5000, origin, r => app.fetch(r, rt));
+          if (i === 50) error(reply, 429, 'REQUEST_RATE_LIMITED'); else error(reply, 404, 'NOT_FOUND');
+        }
+        const count = async () => Number((await pool.query(`SELECT sum(calls) AS n FROM ${schema}.deprecated_call_days WHERE operation='getSegment' AND workspace_id=$1`, [owner.org.id])).rows[0].n);
+        const deadline = Date.now() + 5000;
+        while (await count() < 50 && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+        assert.equal(await count(), 50);
+        assert.equal(events.filter(e => e.deprecationEvent === 'attempt').length, 50);
+        assert.ok(events.every(e => e.deprecationEvent !== 'loss'));
+
+        // Run the operator's actual report as of the following UTC midnight. Its 30 daily
+        // audits use the request lines above; unrelated fixture calls never reach this schema.
+        const dir = await mkdtemp(join(tmpdir(), 'notice-report-'));
+        cleanup(t, () => rm(dir, { recursive: true, force: true }));
+        const archive = join(dir, 'deprecated-usage', 'dev'); await mkdir(archive, { recursive: true });
+        const dayMs = 86400000, end = (Math.floor(Date.now() / dayMs) + 1) * dayMs;
+        for (let i = 1; i <= 30; i++) {
+          const day = new Date(end - i * dayMs).toISOString().slice(0, 10);
+          await writeFile(join(archive, day + '.json'), JSON.stringify({ stage: 'dev', day,
+            attempts: events.filter(e => e.deprecationDay === day).length, lostWrites: 0 }));
+        }
+        const out = execFileSync(process.execPath, ['--import', 'tsx', '--import', 'data:text/javascript,Date.now=()=>'+end, 'scripts/deprecated-usage.ts', 'dev'],
+          { env: { ...process.env, DATABASE_URL: url.href, NIGHTLY_REPORT_DIR: dir }, encoding: 'utf8' });
+        const report = JSON.parse(out);
+        assert.equal(report.status, 'complete', out);
+        assert.deepEqual(report.operations.find((r: Json) => r.operation === 'getSegment'), { operation: 'getSegment', recordedCalls: '50', distinctRecordedWorkspaces: 1 });
       });
       const invitation=ok(await local('POST',`${base}/invitations`,{email:guestEmail,role:'member'},a.cookie),201);
       // The link opens the dashboard's review of it, not the homepage at the site's root.
@@ -31338,6 +31397,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         jobs: ["INSERT INTO jobs(id,workspace_id,type,payload,status,created_at) SELECT 'jobr_'||p.tag||p.day||'x'||i,p.wid,'fixture.retention','{}','completed',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM jobs,p WHERE starts_with(id,'jobr_'||p.tag)"],
         unused_attachments: ["INSERT INTO sending_attachments(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum,created_at) SELECT 'att_'||p.tag||p.day||'x'||i,p.wid,'old.txt','text/plain',1,'attachment',p.wid||'/attachments/att_'||p.tag||p.day||'x'||i,'x',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_attachments,p WHERE starts_with(id,'att_'||p.tag)"],
         unused_template_assets: ["INSERT INTO template_assets(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum,created_at) SELECT 'tas_'||p.tag||p.day||'x'||i,p.wid,'old.png','image/png',1,'inline',p.wid||'/templates/assets/tas_'||p.tag||p.day||'x'||i,'x',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM template_assets,p WHERE starts_with(id,'tas_'||p.tag)"],
+        deprecated_call_days: ["INSERT INTO deprecated_call_days(day,operation,workspace_id,calls) SELECT (now() AT TIME ZONE 'UTC')::date-31-p.day,'op'||i,p.wid,1 FROM p,g", "SELECT count(*) FROM deprecated_call_days,p WHERE workspace_id=p.wid AND operation LIKE 'op%'"],
         jobs_attachment_deletes: ["INSERT INTO jobs(id,workspace_id,type,payload,status,created_at) SELECT 'jobd_'||p.tag||p.day||'x'||i,p.wid,'maintenance.deleteAttachment',jsonb_build_object('key','fixture'),'completed',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM jobs,p WHERE starts_with(id,'jobd_'||p.tag)"],
       };
       const seed = async (day: number, names = Object.keys(steps)) => { for (const name of names) { const [make] = steps[name]!; if (make) await db.query(prefix + make, p(day)); } };

@@ -101,9 +101,19 @@ async function archiveDeprecatedLoss(target: Stage) {
       calculations: [{ operator: 'count', alias: 'events' }] } });
   const rows = result.calculations?.[0]?.aggregates;
   if (!Array.isArray(rows) || rows.length > 2 || rows.some(r => !['attempt','loss'].includes(r.groupKey) || r.sampleInterval !== 1 || !Number.isSafeInteger(r.count) || r.count < 0)) return;
+  const lossLines = rows.find(r => r.groupKey === 'loss')?.count ?? 0;
+  let lostWrites = 0;
+  if (lossLines) {
+    // A failed batch logs the number of calls lost for each key. Count calls, not log lines.
+    const filters = [{ key: 'deprecationDay', value: day }, { key: 'deprecationEvent', value: 'loss' }]
+      .map(field => ({ ...field, type: 'string', operation: 'eq' }));
+    const losses = unique(await events(target, from, until + HOUR, filters, lossLines));
+    if (losses.length !== lossLines || losses.some(e => !Number.isSafeInteger(e.source.lostWrites) || e.source.lostWrites < 1)) return;
+    lostWrites = losses.reduce((total, e) => total + e.source.lostWrites, 0);
+  }
   const folder = join(reportDir, 'deprecated-usage', target.name);
   mkdirSync(folder, { recursive: true });
-  writeFileSync(join(folder, day + '.json'), JSON.stringify({ stage: target.name, day, attempts: rows.find(r => r.groupKey === 'attempt')?.count ?? 0, lostWrites: rows.find(r => r.groupKey === 'loss')?.count ?? 0 }));
+  writeFileSync(join(folder, day + '.json'), JSON.stringify({ stage: target.name, day, attempts: rows.find(r => r.groupKey === 'attempt')?.count ?? 0, lostWrites }));
 }
 
 // Every matching line in the window. The events view samples instead of paging: over a long window, or with a limit

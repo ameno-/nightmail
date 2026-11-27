@@ -232,6 +232,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined,
       // Inbox long polls wait on their workspace's object in the dispatcher namespace and end as mail is stored.
       inboxWake: durableInboxWake(env.DISPATCHER),
+      deprecatedCallScope: env.HYPERDRIVE,
       detach: ctx ? detached => { const run = withRuntime(env, detached, 1, ctx); ctx.waitUntil(run.catch(() => {})); return run; } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);

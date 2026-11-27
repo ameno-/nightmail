@@ -373,6 +373,7 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
         WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
     expired('audience_operation_plans', 'audience_operation_plans', at('expires_at'), sql`expires_at < now() - interval '1 day'`),
     { name: 'audience_list_counts', size: Infinity, statement: foldListCounts },
+    expired('deprecated_call_days', 'deprecated_call_days', at('day'), sql`day < (now() AT TIME ZONE 'UTC')::date - 31`, { size: 256 }),
     // Uncommitted previews hold their parsed CSV (up to 5 MiB) and expire after IMPORT_PREVIEW_RETENTION_DAYS (7 days).
     expired('audience_import_previews', 'audience_imports', at('created_at'), sql`status = 'preview' AND created_at < now() - make_interval(days => ${IMPORT_PREVIEW_RETENTION_DAYS})`, { size: 100, unordered: true }),
     // Backfill import_id on pre-PR audience_consent_audit rows while each committed import's rows JSONB still exists.

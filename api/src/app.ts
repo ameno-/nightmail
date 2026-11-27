@@ -228,7 +228,7 @@ function logRequest(c: Ctx, durationMs: number, retiringRoutes: ReadonlyMap<stri
   const workspace = c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId;
   const notice = retiringRoutes.get(c.req.method + ' ' + route);
   const noticeDay = notice ? new Date().toISOString().slice(0, 10) : undefined;
-  if (notice && noticeDay) noticeResponse(c, notice, workspace || undefined, noticeDay);
+  if (notice && noticeDay) noticeResponse(c, notice, workspace || c.get('rateLimitedWorkspace'), noticeDay);
   const activeMs = Math.max(0, durationMs - (c.get('pollWaitMs') ?? 0));
   countRequest({ route, method: c.req.method, status, durationMs: activeMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
