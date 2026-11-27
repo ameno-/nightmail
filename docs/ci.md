@@ -176,7 +176,7 @@ A flaky check costs every PR a re-run and teaches everyone to ignore red. The po
 
 ### CLS shards
 
-PR/queue CI hashes each shared measurement's page, viewport/theme and mode across eight Postgres/browser fixtures. A ninth runs the exclusive pages one at a time and the television build. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. A failing shard uploads its own shift sources. Local and nightly runs default to the whole production list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=9 bun run cls` from `app/` (indices 0–7 or `alone`).
+PR/queue CI hashes each shared measurement's page, viewport/theme and mode across eight Postgres/browser fixtures. A ninth runs the exclusive pages one at a time and the television build, and a tenth (`docs`) the painted docs pages' comparison, beside them. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. A failing shard uploads its own shift sources. Local and nightly runs default to the whole production list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=9 bun run cls` from `app/` (indices 0–7 or `alone`).
 
 ### CLS: web fonts load before any text, every run
 
@@ -193,10 +193,11 @@ With late fonts the fallbacks keep most pages still, but no fallback wraps every
 
 ### CLS: painted pages
 
-The price, legal and reference pages are painted from their own HTML before the app's code, and the app takes over at the reader's first key (`app/painted-page.ts`). The gate wakes each one with a key, so the painted page and the takeover are both measured.
+The price, legal and docs pages are painted from their own HTML before the app's code, and the app takes over at the reader's first key (`app/painted-page.ts`). The gate wakes each one with a key, so the painted page and the takeover are both measured.
 
-- **Fails when** a legal or reference page's words (`innerText`, the frame and the contents included) differ from the app's once it has taken over: "the painted page's words differ from the app's after it takes over, at character N". **Fix:** the painted page is drawn by the app's own components (`features/legal/prerender.tsx`, `features/docs/prerender.tsx`), so a difference is state the app sets after its first frame or data it reads that the build doesn't. Draw it from the first frame, or give the build the same data.
-- **The reference pages are painted for one address** (their examples name it; `public/theme.js` shows them only there, `data-origin`). The gate's build is made for `http://127.0.0.1:47173` (`VITE_PUBLIC_URL` in `.github/actions/cls-build` and `bun run cls`), and the fixture's first server takes that port; `cls.mjs` reads the address from the build and sends the docs pages there. A build without `VITE_PUBLIC_URL` paints no reference page, and the gate measures the docs as before.
+- **Fails when** a legal or docs page's words (`innerText`, the frame and the contents included) differ from the app's once it has taken over: "the painted page's words differ from the app's after it takes over, at character N". The `docs` shard, a runner of its own beside the CLS shards, reads every docs page so (`app/scripts/docs-sweep.mjs`, 20 to 45 s: all at 1440 × 900 light, the overview and guides also dark and at 390 × 844), and fails the same way, naming the page and view and, for a page that isn't painted or isn't taken over, what it asked for that didn't come. **Fix:** the painted page is drawn by the app's own components (`features/legal/prerender.tsx`, `features/docs/prerender.tsx`), so a difference is state the app sets after its first frame or data it reads that the build doesn't. Draw it from the first frame, or give the build the same data.
+- **The docs pages are painted for one address** (their examples name it; `public/theme.js` shows them only there, `data-origin`). The gate's build is made for `http://127.0.0.1:47173` (`VITE_PUBLIC_URL` in `.github/actions/cls-build` and `bun run cls`), and the fixture's first server takes that port; `cls.mjs` reads the address from the build and sends the docs pages there. A build without `VITE_PUBLIC_URL` paints no docs page, and the gate measures the docs as before.
+- **The docs overview is painted only at its own sections' hashes** (`data-anchors`, its element ids); at any other, such as `/docs#guide-rituals`, the app draws it from the start and moves it (`features/docs/index.tsx`, `legacyPath`, the one list of old addresses). The build stops if one of the overview's ids is an address `legacyPath` moves.
 
 ## Preview stack (`preview`)
 

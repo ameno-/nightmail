@@ -145,7 +145,7 @@ function anchor(hash: string) { try { return decodeURIComponent(hash.slice(1)) }
 // Guides under their names before a rename: rules were called rituals.
 const renamedGuides: Record<string, string> = { rituals: 'rules' }
 // Links from before the docs had pages of their own: /docs#guide-rituals, /docs#mcp and /docs#sendEmail.
-function legacyPath(hash: string, all: Operation[]): string | null {
+export function legacyPath(hash: string, all: Operation[]): string | null {
   const id = anchor(hash)
   if (id === 'mcp') return '/docs/mcp'
   const named = id.startsWith('guide-') ? renamedGuides[id.slice('guide-'.length)] ?? id.slice('guide-'.length) : null
@@ -190,9 +190,11 @@ function useAgentPrompt() {
 // connects with a device code.
 function DocsAgentPrompt() {
   const { prompt, setup, copy } = useAgentPrompt()
+  // Signed out there is no workspace: the prompt has this API's address and a device sign-in, nothing of an account.
+  const signedIn = Boolean(useSession()?.identity)
   return <section id="agent-prompt" className="docs-section docs-agent-prompt" aria-labelledby="docs-agent-prompt" aria-busy={prompt === null || undefined}>
     <h2 id="docs-agent-prompt">Set up with your agent</h2>
-    <p className="muted">Paste this prompt into your coding agent. It has this workspace’s real values; the API key stays in your environment.</p>
+    <p className="muted">{signedIn ? 'Paste this prompt into your coding agent. It has this workspace’s real values; the API key stays in your environment.' : 'Paste this prompt into your coding agent. It has this API’s address, and the key your agent gets stays in your environment.'}</p>
     <AgentPromptPanel value={setup && copy ? copy : prompt ?? ''} preview={prompt ?? ''} pending={prompt === null} setup={setup} line="It connects with a device code: an owner or admin approves it." />
   </section>
 }
@@ -261,9 +263,11 @@ export function DocsPage() {
   const title = missing ? 'Page not found' : page.kind === 'guide' ? page.guide.title : page.kind === 'operation' ? current?.summary ?? 'API reference' : `${productName} API`
   const description = page.kind === 'guide' ? page.guide.summary : current ? operationDescription(current) : spec?.info.description ?? defaultDescription
   useDocumentMeta(docsTitle(page.kind === 'overview' ? null : title), description)
-  // A reference page's own file paints it for a visitor before this code (app/site-pages.ts, prerender.tsx): this page
-  // takes its place once it has what it shows, the API definition and this installation's address.
-  const painted = useShellTakeover('page-shell', '#root .docs-page', (Boolean(spec) && Boolean(site.origin)) || site.foreign)
+  // A docs page's own file paints it for a visitor before this code (app/site-pages.ts, prerender.tsx): this page takes
+  // its place once it has what it shows: the API definition, this installation's address, and the session check's answer
+  // (a visitor's agent prompt and settings are drawn only once it's in: useAgentPrompt, MailServers).
+  const checking = useIsFetching({ queryKey: ['identity'] }) > 0
+  const painted = useShellTakeover('page-shell', '#root .docs-page', (Boolean(spec) && Boolean(site.origin) && !checking) || site.foreign)
   useAnchorScroll(Boolean(site.origin) && (page.kind === 'guide' || missing || Boolean(spec)), painted)
   const legacy = page.kind === 'overview' && location.hash ? legacyPath(location.hash, all) : null
   if (legacy) return <Navigate replace to={legacy} />
