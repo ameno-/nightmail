@@ -12,7 +12,8 @@ export function passwordDigest(pepper: string, value: string) {
 const protocol = z.enum(['imap', 'smtp']);
 const item = z.object({ id: z.string(), name: z.string(), protocols: z.array(protocol), createdAt: z.string() });
 const base = '/v1/inboxes/{id}/app-passwords',
-  params = z.object({ id: z.string().min(1).max(120) }),
+  inboxId = z.string().min(1).max(120),
+  params = z.object({ id: inboxId }),
   meta = { tags: ['Agent inboxes'], security };
 const managerRequired = (c: Ctx) => {
   const a = c.get('actor'), need: Required = { permission: 'configuration', level: 'write', ...(a?.role === 'member' ? { person: 'admin' } : { scope: 'workspace' }) };
@@ -105,10 +106,21 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       path: '/v1/app-passwords',
       operationId: 'listAppPasswords',
       summary: 'List every inbox’s app passwords',
-      description: 'List the active app passwords of every inbox, without their secrets.',
+      description: 'List the newest 500 active app passwords across the workspace, without secrets. With inboxId, list all active passwords of that inbox, oldest first, with the timestamps of the per-inbox list.',
+      request: { query: z.object({ inboxId: inboxId.optional() }) },
       responses: { 200: response(z.object({ data: z.array(item.extend({ inboxId: z.string(), inboxAddress: z.string() })) }).openapi('AppPasswordList')), ...errors },
     }),
     async (c) => {
+      const { inboxId } = c.req.valid('query');
+      if (inboxId !== undefined) {
+        const wid = manager(c);
+        const { rows } = await c.env.db.execute<z.infer<typeof item> & { inboxId: string; inboxAddress: string }>(
+          sql`SELECT p.id,p.name,p.protocols,p.created_at::text AS "createdAt",s.inbox_id AS "inboxId",b.address AS "inboxAddress"
+            FROM inbox_app_passwords p JOIN inbox_state s USING(inbox_id) JOIN mailboxes b ON b.workspace_id=s.workspace_id AND b.id=s.inbox_id
+            WHERE s.workspace_id=${wid} AND s.inbox_id=${inboxId} AND p.revoked_at IS NULL ORDER BY p.created_at`,
+        );
+        return c.json({ data: rows }, 200);
+      }
       const a = c.get('actor');
       if (!actorMailAccess(a)?.admin || a.role === 'member')
         throw managerRequired(c);
