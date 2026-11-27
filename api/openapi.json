@@ -58849,7 +58849,8 @@
         ],
         "operationId": "listInboxAppPasswords",
         "summary": "List an inbox’s app passwords",
-        "description": "List active app passwords without their secrets.",
+        "description": "Deprecated: use `listAppPasswords` with `inboxId`. Removed after 25 February 2027. List active app passwords without their secrets.",
+        "deprecated": true,
         "parameters": [
           {
             "schema": {
@@ -59051,7 +59052,19 @@
         ],
         "operationId": "listAppPasswords",
         "summary": "List every inbox’s app passwords",
-        "description": "List the active app passwords of every inbox, without their secrets.",
+        "description": "List the newest 500 active app passwords across the workspace, without secrets. With inboxId, list all active passwords of that inbox, oldest first, with the timestamps of the per-inbox list.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "inboxId",
+            "in": "query"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Success",

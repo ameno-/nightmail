@@ -6186,9 +6186,36 @@ describe('Hosted MCP OAuth and tools', () => {
           const response = credential.actor ? await dispatchAsActor(app, req, runtime, credential.actor, { requestId: 'req_' + '0'.repeat(32), clientIp: null, userAgent: null }) : await app.fetch(req, runtime);
           const text = await response.text(); let error: Json | undefined; try { error = JSON.parse(text).error; } catch { /* a redirect or a page */ }
           const refused = response.status === 401 || (response.status === 403 && (entry.row.access === 'staff' || !!error?.required));
-          return { refused, hidden: response.status === 404, text, error: error as Json | undefined, answer: `${response.status} ${error?.code ?? ''} ${error?.required ? JSON.stringify(error.required) : error?.message ?? ''}` };
+          return { status: response.status, refused, hidden: response.status === 404, text, error: error as Json | undefined, answer: `${response.status} ${error?.code ?? ''} ${error?.required ? JSON.stringify(error.required) : error?.message ?? ''}` };
         } finally { await db.query('ROLLBACK TO SAVEPOINT permission_table'); }
       };
+      await t.test('filtered app passwords match the per-inbox route for each credential', async () => {
+        const bid = inA!.inbox, old = entries.find(e => e.id === 'listInboxAppPasswords')!, current = entries.find(e => e.id === 'listAppPasswords')!;
+        await db.query(`INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols,created_at)
+          SELECT 'app_parity_'||i,$1,'Mail app','synthetic-parity-'||i,ARRAY['imap'],now()-i*interval '1 day' FROM generate_series(1,2) i`, [bid]);
+        const setup = ok(await request('POST', '/v1/agent/setup-tokens', MANAGER), 201);
+        const agent = ok(await request('POST', '/v1/agent/setup', undefined, { token: setup.token }), 201);
+        secrets.add(agent.key);
+        const extra = {
+          invalid: { kind: 'anon', bearer: 'invalid' },
+          setupKey: { ...credentials.manageKey!, bearer: agent.key },
+          noReceivingConsent: { ...credentials.signIn!, actor: { ...full.actor, receivingConsent: false } },
+        } as const;
+        Object.assign(credentials, extra);
+        for (const label of Object.keys(credentials)) {
+          const before = await call(label, old, `/v1/inboxes/${bid}/app-passwords`, undefined);
+          const after = await call(label, current, `/v1/app-passwords?inboxId=${bid}`, undefined);
+          const status = ['owner', 'admin', 'manageKey', 'setupKey', 'signIn', 'manageAgentToken'].includes(label) ? 200
+            : ['anonymous', 'invalid'].includes(label) ? 401 : 403;
+          assert.deepEqual([before.status, after.status], [status, status], label);
+          if (status === 200) {
+            const original = JSON.parse(before.text).data;
+            assert.deepEqual(original.map((p: Json) => p.id), ['app_parity_2', 'app_parity_1'], label);
+            assert.deepEqual(JSON.parse(after.text).data, original.map((p: Json) => ({ ...p, inboxId: bid, inboxAddress: inboxes[0]!.address })), label);
+          } else assert.deepEqual([after.error?.code, after.error?.required], [before.error?.code, before.error?.required], label);
+        }
+        for (const label of Object.keys(extra)) delete credentials[label];
+      });
       const mismatches: string[] = [];
       // Workspace API keys that aren't full access: limited permissions, or limited to sender domains.
       const limitedKeys = new Set(['readKey', 'sendKey', 'readSendKey', 'domainKey', 'domainReadKey']), unhelpful: string[] = [];
@@ -41032,6 +41059,58 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(objects.has(orphan),false);
     });
   });
+  test('App passwords: the workspace list keeps its wire format and the per-inbox filter precedes its cap', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, fetch: dispatch }) => {
+      const wid = runtime.config.workspaceId, foreign = unique('other-workspace');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [foreign]);
+      // Deterministic rows: all 501 other-inbox passwords are newer than the selected inbox's.
+      for (const [box, workspace, offset, active] of [['selected', wid, 0, 501], ['newer', wid, 1000, 501], ['foreign', foreign, 2000, 1]] as const) {
+        const domain = box + '.example', bid = 'mbx_' + box;
+        await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [box, workspace, domain, REGION]);
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,$4,'inbox','forever')", [bid, workspace, box, 'mail@' + domain]);
+        await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES ($1,$2)', [bid, workspace]);
+        await db.query(`INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols,created_at,revoked_at)
+          SELECT $1::text||i,$1,'Phone',$1::text||i,ARRAY['imap'],timestamptz '2026-01-01 00:00:00.123456Z'+($2::int+i)*interval '1 second',
+            CASE WHEN i=0 THEN now() END FROM generate_series(0,$3::int) i`, [bid, offset, active]);
+      }
+      const get = (path: string) => dispatch(new Request(PUBLIC_ORIGIN + path, { headers: { cookie: manager!.cookie } }));
+      const unfiltered = await get('/v1/app-passwords');
+      const expected = Array.from({ length: 500 }, (_, index) => {
+        const i = 501 - index;
+        return { id: 'mbx_newer' + i, name: 'Phone', protocols: ['imap'], createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 1000 + i, 123)).toISOString(),
+          inboxId: 'mbx_newer', inboxAddress: 'mail@newer.example' };
+      });
+      assert.equal(unfiltered.status, 200);
+      const bytes = Buffer.from(await unfiltered.arrayBuffer());
+      assert.deepEqual(bytes, Buffer.from(JSON.stringify({ data: expected })));
+      t.diagnostic(`Unfiltered password list: ${bytes.length} bytes, SHA-256 ${createHash('sha256').update(bytes).digest('hex')}`);
+      const pending: Promise<void>[] = [];
+      runtime.detach = work => { const writing = work(runtime); pending.push(writing); return writing; };
+      for (const [id, count] of [['mbx_selected', 501], ['mbx_foreign', 0], ['mbx_absent', 0]] as const) {
+        const before = await get(`/v1/inboxes/${id}/app-passwords`);
+        await Promise.all(pending);
+        const after = await get(`/v1/app-passwords?inboxId=${id}`);
+        assert.deepEqual([before.status, after.status], [200, 200]);
+        const old = (await before.json() as { data: Json[] }).data, filtered = (await after.json() as { data: Json[] }).data;
+        assert.equal(old.length, count);
+        assert.deepEqual(filtered.map(({ inboxId, inboxAddress, ...row }: Json) => row), old);
+        if (count) {
+          assert.deepEqual(old.map((p: Json) => p.id), Array.from({ length: count }, (_, i) => id + (i + 1)));
+          assert.match(old[0].createdAt, /\.123456/);
+        }
+        for (const [header, value] of [['deprecation', '@1795737600'], ['sunset', 'Thu, 25 Feb 2027 23:59:59 GMT'], ['link', '</docs/operations/listAppPasswords.md>; rel="successor-version"']] as const) {
+          assert.equal(before.headers.get(header), value);
+          assert.equal(after.headers.get(header), null);
+          assert.equal(unfiltered.headers.get(header), null);
+        }
+      }
+      await Promise.all(pending);
+      assert.equal((await db.query(`SELECT sum(calls)::int AS n FROM deprecated_call_days WHERE operation='listInboxAppPasswords' AND workspace_id=$1`, [wid])).rows[0].n, 3);
+      for (const [id, status] of [['', 422], ['x'.repeat(120), 200], ['x'.repeat(121), 422]] as const)
+        assert.equal((await get('/v1/app-passwords?inboxId=' + id)).status, status);
+    });
+  });
+
   test('API keys: every earlier key kind is an API key with exactly its old access, an inbox key ends with its inbox, and other workspaces are denied', async t => {
     await simulatedSesFixture(t, async ({ db, runtime, local, request }) => {
       const wid = runtime.config.workspaceId, host = `${unique('keys')}.example`, domain = unique('mdom');
@@ -41510,8 +41589,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.notEqual(ok(await folders()).additionalFolders.find((f:Json)=>f.id===recreated.id).uidValidity,before.uidValidity);
         error(await request('POST',base+'/app-passwords',token,{name:'denied',protocols:['smtp']}),403);
         const issued=ok(await local('POST',base+'/app-passwords',{name:'Phone',protocols:['imap','smtp']}),201);
-        assert.ok(issued.password);const listed=ok(await local('GET',base+'/app-passwords'));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
-        ok(await local('DELETE',base+'/app-passwords/'+issued.id));assert.equal(ok(await local('GET',base+'/app-passwords')).data.length,0);
+        assert.ok(issued.password);const listed=ok(await local('GET',`/v1/app-passwords?inboxId=${p.id}`));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
+        ok(await local('DELETE',base+'/app-passwords/'+issued.id));assert.equal(ok(await local('GET',`/v1/app-passwords?inboxId=${p.id}`)).data.length,0);
         // Protocol access is free (migration 295): issuing a password starts no charge period.
         assert.equal((await db.query("SELECT to_regclass('inbox_protocol_periods') AS t")).rows[0].t,null);
         const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});

@@ -5,6 +5,7 @@ import { WRITE_LIMITS } from './health-counters.js';
 
 // Only this notice has a removal date. Earlier, undated deprecations stay as they are.
 export const retiringOperations = new Map<string, string | null>([
+  ['listInboxAppPasswords', 'listAppPasswords'],
   ['inviteWorkspaceMember', 'createWorkspaceInvitation'],
   ['createSegment', null], ['getSegment', null], ['updateSegment', null],
   ['deleteSegment', null], ['previewSegment', null],
@@ -15,7 +16,7 @@ const deprecatedFrom = new Date('2026-11-27T00:00:00Z');
 const sunset = new Date('2027-02-25T23:59:59Z');
 const sunsetDay = sunset.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 export const noticeText = (replacement: string | null) => replacement
-  ? `Deprecated: use \`${replacement}\`. Removed after ${sunsetDay}.`
+  ? `Deprecated: use \`${replacement}\`${replacement === 'listAppPasswords' ? ' with `inboxId`' : ''}. Removed after ${sunsetDay}.`
   : `Deprecated, with no replacement. Removed after ${sunsetDay}. Tell support if you rely on it.`;
 
 type Call = { day: string; operation: string; workspace: string; calls: number };

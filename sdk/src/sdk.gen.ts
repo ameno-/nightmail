@@ -4301,7 +4301,9 @@ export const getInboxChanges = <ThrowOnError extends boolean = false>(options: O
 /**
  * List an inbox’s app passwords
  *
- * List active app passwords without their secrets.
+ * Deprecated: use `listAppPasswords` with `inboxId`. Removed after 25 February 2027. List active app passwords without their secrets.
+ *
+ * @deprecated
  */
 export const listInboxAppPasswords = <ThrowOnError extends boolean = false>(options: Options<ListInboxAppPasswordsData, ThrowOnError>): RequestResult<ListInboxAppPasswordsResponses, ListInboxAppPasswordsErrors, ThrowOnError> => (options.client ?? client).get<ListInboxAppPasswordsResponses, ListInboxAppPasswordsErrors, ThrowOnError>({
     security: [
@@ -4351,7 +4353,7 @@ export const createInboxAppPassword = <ThrowOnError extends boolean = false>(opt
 /**
  * List every inbox’s app passwords
  *
- * List the active app passwords of every inbox, without their secrets.
+ * List the newest 500 active app passwords across the workspace, without secrets. With inboxId, list all active passwords of that inbox, oldest first, with the timestamps of the per-inbox list.
  */
 export const listAppPasswords = <ThrowOnError extends boolean = false>(options?: Options<ListAppPasswordsData, ThrowOnError>): RequestResult<ListAppPasswordsResponses, ListAppPasswordsErrors, ThrowOnError> => (options?.client ?? client).get<ListAppPasswordsResponses, ListAppPasswordsErrors, ThrowOnError>({
     security: [

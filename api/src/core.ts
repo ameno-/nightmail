@@ -705,6 +705,8 @@ export const agentTokenMintRefusal = (a: Actor) => a.credential === 'mcp' && a.k
 // enforces a guard and the MCP listing that must agree with it call the same predicate.
 /** mailboxAuth: inbox keys, or a workspace credential through actorMailAccess. */
 export const mailboxRoute = (path: string) => /^\/v1\/(?:inbound|inboxes)(?:\/|$)/.test(path);
+/** Only the inbox-filtered list uses mailbox authentication; the unfiltered list takes workspace credentials. */
+export const filteredInboxPasswords = (c: Ctx) => c.req.path === '/v1/app-passwords' && (c.req.method === 'GET' || c.req.method === 'HEAD') && c.req.queries('inboxId') !== undefined;
 const appPasswordRoute = (path: string) => /^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/.test(path);
 /** requireReceivingConsent: an MCP grant without explicit receiving consent is refused. */
 export const receivingConsentRoute = (path: string) =>

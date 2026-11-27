@@ -7,7 +7,7 @@ import { reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-mem
 import { IMPORT_PREVIEW_RATE_PER_MINUTE, importPreviewReservationBytes } from './audience.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { actor, agentSetupRefusal, budgetExhausted, restrictedArea, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, apiFailureBody, describeApiFailure, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
+import { actor, agentSetupRefusal, budgetExhausted, restrictedArea, filteredInboxPasswords, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, apiFailureBody, describeApiFailure, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -331,7 +331,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (supportPath(c.req.path)) return (await wrapModuleLoad(() => import('./support.js'))).supportGate(c, next);
     if (c.req.path === '/v1/public/support-keys') return next();
     // Inbound authenticates its own address-scoped keys as well as live administrators.
-    if (/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) || c.req.path.startsWith('/v1/inbound/') || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
+    if (/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) || c.req.path.startsWith('/v1/inbound/') || filteredInboxPasswords(c) || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
     // A UI note's screenshot link is its own short-lived credential (src/ui-notes.ts), as is a stored preview's (src/preview-images.ts).
     if (['GET', 'HEAD'].includes(c.req.method) && /^\/v1\/preview-images\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.method === 'GET' && /^\/v1\/ui-notes\/screenshots\/[^/]+$/.test(c.req.path)) return next();
@@ -415,7 +415,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   });
   app.use('/v1/*', (c, next) => { const refusal = agentSetupRefusal(c.get('actor'), c.req.path, c.req.method); if (refusal) throw refusal; return next(); });
   // Path guards are shared with the MCP listing (core.ts). Mailbox paths check receiving consent after mailboxAuth.
-  app.use('/v1/*', (c, next) => receivingConsentRoute(c.req.path) && !mailboxRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
+  app.use('/v1/*', (c, next) => receivingConsentRoute(c.req.path) && !mailboxRoute(c.req.path) && !filteredInboxPasswords(c) ? requireReceivingConsent(c, next) : next());
   // Idempotency-Key on every create that does not handle it itself (inbound paths register their own after inbox auth).
   app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) ? next() : authenticatedCreates(c, next));
   // These areas have read or send routes as well as manage routes. An MX member's
