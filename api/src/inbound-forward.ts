@@ -1,8 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { requestHeader, headerPrefix } from './brand.js';
-import { ApiError, digest, errors, response, FORWARDED_MAIL_PATH, type App } from './core.js';
+import { ApiError, digest, errors, response, FORWARDED_MAIL_PATH, type App, type Runtime } from './core.js';
 import { mailboxDomains, mailReceipts } from './db/mailbox.js';
 import { forwardedStagingKey, mailObjectsFor } from './mail-objects.js';
 import { acceptForwardedReceipt, wakeReceivedMail, FORWARD_BUCKET } from './mailbox-receipts.js';
@@ -13,10 +13,17 @@ const Accepted = z.object({ accepted: z.literal(true), duplicate: z.boolean().de
 const sha256 = (value: string) => createHash('sha256').update(value).digest();
 const invalid = (name: string, rule: string) => new ApiError(422, 'FORWARD_ENVELOPE_INVALID', `${headerPrefix}${name} ${rule}`);
 
+/** Queues the deletion of a staged copy unless an unsettled receipt, or a hold that will become one, reads it. */
+async function dropUnreadStaging(runtime: Runtime, wid: string, mid: string, key: string) {
+  await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mail.deleteObjects',${wid},jsonb_build_object('region',${runtime.config.regions[0]!}::text,'bucket',${FORWARD_BUCKET}::text,'keys',jsonb_build_array(${key}::text))
+    WHERE NOT EXISTS(SELECT FROM mail_receipts WHERE workspace_id=${wid} AND ses_message_id=${mid} AND status IN ('pending','held') AND notification->>'stagingKey'=${key})
+      AND NOT EXISTS(SELECT FROM mail_receipt_holds WHERE bucket=${FORWARD_BUCKET} AND ses_message_id=${mid} AND status='held' AND notification->>'stagingKey'=${key})`);
+}
+
 export function registerForwardedMail(app: App) {
   app.openapi(createRoute({
     method: 'post', path: FORWARDED_MAIL_PATH, operationId: 'receiveForwardedMail', tags: ['Events'], security: [], summary: 'Receive forwarded mail',
-    description: `Self-hosted only, with MAIL_FORWARDER_SECRET set: a trusted mail forwarder posts one raw RFC 5322 message (at most 40 MiB) with its envelope, authenticated by Authorization: Bearer <MAIL_FORWARDER_SECRET>. Headers: ${headerPrefix}Message-Id, the forwarder's own ID for this delivery (1 to 512 characters; repeating it stores nothing new); ${headerPrefix}Envelope-From, the envelope sender (empty for a bounce); ${headerPrefix}Envelope-To, 1 to 200 comma-separated envelope recipients. Recipients that are not on a receiving domain are ignored; if none is, the request fails with FORWARD_RECIPIENT_UNKNOWN and nothing is stored. No SPF, DKIM, DMARC, spam or virus check runs: the forwarder is trusted to screen mail.`,
+    description: `Self-hosted only, with MAIL_FORWARDER_SECRET set: a trusted mail forwarder posts one raw RFC 5322 message (at most 40 MiB) with its envelope, authenticated by Authorization: Bearer <MAIL_FORWARDER_SECRET>. Headers: ${headerPrefix}Message-Id, the forwarder's own ID for this delivery (1 to 512 characters; repeating it stores nothing new, and it adds recipients only with the same bytes, or fails with FORWARD_MESSAGE_CHANGED); ${headerPrefix}Envelope-From, the envelope sender (empty for a bounce); ${headerPrefix}Envelope-To, 1 to 200 comma-separated envelope recipients. Recipients that are not on a receiving domain are ignored; if none is, the request fails with FORWARD_RECIPIENT_UNKNOWN and nothing is stored. No SPF, DKIM, DMARC, spam or virus check runs: the forwarder is trusted to screen mail.`,
     request: { body: { required: true, content: { 'message/rfc822': { schema: z.string().openapi({ format: 'binary' }) } } } },
     responses: { 202: response(Accepted), ...errors },
   }), async c => {
@@ -35,16 +42,20 @@ export function registerForwardedMail(app: App) {
     const recipients = envelope.filter(address => hosts.has(host(address)));
     if (!recipients.length) throw new ApiError(422, 'FORWARD_RECIPIENT_UNKNOWN', 'No envelope recipient is on a domain that receives mail here. Nothing was stored.');
     const mid = `fwd-${await digest(forwarderId)}`;
-    const [receipt] = await c.env.db.select({ recipients: mailReceipts.recipients }).from(mailReceipts).where(and(eq(mailReceipts.workspaceId, wid), eq(mailReceipts.sesMessageId, mid)));
+    const [receipt] = await c.env.db.select({ recipients: mailReceipts.recipients, notification: mailReceipts.notification }).from(mailReceipts).where(and(eq(mailReceipts.workspaceId, wid), eq(mailReceipts.sesMessageId, mid)));
     if (receipt && recipients.every(address => receipt.recipients.includes(address))) return c.json({ accepted: true as const, duplicate: true, recipients }, 202);
-    // The first bytes accepted under an ID are the message: a later request for it never replaces them.
-    if (!receipt) {
-      await boundRequestBody(c, MAX_RAW_BYTES);
-      const raw = new Uint8Array(await c.req.arrayBuffer());
-      if (!raw.length) throw new ApiError(422, 'FORWARD_MESSAGE_EMPTY', 'The body must be the raw message.');
-      await mailObjectsFor(c.env, wid, FORWARD_BUCKET).put(forwardedStagingKey(wid, mid), raw, 'message/rfc822');
-    }
-    const queued = await acceptForwardedReceipt(c.env, { mid, sender, recipients });
+    await boundRequestBody(c, MAX_RAW_BYTES);
+    const raw = new Uint8Array(await c.req.arrayBuffer());
+    if (!raw.length) throw new ApiError(422, 'FORWARD_MESSAGE_EMPTY', 'The body must be the raw message.');
+    // The first bytes accepted under an ID are the message: new recipients are added only to those same bytes.
+    const hash = createHash('sha256').update(raw).digest('hex');
+    if (receipt && (receipt.notification as { sha256?: string }).sha256 !== hash) throw new ApiError(409, 'FORWARD_MESSAGE_CHANGED', 'This ID was accepted with a different message. Send another message under its own ID.');
+    const stagingKey = forwardedStagingKey(wid, mid);
+    await mailObjectsFor(c.env, wid, FORWARD_BUCKET).put(stagingKey, raw, 'message/rfc822');
+    let queued: number;
+    try { queued = await acceptForwardedReceipt(c.env, { mid, sender, recipients, stagingKey, sha256: hash }); }
+    // A concurrent request for this ID, or a refusal, leaves a copy no receipt reads: it is deleted like a settled one (591).
+    finally { await dropUnreadStaging(c.env, wid, mid, stagingKey); }
     try { await wakeReceivedMail(c.env, queued); } catch { /* the job is committed: the runner takes it */ }
     return c.json({ accepted: true as const, duplicate: false, recipients }, 202);
   });

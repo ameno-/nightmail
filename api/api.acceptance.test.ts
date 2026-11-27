@@ -25800,6 +25800,96 @@ test('self-hosted forwarded mail reaches a mailbox without SES: attachment, repe
     assert.deepEqual(threads, { n: 3, threads: 1 }, JSON.stringify(outcomes));
     const batched = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages`)).data as Json[];
     for (const row of batched) assert.match(await download(ok(await local('GET', `/v1/inbound/messages/${row.id}?includeDelivery=true`)).rawUrl), /The numbers are attached|Content-Disposition/);
+
+    // The staged copy goes once its receipt settles. The runtime's storage has no lifecycle rule to expire it.
+    const staged = () => [...objects.keys()].filter(key => key.includes('/in-fwd-'));
+    await run('mail.deleteObjects');
+    assert.deepEqual(staged(), [], 'Single and batched ingest both leave no staged copy.');
+
+    // Too many lines or too many bytes to parse: the subject and sender name still come from the header block.
+    const blind = `hidden-${randomUUID()}@elsewhere.example.net`;
+    const unparsed = (id: string, body: string) => ['From: =?UTF-8?Q?Ren=C3=A9e?=\r\n =?UTF-8?Q?_Dupont?= <renee@sender.example.org>', `To: ${inbox.address}`, `Bcc: ${blind}`,
+      `Subject: =?UTF-8?Q?${id}_r=C3=A9sum=C3=A9_?=\r\n =?UTF-8?B?${Buffer.from('für Zoë').toString('base64')}?=\r\n and the rest`, `Message-ID:\r\n <${id}@sender.example.org>`, 'Content-Type: text/plain', '', body].join('\r\n');
+    const tall = 'x\r\n'.repeat(30_100), big = `${'y'.repeat(998)}\r\n`.repeat(6_500);
+    assert.ok(Buffer.byteLength(big) > 6 * 1024 * 1024);
+    const expectUnparsed = async (...ids: string[]) => {
+      const rows = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages`)).data as Json[];
+      for (const id of ids) {
+        const row = rows.find(item => item.subject === `${id} résumé für Zoë and the rest`);
+        assert.ok(row, `${id}: ${JSON.stringify(rows.map(item => [item.subject, item.from]))}`);
+        const stored = (await db.query('SELECT from_name, from_address, message_id FROM mail_messages WHERE workspace_id=$1 AND id=$2', [wid, row.id])).rows[0];
+        assert.deepEqual([stored.from_name, stored.from_address], ['Renée Dupont', 'renee@sender.example.org']);
+        assert.equal(stored.message_id, `${id}@sender.example.org`);
+        const read = ok(await local('GET', `/v1/inbound/messages/${row.id}?includeDelivery=true`));
+        assert.equal(read.status, 'unparsed');
+        assert.doesNotMatch(await download(read.rawUrl), new RegExp(blind));
+      }
+    };
+    ok(await post('delivery-tall', unparsed('tall', tall), inbox.address), 202);
+    assert.equal(staged().length, 1);
+    await run('mailbox.ingest');
+    await run('mail.deleteObjects');
+    await expectUnparsed('tall');
+    for (const id of ['tall-batched', 'tall-paired']) ok(await post(`delivery-${id}`, unparsed(id, tall), inbox.address), 202);
+    const pair = (await db.query(`UPDATE jobs SET status='running',attempts=attempts+1 WHERE workspace_id=$1 AND type='mailbox.ingest' AND status='pending' RETURNING id,attempts,payload`, [wid])).rows;
+    const paired = await mailboxIngestJobs['mailbox.ingest']!.batch!(runtime, pair.map(job => ({ job: { id: job.id, attempts: job.attempts, workspaceId: wid }, payload: job.payload })));
+    assert.deepEqual(paired.map(outcome => outcome.error), [undefined, undefined]);
+    await db.query(`UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='mailbox.ingest' AND status='running'`, [wid]);
+    await run('mail.deleteObjects');
+    await expectUnparsed('tall-batched', 'tall-paired');
+    ok(await post('delivery-big', unparsed('big', big), inbox.address), 202);
+    await run('mailbox.ingest');
+    await run('mail.deleteObjects');
+    await expectUnparsed('big');
+    assert.deepEqual(staged(), []);
+
+    // The same ID reaching more recipients one request at a time, before and after ingest.
+    const second = ok(await local('POST', '/v1/inboxes', { type: 'persistent', domain, localPart: 'second' }), 201);
+    const third = ok(await local('POST', '/v1/inboxes', { type: 'persistent', domain, localPart: 'third' }), 201);
+    const shared = mime('shared', [`Bcc: ${blind}`]);
+    ok(await post('delivery-shared', shared, inbox.address), 202);
+    ok(await post('delivery-shared', shared, second.address), 202);
+    error(await post('delivery-shared', mime('swapped'), third.address), 409, 'FORWARD_MESSAGE_CHANGED');
+    await run('mail.deleteObjects');
+    assert.equal(staged().length, 1, 'Only the copy the pending receipt reads is left.');
+    await run('mailbox.ingest');
+    await run('mail.deleteObjects');
+    assert.deepEqual(staged(), []);
+    assert.equal(ok(await post('delivery-shared', shared, inbox.address), 202).duplicate, true);
+    assert.deepEqual(staged(), [], 'A duplicate stages nothing.');
+    ok(await post('delivery-shared', shared, third.address), 202);
+    assert.equal(staged().length, 1);
+    await run('mailbox.ingest');
+    await run('mail.deleteObjects');
+    assert.deepEqual(staged(), []);
+    for (const box of [second, third]) assert.equal((ok(await local('GET', `/v1/inboxes/${box.id}/messages`)).data as Json[]).length, 1);
+
+    // An ingest that fails for good drops its copy too.
+    ok(await post('delivery-doomed', mime('doomed', [`Bcc: ${blind}`]), inbox.address), 202);
+    const put = runtime.storage.put;
+    runtime.storage.put = async () => { throw new Error('Planted storage outage'); };
+    await db.query(`UPDATE mail_receipts SET created_at=now()-interval '3 days' WHERE workspace_id=$1 AND status='pending'`, [wid]);
+    await db.query(`UPDATE jobs SET attempts=50 WHERE workspace_id=$1 AND type='mailbox.ingest' AND status='pending'`, [wid]);
+    await run('mailbox.ingest');
+    runtime.storage.put = put;
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM mail_receipts WHERE workspace_id=$1 AND status='failed'`, [wid])).rows[0].n, 1);
+    await run('mail.deleteObjects');
+    assert.deepEqual(staged(), []);
+
+    // Reopening a receipt for a late recipient uploads its attachment again, and no row keeps that second upload. The
+    // hourly upkeep's sweeper removes it, as it does for any unowned upload.
+    await db.query('UPDATE mail_candidate_uploads SET check_at=now() WHERE workspace_id=$1', [wid]);
+    for (let swept = 0; swept < 50 && (await db.query('SELECT FROM mail_candidate_uploads WHERE workspace_id=$1 AND check_at<=now()', [wid])).rowCount; swept++)
+      await mailboxIngestJobs['mailbox.cleanUploads']!(runtime, {}, { id: 'mailbox.cleanUploads', attempts: 1, workspaceId: wid }).catch(cause => { if (cause.name !== 'JobDeferred' && cause.message !== 'Job deferred.') throw cause; });
+
+    // Deleting the mail removes every stored copy of it.
+    assert.ok(objects.size > 0);
+    for (const box of [inbox, second, third]) for (const row of ok(await local('GET', `/v1/inboxes/${box.id}/messages`)).data as Json[])
+      ok(await local('DELETE', `/v1/inboxes/${box.id}/messages/${row.id}?permanent=true`));
+    await db.query('SELECT mail_gc_batch(1000)');
+    await run('mail.deleteObjects');
+    assert.deepEqual([...objects].filter(([, object]) => Buffer.from(object.body).includes(blind)).map(([key]) => key), [], 'No object still holds the Bcc line.');
+    assert.deepEqual([...objects.keys()], []);
   });
 });
 

@@ -145,8 +145,9 @@ function storageMailObjects(wid: string, storage: Storage): MailObjects {
     async delete(keys) { keys.forEach(k => assertMailKey(wid, k)); for (const k of keys) await storage.delete(k); },
   };
 }
-/** Where a forwarded message waits for ingest (bucket `local:`), beside the stored copies in the runtime's object storage. */
-export const forwardedStagingKey = (wid: string, sesMessageId: string) => mailKey(wid, 'default', null, `in-${sesMessageId}`);
+/** Where one forwarded request's bytes wait for ingest (bucket `local:`), beside the stored copies in the runtime's object
+ * storage. Each request has its own key, so a deletion queued for one never takes another's. */
+export const forwardedStagingKey = (wid: string, sesMessageId: string) => mailKey(wid, 'default', null, `in-${sesMessageId}-${crypto.randomUUID()}`);
 /** The store a bucket column names. S3 buckets need the caller's client for that bucket's credentials. */
 export function mailObjectsFor(runtime: Runtime, wid: string, bucket: string, s3?: S3Client): MailObjects {
   if (bucket.startsWith(R2)) {

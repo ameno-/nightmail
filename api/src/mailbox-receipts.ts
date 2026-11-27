@@ -7,6 +7,8 @@ import { builtinApex } from './builtin-limits.js';
 import {TAG_PREFIX} from './resource-tags.js';
 
 export type ReceivedNotification = {
+  /** Forwarded mail only (inbound-forward.ts): where its raw bytes wait for ingest. */
+  stagingKey?: string;
   notificationType?: string;
   mail?: { messageId?: string; timestamp?: string; source?: string; destination?: string[]; commonHeaders?: { from?: string[]; to?: string[]; subject?: string; messageId?: string; date?: string } };
   receipt?: { timestamp?: string; recipients?: string[]; spamVerdict?: { status?: string }; virusVerdict?: { status?: string }; spfVerdict?: { status?: string }; dkimVerdict?: { status?: string }; dmarcVerdict?: { status?: string };
@@ -59,7 +61,10 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
     SELECT g.workspace_id,s.mid,s.region,s.bucket,'workspaces/'||g.workspace_id||'/raw/'||s.mid||'.eml',g.recipients,s.notification FROM groups g JOIN source s USING(bucket,mid) ORDER BY g.workspace_id,s.mid
     ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a)),status=CASE WHEN r.status='held' THEN 'held' ELSE 'pending' END,processed_at=NULL,
       -- A processed receipt reopened for new recipients is not in recovery: its job gets a full retry sequence (205).
-      last_recovered_at=CASE WHEN r.status='processed' THEN NULL ELSE r.last_recovered_at END
+      last_recovered_at=CASE WHEN r.status='processed' THEN NULL ELSE r.last_recovered_at END,
+      -- A processed forwarded receipt's staged bytes are gone (591), so the reopen reads the new request's copy. An
+      -- unsettled one keeps reading the copy it has.
+      notification=CASE WHEN r.bucket='local:' AND r.status='processed' THEN jsonb_set(r.notification,'{stagingKey}',excluded.notification->'stagingKey') ELSE r.notification END
     WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients
       AND (SELECT count(DISTINCT a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a))<=200 RETURNING workspace_id,ses_message_id,status
   ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM receipts WHERE status='pending' ORDER BY workspace_id,ses_message_id RETURNING 1),
@@ -112,9 +117,9 @@ export const FORWARD_BUCKET='local:', FORWARD_TOPIC='local:forwarder';
 /** A trusted forwarder's message (inbound-forward.ts), already staged in object storage. No SPF, DKIM or DMARC result comes
  * with it, so none is recorded. No spam or virus scan runs here either: both are recorded as PASS because the operator's
  * forwarder is trusted to screen mail, and anything else would quarantine every message. */
-export async function acceptForwardedReceipt(runtime:Runtime,input:{mid:string;sender:string;recipients:string[]}) {
+export async function acceptForwardedReceipt(runtime:Runtime,input:{mid:string;sender:string;recipients:string[];stagingKey:string;sha256:string}) {
   const at=new Date().toISOString();
-  const notification={mail:{source:input.sender,timestamp:at},receipt:{timestamp:at,spamVerdict:{status:'PASS'},virusVerdict:{status:'PASS'}}};
+  const notification={mail:{source:input.sender,timestamp:at},receipt:{timestamp:at,spamVerdict:{status:'PASS'},virusVerdict:{status:'PASS'}},stagingKey:input.stagingKey,sha256:input.sha256};
   const r=await route(runtime,sql`SELECT ${FORWARD_BUCKET}::text AS bucket,${input.mid}::text AS mid,${runtime.config.regions[0]}::text AS region,${FORWARD_TOPIC}::text AS topic_arn,${at}::timestamptz AS at,
     ${at}::timestamptz+interval '48 hours' AS expires_at,${mailJson(notification)}::jsonb AS notification,${mailJson(input.recipients)}::jsonb AS recipients,false AS fenced,NULL::text AS binding_workspace`,false);
   if(!r.trusted) throw new ApiError(409,'FORWARD_RECEIVING_OFF','Turn receiving on for a domain first: POST /v1/inbound/domains/{id}/enable.');
