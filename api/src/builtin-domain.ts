@@ -646,9 +646,9 @@ export type BuiltinReplyRefusal = 'replies_off' | 'extra_recipient' | 'not_recei
  * message, and NIGHTMAIL_BUILTIN_REPLIES's daily counts: per workspace, and per recipient across every workspace (sign-ups
  * are cheap: many workspaces must not each get their own allowance to the same person), for support its own count across
  * every workspace instead. Everything else a send meets (screening, standing, limits, suppression) still applies. Runs
- * under the workspace's send locks and a lock for the recipient (one for all of support's addresses), so the counts can't
- * race. True when allowed (and recorded in builtin_replies, in the send's transaction), else the condition that failed: a
- * code for the log and plain words for the caller, never the numbers.
+ * under the workspace's send locks and, for anyone but support, a lock for the recipient, so the counts can't race
+ * (support's count is approximate: see below). True when allowed (and recorded in builtin_replies, in the send's
+ * transaction), else the condition that failed: a code for the log and plain words for the caller, never the numbers.
  */
 export async function builtinReplyException(runtime: Runtime, db: DbExecutor, workspaceId: string, recipients: string[], reply: BuiltinReply, host: string): Promise<true | { reason: BuiltinReplyRefusal; text: string }> {
   const caps = runtime.config.builtinReplies!, refuse = (reason: BuiltinReplyRefusal, text: string) => ({ reason, text });
@@ -658,19 +658,19 @@ export async function builtinReplyException(runtime: Runtime, db: DbExecutor, wo
   const supportIds = caps.supportPerDay > 0 ? runtime.config.support?.addressIds ?? [] : [];
   const supportAddresses = sql`(SELECT lower(b.address) FROM mailboxes b WHERE b.id=ANY(${sql.param(supportIds)}::text[])
     UNION ALL SELECT lower(a.address) FROM mailbox_addresses a WHERE a.mailbox_id=ANY(${sql.param(supportIds)}::text[]))`;
+  const ours = (domain: string) => platformHosts(runtime.config).some(h => domain === h || domain.endsWith(`.${h}`));
   // Replies to one person from every workspace take turns, so the count across workspaces holds (the send locks are per
-  // workspace); replies to any of support's addresses share one turn, for its count across them all.
-  await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(CASE WHEN ${to}::text IN ${supportAddresses} THEN 'builtin-replies:support' ELSE ${to}::text END, 57501))`);
+  // workspace). Not replies to support: its count takes no lock (below).
+  await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${to}, 57501)) ${ours(to.split('@')[1] ?? '') ? sql`WHERE ${to}::text NOT IN ${supportAddresses}` : sql``}`);
   const { rows: [m] } = await db.execute<{ from_address: string; automated: boolean; spam: boolean; verified: boolean; unverified: boolean; reply_to: { address: string }[];
-    answered: boolean; addressed: boolean; today: number; recipient_today: number; suppressed: boolean; support: boolean; support_today: number }>(sql`SELECT lower(m.from_address) AS from_address, m.automated, m.spam,
+    answered: boolean; addressed: boolean; today: number; recipient_today: number; suppressed: boolean; support: boolean }>(sql`SELECT lower(m.from_address) AS from_address, m.automated, m.spam,
       l.reply_author_verified AS verified, 'unverified'=ANY(l.labels) AS unverified, m.reply_to,
       EXISTS(SELECT FROM builtin_replies r WHERE r.workspace_id=${workspaceId} AND r.message_id=m.id) AS answered,
       (SELECT count(*)::int FROM builtin_replies r WHERE r.workspace_id=${workspaceId} AND r.created_at>now()-interval '1 day') AS today,
       EXISTS(SELECT FROM jsonb_array_elements(coalesce(m."to",'[]'::jsonb)||coalesce(m.cc,'[]'::jsonb)) a WHERE lower(split_part(coalesce(a->>'address',a#>>'{}'),'@',2))=${host}) AS addressed,
       (SELECT count(*)::int FROM builtin_replies r WHERE r.recipient=lower(m.from_address) AND r.created_at>now()-interval '1 day') AS recipient_today,
       EXISTS(SELECT FROM audience_contacts c WHERE c.workspace_id=${workspaceId} AND lower(c.email)=lower(m.from_address) AND c.suppressed AND c.deleted_at IS NULL) AS suppressed,
-      lower(m.from_address) IN ${supportAddresses} AS support,
-      (SELECT count(*)::int FROM builtin_replies r WHERE r.recipient IN ${supportAddresses} AND r.created_at>now()-interval '1 day') AS support_today
+      lower(m.from_address) IN ${supportAddresses} AS support
     FROM mail_messages m JOIN mailbox_messages l ON l.message_id=m.id AND l.workspace_id=m.workspace_id AND l.mailbox_id=${reply.mailboxId}
     WHERE m.workspace_id=${workspaceId} AND m.id=${reply.messageId} AND m.direction='inbound' LIMIT 1`);
   if (!m) return refuse('not_received', 'Only a reply to a message this address received can go to someone outside the workspace.');
@@ -680,8 +680,8 @@ export async function builtinReplyException(runtime: Runtime, db: DbExecutor, wo
   // Of our own addresses only support's (an address of NIGHTMAIL_SUPPORT_ADDRESS_IDS at a platform domain, while its count is
   // on): an agent that wrote to support may answer what support wrote back. Notices, no-reply senders, every other mailbox
   // at our domains and other built-in domains stay refused.
-  const ours = platformHosts(runtime.config).some(h => domain === h || domain.endsWith(`.${h}`)), support = ours && m.support;
-  if (isBuiltinHost(runtime.config, domain) || (ours && !support))
+  const support = ours(domain) && m.support;
+  if (isBuiltinHost(runtime.config, domain) || (ours(domain) && !support))
     return refuse('own_address', `It came from another built-in domain or one of ${productName}’s own addresses, so the built-in domain can’t answer it. The one ${productName} address it answers is support, replying to what support sent.`);
   const { NO_REPLY } = await import('./mailbox-send.js');
   if (m.automated || m.spam || NO_REPLY.test(m.from_address)) return refuse('automated', 'The message is automated (an auto-reply, bounce or list mail) or junk, so it can’t be answered from the built-in domain.');
@@ -691,11 +691,17 @@ export async function builtinReplyException(runtime: Runtime, db: DbExecutor, wo
   if (m.answered) return refuse('already_answered', 'This message was already answered once from the built-in domain.');
   const used = 'The built-in domain’s daily allowance for replies outside the workspace is used (for the workspace or for this address). Try again tomorrow, or add a domain of your own.';
   if (m.today >= caps.perDay) return refuse('daily_cap', used);
+  if (!support && m.recipient_today >= caps.perRecipientPerDay) return refuse('recipient_cap', used);
   // Support has a count of its own instead of the per-recipient one: that count keeps cheap sign-ups from adding up their
   // allowances against one outside person, but support is our own address, which every customer may answer on the same
-  // day. Its own count (NIGHTMAIL_BUILTIN_SUPPORT_REPLIES, every workspace together) keeps these replies well inside the
-  // daily intake support shares with abuse@, privacy@ and legal@ (support/src/limits.ts mailPerDay).
-  if (support ? m.support_today >= caps.supportPerDay : m.recipient_today >= caps.perRecipientPerDay) return refuse(support ? 'support_cap' : 'recipient_cap', used);
+  // day. Its own count (NIGHTMAIL_BUILTIN_SUPPORT_REPLIES, every workspace together, support's addresses and aliases) is
+  // deliberately approximate: read without a lock just before the grant is written, so replies in other workspaces at the
+  // same moment may each pass at the last place, going over by at most the replies in flight. A lock shared by every
+  // workspace would make each reply to support wait for another's content screening while holding its own workspace's
+  // send lock. A few over 300 stays well inside the daily intake support shares with abuse@, privacy@ and legal@
+  // (support/src/limits.ts mailPerDay).
+  if (support && (await db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM builtin_replies r WHERE r.recipient IN ${supportAddresses} AND r.created_at>now()-interval '1 day'`)).rows[0]!.n >= caps.supportPerDay)
+    return refuse('support_cap', used);
   await db.execute(sql`INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES(${workspaceId},${reply.messageId},${to})`);
   return true;
 }

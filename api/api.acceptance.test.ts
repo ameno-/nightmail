@@ -3172,11 +3172,11 @@ test('forwards: a recipient’s Stop or Decline is recorded on the forward’s r
   }
   t.diagnostic('Stop and Decline answered in (ms): '+JSON.stringify(measured));
 });
-test('built-in domain replies to support: two racing for the last place in support’s count across workspaces, on their own connections, grant exactly one',async t=>{
-  // Real connections, so the second reply waits for the first's lock and reads the count only once the first committed. The
-  // two answer different addresses of the support mailbox (its address and an alias), which share one lock and one count.
+test('built-in domain replies to support, on real connections: workspaces never wait on each other, and one workspace stays exact',async t=>{
+  // Real connections, so a lock wait would be a real wait. Each reply runs as a send does: the workspace's send locks, then
+  // the exception, kept open after it (as a send stays open through content screening and admission).
   if(!fixtureWorker)return t.skip('requires the loopback worker and real database connections');
-  const {drizzle}=await import('drizzle-orm/node-postgres'),{builtinReplyException}=await import('./src/builtin-domain.js');
+  const {drizzle}=await import('drizzle-orm/node-postgres'),{sql}=await import('drizzle-orm'),{builtinReplyException}=await import('./src/builtin-domain.js'),{lockSendScope}=await import('./src/send-scope.js');
   const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:4,connectionTimeoutMillis:2000});t.after(()=>pool.end());
   const parent=`${unique('bip')}.invalid`,platform=`${unique('plat')}.invalid`,support=`support@${platform}`,alias=`help@${platform}`,supportBox='mbx_'+randomUUID().replaceAll('-',''),platformWs=unique('ws-platform');
   const rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,multiTenant:true,builtinDomain:parent,builtinScope:'members' as const,previousOrigins:[`https://${platform}`],
@@ -3185,8 +3185,9 @@ test('built-in domain replies to support: two racing for the last place in suppo
   await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[supportBox,platformWs,platform,REGION]);
   await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'address','forever')",[supportBox,platformWs,support]);
   await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary'),($1,$4,$3,'alias')",[platformWs,support,supportBox,alias]);
-  // Two workspaces, each holding a message support sent its built-in address (authenticated, addressed to it).
-  const answering=await Promise.all([support,alias].map(async(sender,n)=>{
+  // Three workspaces, each holding a message support sent its built-in address (authenticated, addressed to it): from
+  // support's address, from its alias, and from its address again.
+  const answering=await Promise.all([support,alias,support].map(async(sender,n)=>{
     const wid=unique('ws-race'),host=`r${n}.${parent}`,box=unique('mbx'),id=unique('msg'),thread=unique('thr');
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
     await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[box,wid,host,REGION]);
@@ -3197,27 +3198,55 @@ test('built-in domain replies to support: two racing for the last place in suppo
     await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,received_at,reply_author_verified) VALUES($1,$2,$3,$4,'inbound',now(),true)",[box,id,wid,thread]);
     return {wid,host,sender,reply:{messageId:id,mailboxId:box}};
   }));
-  // Other workspaces used two of the three places today: one is left.
-  for (let n=0;n<2;n++) await db.query('INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES($1,$2,$3)',[unique('ws-other'),unique('msg'),support]);
+  type Answering=typeof answering[number];
+  /** One reply inside its send: `opened` gets the connection's backend and `decided` the exception's answer; with `hold`, the
+   *  transaction stays open until it settles. */
+  const inSend=(a:Answering,o:{config?:typeof rt.config;opened?:(pid:number)=>void;decided?:(r:unknown)=>void;hold?:Promise<void>}={})=>rt.db.transaction(async tx=>{
+    o.opened?.((await tx.execute<{pid:number}>(sql`SELECT pg_backend_pid() AS pid`)).rows[0]!.pid);
+    await lockSendScope(tx,a.wid);
+    const r=await builtinReplyException({...rt,config:o.config??rt.config},tx,a.wid,[a.sender],a.reply,a.host);
+    o.decided?.(r);if(o.hold)await o.hold;return r;
+  });
+  const deferred=<T,>()=>{let resolve!:(v:T)=>void;const promise=new Promise<T>(r=>{resolve=r;});return {promise,resolve};};
   const used=async()=>(await db.query("SELECT count(*)::int AS n FROM builtin_replies WHERE recipient=ANY($1::text[]) AND created_at>now()-interval '1 day'",[[support,alias]])).rows[0].n as number;
-  // The first is granted and keeps its transaction open (as a send does through screening and admission); the second starts then.
-  let decided!:(r:unknown)=>void,release!:()=>void;const firstDecided=new Promise(resolve=>{decided=resolve;}),held=new Promise<void>(resolve=>{release=resolve;});
-  const answer=(a:typeof answering[number],hold:boolean)=>rt.db.transaction(async tx=>{const r=await builtinReplyException(rt,tx,a.wid,[a.sender],a.reply,a.host);if(hold){decided(r);await held;}return r;});
-  const first=answer(answering[0]!,true);first.catch(decided);
-  let second:ReturnType<typeof answer>|undefined;
-  try {
-    assert.equal(await firstDecided,true);
-    second=answer(answering[1]!,false);
-    let waited=0;
-    for (let i=0;i<200&&!waited;i++) {
-      waited=(await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND wait_event='advisory' AND query LIKE '%builtin-replies:support%'")).rows[0].n;
-      if(!waited)await new Promise(resolve=>setTimeout(resolve,10));
-    }
-    assert.equal(waited,1,'The second reply waits on the first’s lock.');
-  } finally { release(); }
-  const [granted,refused]=await Promise.all([first,second!]);
-  assert.deepEqual([granted,(refused as {reason?:string}).reason],[true,'support_cap']);
-  assert.equal(await used(),3,'Exactly one more: three replies to support today.');
+
+  await t.test('two workspaces answering support at the same moment don’t wait on each other; the total goes over by at most the racers less one',async()=>{
+    // Other workspaces used two of the three places today: one is left, and two workspaces reach for it at once.
+    for (let n=0;n<2;n++) await db.query('INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES($1,$2,$3)',[unique('ws-other'),unique('msg'),support]);
+    const held=deferred<void>(),decided=deferred<unknown>();
+    const first=inSend(answering[0]!,{decided:decided.resolve,hold:held.promise});first.catch(decided.resolve);
+    try {
+      assert.equal(await decided.promise,true);
+      // The first is still inside its send; the second, in another workspace and to support's alias, completes anyway.
+      const second=await Promise.race([inSend(answering[1]!),new Promise(resolve=>setTimeout(()=>resolve('still waiting'),3000))]);
+      assert.equal(second,true,'The second workspace’s reply completes while the first is inside its send.');
+    } finally { held.resolve(); }
+    assert.equal(await first,true);
+    const racers=2,total=await used();
+    t.diagnostic(`replies to support today after the race: ${total} (cap 3)`);
+    assert.ok(total<=3+racers-1,`${total} replies to support today`);
+  });
+
+  await t.test('one workspace: two concurrent replies to one support message grant exactly one',async()=>{
+    // Room under support's count (it is full after the race above); the workspace's own send lock makes them take turns.
+    const config={...rt.config,builtinReplies:{...rt.config.builtinReplies,supportPerDay:100}},one=answering[2]!;
+    const held=deferred<void>(),decided=deferred<unknown>(),opened=deferred<number>();
+    const first=inSend(one,{config,decided:decided.resolve,hold:held.promise});first.catch(decided.resolve);
+    let second:ReturnType<typeof inSend>|undefined,waiting='';
+    try {
+      assert.equal(await decided.promise,true);
+      second=inSend(one,{config,opened:opened.resolve});
+      const pid=await opened.promise;
+      for (let i=0;i<200&&waiting!=='Lock';i++) {
+        waiting=(await db.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type??'';
+        if(waiting!=='Lock')await new Promise(resolve=>setTimeout(resolve,10));
+      }
+      assert.equal(waiting,'Lock','The second waits on the workspace’s send lock.');
+    } finally { held.resolve(); }
+    const [granted,refused]=await Promise.all([first,second!]);
+    assert.deepEqual([granted,(refused as {reason?:string}).reason],[true,'already_answered']);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM builtin_replies WHERE workspace_id=$1 AND message_id=$2',[one.wid,one.reply.messageId])).rows[0].n,1);
+  });
 });
 test('mail gateway: SMTP queues dispatchable content with a single database connection',async t=>{
   if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
