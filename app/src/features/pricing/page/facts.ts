@@ -45,16 +45,17 @@ export const factsSection = (own: Line[] = []): Section => ({ id: 'facts', title
  *  stays in the page's Markdown copy and its comparison. */
 export const BRIEF = { facts: 4, words: 6 }
 export const wordCount = (text: string) => text.split(/\s+/).filter(word => /[\p{L}\p{N}]/u.test(word)).length
-export function briefFacts(own: Line[] = []): string[] {
+export function briefFacts(own: Line[] = [], { free = true } = {}): string[] {
   const said = new Set<SharedFact>(), list: string[] = []
   for (const line of own) {
     if (typeof line !== 'string') said.add(line.shared)
     const text = typeof line === 'string' ? line.trim().replace(/\.$/, '') : SHARED_FACTS[line.shared].brief
     if (wordCount(text) <= BRIEF.words && !list.includes(text)) list.push(text)
   }
-  for (const id of ['free', 'contacts', 'teammates', 'campaigns', 'domains', 'agents'] as SharedFact[]) if (!said.has(id) && !list.some(text => SHARED_FACTS[id].covers?.test(text))) list.push(SHARED_FACTS[id].brief)
-  const brief = list.includes(SHARED_FACTS.free.brief) ? list : [SHARED_FACTS.free.brief, ...list]
+  for (const id of ['free', 'contacts', 'teammates', 'campaigns', 'domains', 'agents'] as SharedFact[]) if ((free || id !== 'free') && !said.has(id) && !list.some(text => SHARED_FACTS[id].covers?.test(text))) list.push(SHARED_FACTS[id].brief)
+  const brief = !free || list.includes(SHARED_FACTS.free.brief) ? list : [SHARED_FACTS.free.brief, ...list]
   return brief.slice(0, BRIEF.facts)
 }
-/** The short list on the page, the whole list (factsFor: the page's own lines, or fullOwn) in its Markdown twin. */
-export const briefFactsSection = (own: Line[] = [], fullOwn: Line[] = own): Section => ({ id: 'facts', title: 'With Nightmail', blocks: [{ kind: 'list', items: briefFacts(own).map(text => [text]), full: factsFor(fullOwn).map(text => [text]) }] })
+/** The short list on the page, the whole list (factsFor: the page's own lines, or fullOwn) in its Markdown twin. free:
+ *  false on a page whose headline is the free allowance (/free-email-api), so the list doesn't repeat it. */
+export const briefFactsSection = (own: Line[] = [], fullOwn: Line[] = own, options: { free?: boolean } = {}): Section => ({ id: 'facts', title: 'With Nightmail', blocks: [{ kind: 'list', items: briefFacts(own, options).map(text => [text]), full: factsFor(fullOwn).map(text => [text]) }] })

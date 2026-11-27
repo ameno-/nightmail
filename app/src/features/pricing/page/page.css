@@ -120,8 +120,7 @@
 .pp-qa summary:focus-visible :is(h3, .pp-qa-q), .pp-qa[open] :is(h3, .pp-qa-q) { color: var(--ink); }
 /* How a page compared, under its table: the note's whole text, closed. */
 .pp-method { margin-top: 16px; }
-.pp-method p { color: var(--faint); font-size: 13px; overflow-wrap: anywhere; }
-.pp-method p + p { margin-top: -6px; }
+.pp-method p { overflow-wrap: anywhere; }
 .pp-qa p { margin: 0 0 14px; color: var(--soft); font-size: 14px; line-height: 1.55; text-wrap: pretty; }
 /* The facts under the table: one line each. */
 #facts .pp-list { gap: 6px; margin: 0; }

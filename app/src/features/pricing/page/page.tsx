@@ -100,7 +100,8 @@ function Checked({ sources }: { sources: Source[] }) {
   return <p>{days.map((day, d) => { const on = pages.filter(source => source.checked === day); return <Fragment key={day}>{`${d === 0 ? 'Checked ' : '; '}${dayOf(day)} on `}{on.map((source, i) => <Fragment key={source.url}>{join(i, on.length)}<a href={source.url} target="_blank" rel="noopener noreferrer">{pageName(source.url)}</a></Fragment>)}</Fragment> })}.</p>
 }
 
-const SITE_LINKS = [{ title: 'Home', path: '/' }, { title: 'Pricing', path: '/pricing' }, { title: 'Compare', path: '/compare' }, { title: 'API docs', path: '/docs' }, { title: 'Terms', path: '/legal/terms' }, { title: 'Privacy', path: '/legal/privacy' }]
+// (Home is the wordmark at the top.)
+const SITE_LINKS = [{ title: 'Pricing', path: '/pricing' }, { title: 'Compare', path: '/compare' }, { title: 'API docs', path: '/docs' }, { title: 'Terms', path: '/legal/terms' }, { title: 'Privacy', path: '/legal/privacy' }]
 
 export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNode; start?: Start }) {
   const folded = doc.sections.some(section => section.blocks.some(block => block.kind === 'table' && block.method))

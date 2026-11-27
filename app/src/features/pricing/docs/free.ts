@@ -131,7 +131,8 @@ export function freeEmailApi(): Doc {
   const sections: Section[] = [
     // Under the table, what its rows are in one line (the scope sentence and the rest fold into How we compared).
     { id: 'free', title: 'Free email API plans', quiet: true, blocks: [folded(table(apis.rows, note), `${capital(listOf(['smaller allowances', ...kinds.has('trial') ? ['trials'] : [], ...kinds.has('once') ? ['one-offs'] : []]))}; not every API.`)] },
-    briefFactsSection(),
+    // (Its headline and first row are the free allowance: the list says the rest.)
+    briefFactsSection([], [], { free: false }),
   ]
   const copySections: Section[] = byGroup.slice(1).filter(g => g.rows.length).map(g => ({ id: g.focus, title: g.title, blocks: [table(g.rows, [`The ${g.rows.length} of ${g.all.length} ${g.unit} ${productName} has compared itself with whose free allowance is smaller than its own, or is a trial; this is not every one.`])] }))
   const all: Source[] = [...new Map(listed.map(r => shownSources([r.source!], r.c.offer)[0]!).map(s => [s.url, s])).values()]
