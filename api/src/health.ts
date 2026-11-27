@@ -94,7 +94,7 @@ type CampaignRow = { id: string; workspaceId: string; state: string; total: numb
 type CounterRow = { kind: string; key: string; n: number; errors: number; ms: number; slowest: number; n5: number; errors5: number; slowest5: number; verySlow5: number; stormMinutes: number; stormRate: number; hist: number[] | null };
 type Database = { heldDomains?: string[]; /** What the support AI cost since UTC midnight, in US dollars. */ supportAiToday?: number;
   /** Abuse alerts that should have gone out and have not (late: unposted past ABUSE.lateMinutes; failed; expired unposted), of them the high ones, and those posted but unconfirmed. */
-  abuseUndelivered?: { late: number; failed: number; expired: number; high: number; unconfirmed?: number };
+  abuseUndelivered?: { late: number; failed: number; expired: number; high: number; unconfirmed?: number; limited?: number };
   abuseFailures?: Record<string,{count:number;seconds:number}> | null;
   /** Seconds since the oldest outstanding observation or due time, by stage. */ abuseBehind?: Record<string, number | null> | null; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
@@ -305,9 +305,9 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
       find('support-ai-cost', null, supportAiToday, `${dollars(supportAiToday)} since midnight UTC, past the ${dollars(SUPPORT_AI.dailyLineUsd)} daily line.`, SUPPORT_AI.remindMinutes);
     if (abuseUndelivered) {
       // Critical while a high alert is unposted over an hour (late, failed or expired): someone must hear of that one.
-      const { late, failed, expired, high, unconfirmed = 0 } = abuseUndelivered, n = late + failed + expired + unconfirmed;
+      const { late, failed, expired, high, unconfirmed = 0, limited = 0 } = abuseUndelivered, n = late + failed + expired + unconfirmed + limited;
       if (n > 0) find('abuse-alerts-undelivered', null, n, `${count(n)} not delivered${high ? ` (${count(high)} high, unposted)` : ''}: ${[late && `${count(late)} unposted over ${ABUSE.lateMinutes} minutes`, failed && `${count(failed)} failed`,
-        expired && `${count(expired)} expired unposted`, unconfirmed && `${count(unconfirmed)} posted but unconfirmed (Slack didn't answer; check the channel)`].filter(Boolean).join(', ')}.`, ABUSE.remindMinutes, high > 0 ? 'critical' : 'warning');
+        expired && `${count(expired)} expired unposted`, limited && `${count(limited)} rate limited (Slack answers 429; still waiting)`, unconfirmed && `${count(unconfirmed)} posted but unconfirmed (Slack didn't answer; check the channel)`].filter(Boolean).join(', ')}.`, ABUSE.remindMinutes, high > 0 ? 'critical' : 'warning');
     }
     for (const [stage, failed] of Object.entries(abuseFailures ?? {})) {
       const affected = stage==='scores' ? 'clusters cannot be scored; no alert can be raised for them'
@@ -394,7 +394,8 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
   const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",${aiCostToday} AS "supportAiToday",
       (SELECT json_build_object('late',count(*) FILTER (WHERE status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})),
         'failed',count(*) FILTER (WHERE status='failed' AND created_at>now()-interval '1 day'),'expired',count(*) FILTER (WHERE status='stale' AND stale_reason='expired'),
-        'high',count(*) FILTER (WHERE band='high' AND ((status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})) OR (status='failed' AND created_at>now()-interval '1 day') OR (status='stale' AND stale_reason='expired'))),
+        'high',count(*) FILTER (WHERE band='high' AND ((status='stored' AND (created_at<now()-make_interval(mins=>${ABUSE.lateMinutes}) OR limited>=${ABUSE.rateLimitedMost})) OR (status='failed' AND created_at>now()-interval '1 day') OR (status='stale' AND stale_reason='expired'))),
+        'limited',count(*) FILTER (WHERE status='stored' AND limited>=${ABUSE.rateLimitedMost} AND created_at>=now()-make_interval(mins=>${ABUSE.lateMinutes})),
         'unconfirmed',count(*) FILTER (WHERE status='unconfirmed' AND sent_at>now()-interval '1 day'))
         FROM abuse_alerts WHERE created_at>now()-interval '2 days') AS "abuseUndelivered",
       ${abuse?.abuseLag ?? sql`NULL`} AS "abuseBehind",${abuse?.abuseFailures ?? sql`NULL`} AS "abuseFailures",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,

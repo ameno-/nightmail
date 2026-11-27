@@ -34764,12 +34764,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await jobsOf()).map(job => job.id).sort(), (await outbox()).map(alert => `abuse-alert:${alert.id}`).sort(), 'Keyed by the alert: queued once.');
       const posts: { url: string; init: RequestInit }[] = [];
       // The fake Slack: an answer (a status), "slow" (it takes the post but answers after the timeout: fetch rejects with
-      // TimeoutError) or "limited" (a 429 asking to come back in two minutes).
-      let answer: number | 'slow' | 'limited' = 500;
+      // TimeoutError), "limited" (a 429 asking to come back in two minutes) or a 429 with any Retry-After (or none).
+      let answer: number | 'slow' | 'limited' | { retryAfter?: string } = 500;
       const realFetch = globalThis.fetch;
       globalThis.fetch = (async (url: string, init: RequestInit) => {
         posts.push({ url: String(url), init });
         if (answer === 'slow') throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        if (typeof answer === 'object') return new Response(null, { status: 429, headers: answer.retryAfter === undefined ? {} : { 'retry-after': answer.retryAfter } });
         return answer === 'limited' ? new Response(null, { status: 429, headers: { 'retry-after': '120' } }) : new Response(null, { status: answer });
       }) as typeof fetch;
       const handle = (alert: Json, attempts: number) => abuseAlertJobs['abuse.alert']!(runtime, { alertId: alert.id }, { id: `abuse-alert:${alert.id}`, workspaceId: 'platform', attempts });
@@ -34785,11 +34786,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual([await run(review!), posts.length, (await outbox())[0]!.status, (await outbox())[0]!.error], ['done', 0, 'failed', 'NO_WEBHOOK']);
         await db.query(`UPDATE abuse_alerts SET status='stored',error=NULL WHERE id=$1`, [review!.id]);
         runtime.config.abuseSlackWebhookUrl = hook;
-        // Refused (a 5xx, then a 429): the job retries, the place is given back, the attempt and its code are kept.
+        // Refused (a 500, then a 502): the job retries, the place is given back, the attempt and its code are kept.
         assert.deepEqual([await run(review!, 1), posts.length], ['ABUSE_ALERT_FAILED', 1]);
-        answer = 429;
+        answer = 502;
         assert.deepEqual([await run(review!, 2), posts.length], ['ABUSE_ALERT_FAILED', 2]);
-        assert.deepEqual((await db.query('SELECT status,attempts,error,claimed_at FROM abuse_alerts WHERE id=$1', [review!.id])).rows[0], { status: 'stored', attempts: 2, error: 'HTTP_429', claimed_at: null });
+        assert.deepEqual((await db.query('SELECT status,attempts,error,claimed_at FROM abuse_alerts WHERE id=$1', [review!.id])).rows[0], { status: 'stored', attempts: 2, error: 'HTTP_502', claimed_at: null });
         // Accepted: sent once, to that URL alone, without following a redirect; a retry or a redeploy's re-run posts nothing.
         answer = 200;
         assert.deepEqual([await run(review!, 3), posts.length], ['done', 3]);
@@ -34805,7 +34806,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual([await run(high!, MAX_ATTEMPTS), (await db.query('SELECT status,error FROM abuse_alerts WHERE id=$1', [high!.id])).rows[0]], ['ABUSE_ALERT_FAILED', { status: 'failed', error: 'HTTP_503' }]);
         // Slack slow once (it took the post but answered after the timeout): unknown, never refused. It keeps its place and
         // gets one more try five minutes later, spending no try; that one is accepted. Two posts, and the alert is sent.
-        const reset = () => db.query(`UPDATE abuse_alerts SET status='stored',sent_at=NULL,claimed_at=NULL,error=NULL,attempts=0,timeouts=0 WHERE id=$1`, [high!.id]);
+        const reset = () => db.query(`UPDATE abuse_alerts SET status='stored',sent_at=NULL,claimed_at=NULL,error=NULL,attempts=0,timeouts=0,limited=0,created_at=now() WHERE id=$1`, [high!.id]);
         const later = () => db.query(`UPDATE abuse_alerts SET claimed_at=claimed_at-interval '5 minutes' WHERE id=$1`, [high!.id]);
         const state = async () => (await db.query('SELECT status,error,timeouts,claimed_at IS NOT NULL AS placed FROM abuse_alerts WHERE id=$1', [high!.id])).rows[0];
         await reset(); let before = posts.length; answer = 'slow';
@@ -34817,10 +34818,49 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await reset(); before = posts.length; answer = 'slow';
         assert.equal(await run(high!), 'deferred'); await later();
         assert.deepEqual([await run(high!, MAX_ATTEMPTS), await run(high!, MAX_ATTEMPTS), posts.length - before, await state()], ['done', 'done', 2, { status: 'unconfirmed', error: 'TIMEOUT', timeouts: 2, placed: true }]);
-        // A 429 that says when to come back: the job waits exactly that long, holding no worker and spending no try, even
-        // on its last; the place goes back. A 429 without Retry-After is a refusal like any other (above).
+        // A 429 that says when to come back: the job waits that long, holding no worker and spending no try, even on its
+        // last; the place goes back.
         await reset(); before = posts.length; answer = 'limited';
         assert.deepEqual([await deferral(high!, MAX_ATTEMPTS), posts.length - before, await state()], [[2, true], 1, { status: 'stored', error: 'HTTP_429', timeouts: 0, placed: false }]);
+        // Every 429 waits at least 30 s, doubling with each 429 in a row up to 15 minutes, never past the alert's day.
+        const seconds = async () => { try { await handle(high!, MAX_ATTEMPTS); return 'done'; }
+          catch (error) { if (!(error instanceof JobDeferred)) return (error as { code?: string }).code ?? 'error'; assert.equal(error.keepAttempts, true, 'A 429 spends no try.'); return Math.round((Date.parse(error.availableAt) - Date.now()) / 1000); } };
+        const limitedNow = async () => (await db.query('SELECT status,limited,error FROM abuse_alerts WHERE id=$1', [high!.id])).rows[0];
+        // Retry-After: 0, for ever: never sooner than 30 s (two starts a minute at most), then less often; from the sixth in
+        // a row Health counts it as not delivered (critical: a high alert) while it keeps waiting; at its day's end it is
+        // stale (expired), never posted late and never failed.
+        await reset(); answer = { retryAfter: '0' };
+        const waits: unknown[] = []; for (let n = 0; n < 9; n++) waits.push(await seconds());
+        assert.deepEqual([waits, await limitedNow()], [[30, 60, 120, 240, 480, 900, 900, 900, 900], { status: 'stored', limited: 9, error: 'HTTP_429' }]);
+        const { healthTick } = await import('./src/health.js');
+        await healthTick(runtime, {}, { force: true, post: async () => {} });
+        const [limitedWarning] = (await db.query(`SELECT severity,words FROM health_alerts WHERE key='abuse-alerts-undelivered'`)).rows as { severity: string; words: string }[];
+        assert.ok(limitedWarning?.severity === 'critical' && /1 rate limited/.test(limitedWarning.words), JSON.stringify(limitedWarning));
+        await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '23 hours 59 minutes' WHERE id=$1`, [high!.id]);
+        assert.equal(await seconds(), 60, 'Never past the alert\'s day.');
+        await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '25 hours' WHERE id=$1`, [high!.id]); before = posts.length;
+        assert.deepEqual([await seconds(), posts.length - before, (await db.query('SELECT status,stale_reason FROM abuse_alerts WHERE id=$1', [high!.id])).rows[0]], ['done', 0, { status: 'stale', stale_reason: 'expired' }]);
+        // No Retry-After, an unreadable one, a date (it asks for two minutes) and a huge one (capped at the alert's day).
+        await reset(); answer = {};
+        assert.equal(await seconds(), 30);
+        await reset(); answer = { retryAfter: 'soon' };
+        assert.equal(await seconds(), 30);
+        await reset(); answer = { retryAfter: new Date(Date.now() + 120_000).toUTCString() };
+        const dated = await seconds(); assert.ok(typeof dated === 'number' && dated >= 115 && dated <= 121, String(dated));
+        await reset(); answer = { retryAfter: '999999' };
+        assert.equal(await seconds(), 86_400);
+        // A 429 holds no place: another high alert posts at once, and the hour's caps count only posts that went out.
+        await reset(); answer = { retryAfter: '0' }; await seconds();
+        const other = `aal_${'f'.repeat(24)}`;
+        await db.query(`WITH a AS (INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,members) SELECT $1,cluster_id,'high',score,'grew',workspaces,payload,members FROM abuse_alerts WHERE id=$2 RETURNING id)
+          INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'abuse-alert:'||id,'abuse.alert','platform',jsonb_build_object('alertId',id) FROM a`, [other, high!.id]);
+        answer = 200; before = posts.length;
+        assert.deepEqual([await run({ id: other }), posts.length - before, (await db.query(`SELECT count(*)::int AS n FROM abuse_alerts WHERE band='high' AND claimed_at>now()-interval '1 hour'`)).rows[0].n], ['done', 1, 1]);
+        await db.query('DELETE FROM abuse_alerts WHERE id=$1', [other]);
+        // A 429, then accepted: posted once, and the 429 spent no try.
+        await reset(); answer = { retryAfter: '0' }; before = posts.length;
+        assert.equal(await seconds(), 30); answer = 200;
+        assert.deepEqual([await run(high!), posts.length - before, await state()], ['done', 2, { status: 'sent', error: null, timeouts: 0, placed: true }]);
         // A post whose worker stopped after sending (its answer never recorded) counts as unanswered: after one unanswered
         // post, that makes two, so it reads unconfirmed and is never posted a third time, whichever job takes it up.
         await reset(); await db.query(`UPDATE abuse_alerts SET posting=true,timeouts=1,claimed_at=now()-interval '3 minutes' WHERE id=$1`, [high!.id]); before = posts.length; answer = 200;
