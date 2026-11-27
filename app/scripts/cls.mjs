@@ -550,7 +550,7 @@ const phonePages = new Set([
   'Overview · stream',
   'Overview · panel hidden',
   'Overview · policy notice dismissed',
-  // The standing and billing banners with the policy notice under them, as a phone stacks them.
+  // The policy notice over the standing and billing banners, as a phone stacks them.
   'Overview · restricted',
   'Logs · from an Overview tile',
   'Homepage · signed in',

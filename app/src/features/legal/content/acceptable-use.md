@@ -100,7 +100,7 @@ Most problems are handled by Nightmail's automatic sender score. It moves throug
 
 The [thresholds below](#sending-limits-and-thresholds) say exactly when each step happens, except a hold for review. Each pause except a hold for review leaves a strike for 90 days, and repeated pauses make recovery slower.
 
-**Hold for review.** When several accounts that are new senders or below good standing send the same or nearly the same message to many people, we may pause sending from their workspaces until a person has reviewed it. {{before abuseHolds: Before {{date abuseHolds}}, a person decides each one; from {{date abuseHolds}}, it}}{{after abuseHolds: It}} can happen automatically. It leaves no strike. See the [Terms of Service, section 8.2](/legal/terms#the-enforcement-ladder).
+**Hold for review{{before abuseHolds:, from {{date abuseHolds}}}}.** When several workspaces that are new senders or below good standing ([section 10](#score-and-daily-limit)) send the same or nearly the same message to many people outside those workspaces, we may pause their sending automatically until a person has reviewed it. A hold for review leaves no strike, and a person reviews every one. See the [Terms of Service, section 8.2](/legal/terms#the-enforcement-ladder).
 
 **Serious abuse skips the ladder.** For phishing, malware, fraud, illegal content, or when Amazon pauses your sending, we may pause or close the account at once, cancel queued mail, suppress addresses, keep evidence, and report to the authorities where the law requires.
 
@@ -148,7 +148,7 @@ Nightmail checks every 10 minutes. Each feedback or screen line needs a count an
 | Complaints | 0.05% and at least 2 in 24 hours, or 0.05% and at least 3 in 7 days | 0.1% and at least 3 in 24 hours | 0.3% and at least 5 in 24 hours, or 0.15% and at least 10 in 7 days |
 | Hard bounces | 2% and at least 10 in 24 hours, or 1.5% and at least 10 in 7 days | Marketing 4% and at least 25, or any mail 8% and at least 50, in 24 hours | Transactional mail 5% and at least 50 in 24 hours |
 | Spam-screen rejections ÷ screened | 2% and at least 3 in 24 hours | 5% and at least 10 in 24 hours | 10% and at least 25 in 24 hours |
-| External | – | – | Amazon paused the workspace's sending, confirmed abuse, or a [hold for review](#how-we-enforce-this-policy) |
+| External | – | – | Amazon paused the workspace's sending, confirmed abuse, or{{before abuseHolds:, from {{date abuseHolds}},}} a [hold for review](#how-we-enforce-this-policy) |
 
 ### Campaign list check
 
