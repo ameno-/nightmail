@@ -74,7 +74,8 @@ export function comparisonDoc(c: Comparison): PageDoc {
     ...m.per === 'contact' || m.per === 'inbox' ? { caption: [`Per ${formatCount(opening)} ${m.per === 'contact' ? 'contacts' : 'agent inboxes'} · checked ${dayOf(c.offer.checked).replaceAll(' ', '\u00a0')}`] } : {},
     // The table, one line under it and the whole note folded into How we compared (with the pages read: page.tsx).
     sections: [{ id: 'sizes', title: `A month at each size ${vendor} prices`, quiet: true, blocks: [folded(priceTable(c, terms, opening), m.per === 'contact' ? `${m.sendsPerContact} emails to each contact a month; lowest list prices.`
-      : m.per === 'inbox' ? `Each inbox: ${m.receivedPerInbox} in, ${m.sentPerInbox} out a month; lowest list prices.` : `${vendor}’s lowest list price for each size, before tax.`)] },
+      // (By inboxes, the mail the verdict's figure prices, beside it: the pre-merge check reads it there.)
+      : m.per === 'inbox' ? `At ${formatCount(opening)} inboxes, ${formatCount(v.u.received)} received and ${formatCount(v.u.sent)} sent a month; list prices.` : `${vendor}’s lowest list price for each size, before tax.`)] },
     // What Nightmail has that the vendor charges for or lacks, in four short lines (facts.ts, briefFacts).
     briefFactsSection(rowLines(c.rows))],
     questions: comparisonQuestions(c),
