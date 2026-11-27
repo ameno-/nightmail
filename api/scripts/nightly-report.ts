@@ -85,6 +85,37 @@ async function lineCount(target: Stage, from: number, to: number, filters: Json[
     parameters: { datasets: ['cloudflare-workers'], filters: [scriptFilter(target), ...filters], calculations: [{ operator: 'count', alias: 'n' }] } });
   return Number(result.calculations?.[0]?.aggregates?.[0]?.count ?? 0);
 }
+// The counter writes to Postgres; checking its failures against the same database would lose
+// the evidence during an outage. Keep one independent count per completed UTC day. A missing
+// audit makes deprecated-usage.ts report incomplete. Allow an hour for a bounded write crossing
+// midnight and log ingestion; the day field belongs to the call, not to the later error line.
+async function archiveDeprecatedLoss(target: Stage) {
+  const until = Math.floor((Math.min(end, Date.now()) - HOUR) / DAY) * DAY, from = until - DAY;
+  if (Date.now() - from > 2 * DAY + HOUR) return; // Never certify expired Workers Logs as zero.
+  const day = iso(from).slice(0, 10);
+  if (!await lineCount(target, from, until, REQUEST_LINES)) return;
+  const result = await telemetry(target, { queryId: 'nightmail-deprecated-loss', timeframe: { from, to: until + HOUR },
+    view: 'calculations', chartType: 'aggregate', parameters: { datasets: ['cloudflare-workers'],
+      filters: [scriptFilter(target), { key: 'deprecationDay', value: day, type: 'string', operation: 'eq' }],
+      groupBys: [{ type: 'string', value: 'deprecationEvent' }],
+      calculations: [{ operator: 'count', alias: 'events' }] } });
+  const rows = result.calculations?.[0]?.aggregates;
+  if (!Array.isArray(rows) || rows.length > 2 || rows.some(r => !['attempt','loss'].includes(r.groupKey) || r.sampleInterval !== 1 || !Number.isSafeInteger(r.count) || r.count < 0)) return;
+  const lossLines = rows.find(r => r.groupKey === 'loss')?.count ?? 0;
+  let lostWrites = 0;
+  if (lossLines) {
+    // A failed batch logs the number of calls lost for each key. Count calls, not log lines.
+    const filters = [{ key: 'deprecationDay', value: day }, { key: 'deprecationEvent', value: 'loss' }]
+      .map(field => ({ ...field, type: 'string', operation: 'eq' }));
+    const losses = unique(await events(target, from, until + HOUR, filters, lossLines));
+    if (losses.length !== lossLines || losses.some(e => !Number.isSafeInteger(e.source.lostWrites) || e.source.lostWrites < 1)) return;
+    lostWrites = losses.reduce((total, e) => total + e.source.lostWrites, 0);
+  }
+  const folder = join(reportDir, 'deprecated-usage', target.name);
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(join(folder, day + '.json'), JSON.stringify({ stage: target.name, day, attempts: rows.find(r => r.groupKey === 'attempt')?.count ?? 0, lostWrites }));
+}
+
 // Every matching line in the window. The events view samples instead of paging: over a long window, or with a limit
 // above 1,000, it returns a subset spread over the window (Nov 12: 260 of 4,033). So compare each page with the exact
 // count and split the window until each part comes back whole, down to one second. It also leaves out a few lines its
@@ -362,6 +393,8 @@ async function main() {
   const date = new Date(end).toLocaleDateString('en-CA');
   const sections: string[] = [], all: Problem[] = [];
   for (const target of stages) {
+    try { await archiveDeprecatedLoss(target); }
+    catch { console.error(`${target.name}: deprecated-call loss audit unavailable; usage window is incomplete.`); }
     const today = (await windowFor(target, end, true))!;
     const baseline: Window[] = [];
     for (let day = 1; day <= 7; day++) { const past = await windowFor(target, end - day * DAY, false); if (past) baseline.push(past); }

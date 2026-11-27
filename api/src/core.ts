@@ -223,6 +223,9 @@ export interface Runtime {
   /** Starts work now on a database connection of its own that outlives the request (the Worker's waitUntil), for work
    * the request starts but doesn't wait for (startHostedMail). Absent where the request's own pool outlives it (Node). */
   detach?: (work: (runtime: Runtime) => Promise<void>) => Promise<void>;
+  /** Node's independent pool for deprecation counters. Never record on a request's transaction. */
+  deprecatedCallDb?: Database;
+  deprecatedCallScope?: object; // Stable database binding across Worker invocations.
   /** Wakes inbox long polls as mail is stored (inbox-wake.ts): the DISPATCHER namespace on Workers, pg_notify on Node. */
   inboxWake?: import('./inbox-wake.js').InboxWake;
   /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */
@@ -289,6 +292,7 @@ export type SupportScope = { userId: string; contentWorkspaceId: string | null;
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; importLease?: import('./isolate-memory.js').MemoryLease; importLeaseTransferred?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
   /** Elapsed time asleep between long-poll reads; queries and reauthorization are active request time. */
   pollWaitMs?: number;
+  rateLimitedWorkspace?: string; // The verified credential's workspace, when the budget refuses it before the actor is set.
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
   failure?: { code: string; mcpStale?: import('./mcp-session.js').StaleReason; field?: string; databaseCode?: string; unmatched?: boolean; origin?: { originClass: string; fetchSite?: string }; attachmentTypes?: AttachmentTypes };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */

@@ -13,6 +13,7 @@ import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
+import { noticeResponse, noticeText, retiringOperations } from './deprecation.js';
 import { countRequest } from './health-counters.js';
 import { SLOW_REQUEST_MS } from './log.js';
 import { authenticatedCreates } from './idempotency.js';
@@ -219,16 +220,20 @@ function principalOf(c: Ctx, route: string) {
 // request is also counted for the health tick (src/health-counters.ts): its route's latency, its workspace's reads, its
 // error code and SQLSTATE, so those exist without a log search. Counting is in memory; the Worker (src/worker.ts) and the
 // Node server (src/server.ts) write the counts afterwards, on their own, so nothing here waits for or schedules that.
-function logRequest(c: Ctx, durationMs: number) {
+function logRequest(c: Ctx, durationMs: number, retiringRoutes: ReadonlyMap<string, string>) {
   const status = c.res.status, route = routeOf(c), failure = c.get('failure');
   const timings = c.get('serverTimings'), code = failure ? errorCodeOf(failure.code) : undefined;
   const refusedOrigin = route === '/internal/v1/analytics' && code === 'ORIGIN_NOT_ALLOWED';
   const origin = refusedOrigin ? c.req.header('origin') : undefined;
   const workspace = c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId;
+  const notice = retiringRoutes.get(c.req.method + ' ' + route);
+  const noticeDay = notice ? new Date().toISOString().slice(0, 10) : undefined;
+  if (notice && noticeDay) noticeResponse(c, notice, workspace || c.get('rateLimitedWorkspace'), noticeDay);
   const activeMs = Math.max(0, durationMs - (c.get('pollWaitMs') ?? 0));
   countRequest({ route, method: c.req.method, status, durationMs: activeMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
     event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs, slow: durationMs >= SLOW_REQUEST_MS || undefined,
+    ...(noticeDay && { deprecationDay: noticeDay, deprecationEvent: 'attempt' }),
     ...(failure?.mcpStale ? { protocolEra: 'legacy', staleReason: failure.mcpStale } : {}),
     code, field: failure?.field, databaseCode: failure?.databaseCode, attachment: failure?.attachmentTypes,
     // Which endpoint a caller expected, scrubbed (unmatchedTemplate): only for a path no route answered.
@@ -272,10 +277,18 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: `A ${productName} API key. Credentials never belong in URLs.` });
     app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'nightmail.session_token', description: 'OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (nightmail.session_token, then nightmail.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account.' });
     app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-nightmail.session_token', description: 'OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (__Host-nightmail.session_token, then __Host-nightmail.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account.' });
-  } else {
-    const rawOpenapi = app.openapi;
-    app.openapi = ((route, handler, hook) => allowPath && !allowPath(route.path) ? app : rawOpenapi({ ...route, hide: true }, handler, hook)) as typeof app.openapi;
   }
+  const retiringRoutes = new Map<string, string>();
+  const rawOpenapi = app.openapi;
+  app.openapi = ((route, handler, hook) => {
+    if (allowPath && !allowPath(route.path)) return app;
+    const replacement = retiringOperations.get(route.operationId ?? '');
+    if (route.operationId && replacement !== undefined) {
+      retiringRoutes.set(route.method.toUpperCase() + ' ' + route.path.replace(/\{([^}]+)\}/g, ':$1'), route.operationId);
+      route = { ...route, deprecated: true, description: [noticeText(replacement), route.description].filter(Boolean).join(' ') };
+    }
+    return rawOpenapi(registerOpenApi ? route : { ...route, hide: true }, handler, hook);
+  }) as typeof app.openapi;
   app.use('*', async (c, next) => {
     const requestId = newRequestId(c.env);
     c.set('requestId', requestId); c.set('serverTimings', []); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
@@ -291,7 +304,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
-    if (!(snsIngress(c.req.path) && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
+    if (!(snsIngress(c.req.path) && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start, retiringRoutes);
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     // SES owns its two lanes: a newly queued inbound receipt starts ingest; sending feedback uses its own queue.
     const wakeJobs = c.get('actor')?.wakeJobs;
