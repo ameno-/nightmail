@@ -405,6 +405,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
 /** Operations that are not agent calls, with the reason. Everything else must be covered by a tool. */
 export const HUMAN_STEPS: Record<string, string> = {
   receiveSesSnsEvent: 'Signed by Amazon SNS; never an agent call.',
+  receiveForwardedMail: 'Authenticated by the mail forwarder\'s own secret; never an agent call.',
   receiveCloudFormationSnsEvent: 'Signed by Amazon SNS for a connected account\'s stack; never an agent call.',
   unsubscribeByLink: 'Recipient capability link; never an agent call.',
   unsubscribeOneClick: 'Recipient one-click unsubscribe; never an agent call.',

@@ -125,7 +125,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   testWebhook: needs('configuration', 'write', 'workspace', admin), listWebhookDeliveries: needs('configuration', 'read', 'workspace', admin),
   getWebhookDelivery: needs('configuration', 'read', 'workspace', admin), retryWebhookDelivery: needs('configuration', 'write', 'workspace', admin),
   // Signed by Amazon SNS, and the recipient's own unsubscribe links.
-  receiveSesSnsEvent: PUBLIC, receiveCloudFormationSnsEvent: PUBLIC, unsubscribeByLink: PUBLIC, unsubscribeOneClick: PUBLIC,
+  receiveSesSnsEvent: PUBLIC, receiveCloudFormationSnsEvent: PUBLIC, receiveForwardedMail: PUBLIC, unsubscribeByLink: PUBLIC, unsubscribeOneClick: PUBLIC,
   // Metrics, standing and regions.
   getMetrics: needs('sentMail', 'read', 'workspace'), getSenderScore: needs('sentMail', 'read', 'workspace'), releaseSenderStanding: people('admin', 'dashboard'), getUsage: needs('sentMail', 'read', 'workspace'),
   listRegions: needs('configuration', 'read', 'workspace'), configureRegion: needs('configuration', 'write', 'workspace', admin), discoverRegion: needs('configuration', 'read', 'workspace', admin),

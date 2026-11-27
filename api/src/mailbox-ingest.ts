@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { receivedMailStore, withMailObjects } from './mail-objects.js';
+import { receivedMailStore, forwardedStagingKey, withMailObjects } from './mail-objects.js';
 import {mimeIndex} from './mailbox-mime-index.js';
 import {wirePreview} from './protocol-preview.js';
 import { copyWorkspaceRaw, headWorkspaceRaw, transferWorkspaceRaw, PARSE_LIMIT, type RawObjectHead } from './mailbox-mime.js';
@@ -493,7 +493,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   if(receipt.delivery?.drop)return settleRetiredReceipt(runtime,job,sesMessageId,receipt.recipients);
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
-  const sourceKey=(receipt.objectKey.startsWith(HELD_PREFIX)?HELD_PREFIX:!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
+  const sourceKey=receipt.bucket==='local:'?forwardedStagingKey(scope.workspaceId,sesMessageId):(receipt.objectKey.startsWith(HELD_PREFIX)?HELD_PREFIX:!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam=verdicts.spam!=='PASS';
@@ -828,7 +828,7 @@ async function ingestBatch(runtime: Runtime, items: JobBatchItem[]): Promise<Job
           continue;
         }
         const notification = receipt.notification as ReceivedNotification;
-        const sourceKey = (receipt.objectKey.startsWith(HELD_PREFIX) ? HELD_PREFIX : !runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/')) ? 'raw/' : STAGING_PREFIX) + st.sesMessageId;
+        const sourceKey = receipt.bucket === 'local:' ? forwardedStagingKey(workspaceId, st.sesMessageId) : (receipt.objectKey.startsWith(HELD_PREFIX) ? HELD_PREFIX : !runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/')) ? 'raw/' : STAGING_PREFIX) + st.sesMessageId;
         const messageRowId = `msg_${(await digest(`${workspaceId}:${st.sesMessageId}`)).slice(0, 32)}`;
         const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
         const spam = verdicts.spam !== 'PASS';
@@ -892,7 +892,7 @@ async function ingestBatch(runtime: Runtime, items: JobBatchItem[]): Promise<Job
       const t0 = performance.now();
       try {
         const s3 = await getS3(st.receipt!);
-        const head = await headWorkspaceRaw(s3, st.receipt!.bucket, st.sourceKey!, st.receipt!.notification.stagingEtag as string | undefined);
+        const head = await headWorkspaceRaw(s3, st.receipt!.bucket, st.sourceKey!, st.receipt!.notification.stagingEtag as string | undefined, st.store!.r2 ? st.store!.objects : undefined);
         const bytes = Math.min(PARSE_LIMIT, Math.max(128 * 1024, head.size));
         if (mimeBytes + bytes > PARSE_LIMIT) throw new JobDeferred(new Date(Date.now() + 2000).toISOString());
         mimeBytes += bytes;

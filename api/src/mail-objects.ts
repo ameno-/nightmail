@@ -145,6 +145,8 @@ function storageMailObjects(wid: string, storage: Storage): MailObjects {
     async delete(keys) { keys.forEach(k => assertMailKey(wid, k)); for (const k of keys) await storage.delete(k); },
   };
 }
+/** Where a forwarded message waits for ingest (bucket `local:`), beside the stored copies in the runtime's object storage. */
+export const forwardedStagingKey = (wid: string, sesMessageId: string) => mailKey(wid, 'default', null, `in-${sesMessageId}`);
 /** The store a bucket column names. S3 buckets need the caller's client for that bucket's credentials. */
 export function mailObjectsFor(runtime: Runtime, wid: string, bucket: string, s3?: S3Client): MailObjects {
   if (bucket.startsWith(R2)) {
@@ -165,7 +167,10 @@ export async function withMailObjects<T>(runtime: Runtime, wid: string, region: 
 export function receivedMailStore(runtime: Runtime, wid: string, receipt: Pick<IngestInput, 'bucket' | 'binding' | 'delivery'>, s3: S3Client, ids: { messageId: string; sesMessageId: string }, forceInboxStore=false) {
   const lifecycle: MailClass = receipt.delivery?.lifecycle==='kept'?'kept':receipt.delivery?.lifecycle === 'ephemeral' ? 'ephemeral' : 'default', inbox = receipt.delivery?.prefixInbox;
   const r2 = runtime.config.multiTenant && receipt.binding?.kind === 'shared' ? hostedMailBucket(runtime, forceInboxStore?'kept':lifecycle) : null;
-  if (r2) return { lifecycle, bucket: r2, r2: true, objects: mailObjectsFor(runtime, wid, r2), rawKey: mailKey(wid, lifecycle, inbox, ids.messageId), fileKey: (batch: string, id: string) => mailKey(wid, lifecycle, inbox, ids.messageId, { batch, id }) };
+  // `local:` is mail a forwarder posted (inbound-forward.ts): it lives in the runtime's own object storage, so it takes
+  // the same MailObjects path as R2.
+  const own = r2 ?? (receipt.bucket === LOCAL ? LOCAL : null);
+  if (own) return { lifecycle, bucket: own, r2: true, objects: mailObjectsFor(runtime, wid, own), rawKey: mailKey(wid, lifecycle, inbox, ids.messageId), fileKey: (batch: string, id: string) => mailKey(wid, lifecycle, inbox, ids.messageId, { batch, id }) };
   return { lifecycle, bucket: receipt.bucket, r2: false, objects: s3MailObjects(wid, s3, receipt.bucket), rawKey: `${workspacePrefix(wid, 'raw')}${lifecycle==='kept'?`kept/${ids.messageId}`:ids.sesMessageId}.eml`, fileKey: (batch: string, id: string) => receivedAttachmentKey(wid, ids.messageId, batch, id) };
 }
 /** Archive key for a file sent from an address or inbox; the bucket comes from the sending domain's store. */

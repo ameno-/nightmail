@@ -144,6 +144,18 @@ Nightmail stores a hash of the browser's random session token and checks the ses
 
 On sign-in Nightmail refreshes the address and verification flag from the signed ID token or subject-checked UserInfo response. An address change invalidates prior sessions. A missing or unverified address cannot accept invitations. When moving a test installation from pairwise to public subjects, review the user's identity and current mailbox first. With sign-ins fenced, remove the obsolete `nightmail_oidc_identities` binding and approve the user's exact address in `bane_legacy_claims` for the expected issuer. The next verified sign-in binds the public subject to the original Nightmail user ID.
 
+## Receiving without SES (self-hosted)
+
+Set `MAIL_FORWARDER_SECRET` (32 to 512 random characters) on the API and the worker, with `MULTI_TENANT=false` and `ENABLE_LIVE_SES=false`. No AWS credentials are needed. The setting is refused with either of the other two on.
+
+1. Add the domain (`POST /v1/domains`, in the default region), then enable receiving (`POST /v1/inbound/domains/{id}/enable`). Neither asks SES or checks MX, and no receiving DNS record is listed: point the domain's mail at your forwarder yourself. Enabling takes effect at once. A region already set up to receive through SES refuses forwarded mail. While the secret is set, no domain is verified or checked with SES.
+2. Create inboxes or receiving addresses as usual. Mail to other addresses on the domain follows the domain's catch-all setting.
+3. The forwarder sends each message to `POST /v1/events/forwarded-mail`: the raw RFC 5322 bytes as a `message/rfc822` body (at most 40 MiB), `Authorization: Bearer <MAIL_FORWARDER_SECRET>`, and the headers `x-nightmail-message-id` (its own ID for the delivery, 1 to 512 characters), `x-nightmail-envelope-from` (empty for a bounce) and `x-nightmail-envelope-to` (1 to 200 comma-separated recipients). A 202 means the message is stored and queued for the worker. Repeating an ID with the same recipients stores nothing new, so retry with the same ID. If no recipient is on a receiving domain, the answer is 422 `FORWARD_RECIPIENT_UNKNOWN` and nothing is stored.
+
+**The forwarder is trusted to screen mail.** No spam, virus, SPF, DKIM or DMARC check runs here. Forwarded mail is recorded as passing the spam and virus checks so that it is delivered and its attachments can be downloaded; SPF, DKIM and DMARC are left unrecorded.
+
+Messages and attachments are kept in the object storage the runtime already uses (in Docker, the S3-compatible bucket in `S3_*`, such as MinIO). The copy each message waits in before ingest (`d/<workspace>/in-fwd-….eml`) is not deleted yet. This only adds receiving: with `ENABLE_LIVE_SES=false`, nothing is sent.
+
 ## Docker quickstart
 
 The image bundles the dashboard with the API on one origin, **http://127.0.0.1:8793**. The API and background worker are separate services using the same image and database. Stop any host API using port 8793 first.

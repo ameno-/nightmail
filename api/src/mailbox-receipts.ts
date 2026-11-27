@@ -106,6 +106,21 @@ export async function acceptInboundNotification(runtime:Runtime,input:{topicArn:
   return r.n;
 }
 
+/** Self-hosted receiving without SES: a `mailbox_regions` row with bucket `local:` marks it, and its raw mail lives in the
+ * runtime's object storage. */
+export const FORWARD_BUCKET='local:', FORWARD_TOPIC='local:forwarder';
+/** A trusted forwarder's message (inbound-forward.ts), already staged in object storage. No SPF, DKIM or DMARC result comes
+ * with it, so none is recorded. No spam or virus scan runs here either: both are recorded as PASS because the operator's
+ * forwarder is trusted to screen mail, and anything else would quarantine every message. */
+export async function acceptForwardedReceipt(runtime:Runtime,input:{mid:string;sender:string;recipients:string[]}) {
+  const at=new Date().toISOString();
+  const notification={mail:{source:input.sender,timestamp:at},receipt:{timestamp:at,spamVerdict:{status:'PASS'},virusVerdict:{status:'PASS'}}};
+  const r=await route(runtime,sql`SELECT ${FORWARD_BUCKET}::text AS bucket,${input.mid}::text AS mid,${runtime.config.regions[0]}::text AS region,${FORWARD_TOPIC}::text AS topic_arn,${at}::timestamptz AS at,
+    ${at}::timestamptz+interval '48 hours' AS expires_at,${mailJson(notification)}::jsonb AS notification,${mailJson(input.recipients)}::jsonb AS recipients,false AS fenced,NULL::text AS binding_workspace`,false);
+  if(!r.trusted) throw new ApiError(409,'FORWARD_RECEIVING_OFF','Turn receiving on for a domain first: POST /v1/inbound/domains/{id}/enable.');
+  return r.n;
+}
+
 /** A committed receipt shouldn't wait for delivery of a shared work-queue hint. Elect one Worker across
  * isolates per second. Claim immediately and check again at the end of the window for coalesced commits.
  * The ordinary consumer and cron keep the durable leases, retries and overflow moving. */

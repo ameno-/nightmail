@@ -8,10 +8,11 @@ import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { domains } from './db/operations.js';
 import { claimReceivable, claimSends, connectionReady, hostTakesAddresses, receivingSetup, setupError, type ReceivingSetup } from './states.js';
-import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxThreads, mailMessages, type MailboxPermission } from './db/mailbox.js';
+import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxThreads, mailMessages, mailboxRegions, type MxReport, type MailboxPermission } from './db/mailbox.js';
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents } from './mailbox-events.js';
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
+import { FORWARD_BUCKET, FORWARD_TOPIC } from './mailbox-receipts.js';
 import { CLAIM_UNROUTED_INLINE, claimUnroutedBatch, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, queueClaimUnrouted, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { currentVersion, detachDestination, registerRouting, RoutingKey } from './routing.js';
 import { applyFlow, CreateFlow, registerAddressFlow, releaseAddress } from './address-flow.js';
@@ -158,6 +159,7 @@ function primaryHost(multiTenant: boolean, rows: (typeof mailboxDomains.$inferSe
   return multiTenant ? (own && live(own) ? own : rows.find(live) ?? own) : own;
 }
 async function domainViews(c: Ctx, rows: (typeof domains.$inferSelect)[]) {
+  const forwarded = !!c.env.config.mailForwarderSecret;
   if (!rows.length) return [];
   const all = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, access(c).workspaceId), inArray(mailboxDomains.domainId, rows.map(row => row.id)))).orderBy(sql`${mailboxDomains.parentId} IS NOT NULL`, asc(mailboxDomains.createdAt), asc(mailboxDomains.id));
   const shown = new Map(rows.map(row => [row.id, primaryHost(c.env.config.multiTenant, all.filter(item => item.domainId === row.id))]));
@@ -176,9 +178,9 @@ async function domainViews(c: Ctx, rows: (typeof domains.$inferSelect)[]) {
     const region=state?.region ?? (shared?'us-east-2':row.region);
     // The domain's other hosts: subdomains self-hosted, any host hosted.
     const others = all.filter(item => item.domainId === row.id && item.id !== state?.id && (c.env.config.multiTenant || item.parentId === own?.id) && !['disabled', 'disabling'].includes(item.status)).length;
-    return { id: row.id, name: host, region, status: state?.status ?? setup?.status ?? 'off' as const, dns: [expectedMx(host, region)], mx: state?.mx ?? null, lastError: state?.lastError ?? (setup?.status === 'failed' ? setupError(setup) : null),
+    return { id: row.id, name: host, region, status: state?.status ?? setup?.status ?? 'off' as const, dns: forwarded ? [] : [expectedMx(host, region)], mx: state?.mx ?? null, lastError: state?.lastError ?? (setup?.status === 'failed' ? setupError(setup) : null),
       enabledAt: iso(state?.enabledAt), checkedAt: iso(state?.checkedAt), catchAll: state?.catchAll ?? 'store' as const, addressCount: counts.find(item => item.domainId === state?.id)?.count ?? 0,
-      subdomains: { enabled: own?.acceptSubdomains ?? false, count: others, dns: [expectedMx(`*.${row.name}`, region)] } };
+      subdomains: { enabled: own?.acceptSubdomains ?? false, count: others, dns: forwarded ? [] : [expectedMx(`*.${row.name}`, region)] } };
   });
 }
 /** Hosted: whether a domain's claim is verified (it may receive once its MX is live), for createInboundAddress's answer. */
@@ -194,7 +196,7 @@ async function operationDomain(c: Ctx, domainId: string) {
 async function subdomainViews(runtime: Runtime, domain: typeof domains.$inferSelect, parent: typeof mailboxDomains.$inferSelect, rows: (typeof mailboxDomains.$inferSelect)[]) {
   const counts = rows.length ? await runtime.db.select({ domainId: mailboxes.domainId, count: sql<number>`count(*)::int` }).from(mailboxes).where(inArray(mailboxes.domainId, rows.map(row => row.id))).groupBy(mailboxes.domainId) : [];
   return rows.map(row => ({ id: row.id, name: row.receivingHost ?? row.name, parentDomainId: domain.id, parentName: domain.name, status: ['disabled', 'disabling'].includes(row.status) ? 'disabled' as const : 'active' as const, metadata: row.metadata,
-    dns: [expectedMx(row.receivingHost ?? row.name, parent.region)], mx: row.mx ?? null, catchAll: row.catchAll, addressCount: counts.find(item => item.domainId === row.id)?.count ?? 0, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! }));
+    dns: runtime.config.mailForwarderSecret ? [] : [expectedMx(row.receivingHost ?? row.name, parent.region)], mx: row.mx ?? null, catchAll: row.catchAll, addressCount: counts.find(item => item.domainId === row.id)?.count ?? 0, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! }));
 }
 /** A Nightmail domain and its own receiving row, which its other hosts hang off. Self-hosted, that row must be receiving. */
 async function receivingParent(c: Ctx, domainId: string) {
@@ -288,6 +290,8 @@ function registerReceivingDomains(app: App) {
       if ((await c.env.db.execute(followMxJob(row.workspaceId, sql`SELECT d.id,dc.token FROM operation_domains d JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name WHERE d.workspace_id=${row.workspaceId} AND d.id=${row.id}`))).rowCount) { const actor = c.get('actor'); if (actor) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, 1); }
       const [view]=await domainViews(c,[row]);return c.json({...view!,mx:await checkMx(view!.name,view!.region)},200);
     }
+    // A forwarded domain's MX points at the forwarder, so there is nothing here to check it against.
+    if (c.env.config.mailForwarderSecret) return c.json((await domainViews(c, [row]))[0]!, 200);
     const mx = await checkMx(row.name, row.region);
     await saveMailboxMx(c.env.db,row.workspaceId,row.id,mx);
     const [view] = await domainViews(c, [row]);
@@ -300,24 +304,37 @@ function registerReceivingDomains(app: App) {
     c.env = await withRegionSettings(c.env, value.workspaceId);
     if (c.env.config.multiTenant) { await enableHosted(c, row); return c.json((await domainViews(c,[row]))[0]!,202); }
     if (!c.env.config.regions.includes(row.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable the domain’s SES region first.');
-    const { GetEmailIdentityCommand } = await loadMailboxSesv2();
-    const identity = await (await getSes(c.env, row.region)).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })).catch((error: unknown) => {
-      if (error instanceof ModuleLoadError) throw error;
-      throw new ApiError(503, 'SES_UNAVAILABLE', 'Could not read the domain’s SES verification status.', undefined, true);
-    });
-    if (identity.VerificationStatus !== 'SUCCESS') throw new ApiError(409, 'DOMAIN_NOT_VERIFIED', 'Verify the domain in SES before enabling mailboxes.');
-    const mx = await checkMx(row.name, row.region);
-    if (mx.state === 'error' && !input.force) throw new ApiError(503, 'MX_LOOKUP_FAILED', 'Could not verify the current MX records. Retry before enabling receiving.', undefined, true);
-    if (mxBlocksEnable(mx) && !input.force) throw new ApiError(409, 'MX_CONFLICT', `${mx.message} Retry with force=true to continue anyway.`);
+    // With a mail forwarder (inbound-forward.ts) nothing asks SES, and the domain's MX is the forwarder's to set.
+    const forwarded = !!c.env.config.mailForwarderSecret;
+    // One receipt has one region, and one message may be for several domains: they all receive in the default one.
+    if (forwarded && row.region !== c.env.config.regions[0]) throw new ApiError(422, 'FORWARD_REGION_UNSUPPORTED', `Forwarded mail is received in ${c.env.config.regions[0]}: add the domain in that region.`);
+    let mx: MxReport | null = null;
+    if (!forwarded) {
+      const { GetEmailIdentityCommand } = await loadMailboxSesv2();
+      const identity = await (await getSes(c.env, row.region)).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })).catch((error: unknown) => {
+        if (error instanceof ModuleLoadError) throw error;
+        throw new ApiError(503, 'SES_UNAVAILABLE', 'Could not read the domain’s SES verification status.', undefined, true);
+      });
+      if (identity.VerificationStatus !== 'SUCCESS') throw new ApiError(409, 'DOMAIN_NOT_VERIFIED', 'Verify the domain in SES before enabling mailboxes.');
+      mx = await checkMx(row.name, row.region);
+      if (mx.state === 'error' && !input.force) throw new ApiError(503, 'MX_LOOKUP_FAILED', 'Could not verify the current MX records. Retry before enabling receiving.', undefined, true);
+      if (mxBlocksEnable(mx) && !input.force) throw new ApiError(409, 'MX_CONFLICT', `${mx.message} Retry with force=true to continue anyway.`);
+    }
     await c.env.db.transaction(async tx => {
+      if (forwarded) {
+        const region = { bucket: FORWARD_BUCKET, topicArn: FORWARD_TOPIC };
+        const marked = await tx.insert(mailboxRegions).values({ workspaceId: value.workspaceId, region: row.region, ...region }).onConflictDoUpdate({ target: [mailboxRegions.workspaceId, mailboxRegions.region], set: region,
+          setWhere: sql`${mailboxRegions.bucket} IS NULL OR ${mailboxRegions.bucket}=${FORWARD_BUCKET}` }).returning({ region: mailboxRegions.region });
+        if (!marked.length) throw new ApiError(409, 'FORWARD_REGION_USES_SES', `${row.region} is already set up to receive through SES, so it can’t also take forwarded mail.`);
+      }
       const [current] = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId))).for('update');
       const now = new Date().toISOString();
-      if (!current) await tx.insert(mailboxDomains).values({ id: id('mdom'), workspaceId: value.workspaceId, domainId: row.id, name: row.name, region: row.region, status: 'provisioning', catchAll: input.catchAll, mx, checkedAt: mx.checkedAt });
-      else await tx.update(mailboxDomains).set({ ...(['disabled', 'disabling', 'failed'].includes(current.status) ? { status: 'provisioning' as const, lastError: null } : {}), catchAll: input.catchAll, mx, checkedAt: mx.checkedAt, updatedAt: now }).where(eq(mailboxDomains.id, current.id));
+      if (!current) await tx.insert(mailboxDomains).values({ id: id('mdom'), workspaceId: value.workspaceId, domainId: row.id, name: row.name, region: row.region, status: 'provisioning', catchAll: input.catchAll, mx, checkedAt: mx?.checkedAt });
+      else await tx.update(mailboxDomains).set({ ...(['disabled', 'disabling', 'failed'].includes(current.status) ? { status: 'provisioning' as const, lastError: null } : {}), catchAll: input.catchAll, mx, checkedAt: mx?.checkedAt, updatedAt: now }).where(eq(mailboxDomains.id, current.id));
       await queueReconcile(tx, value.workspaceId, row.region);
-      await recordAudit(tx, c, { action: 'inbound_domain.enable', workspaceId: value.workspaceId, target: { type: 'domain', id: row.id }, before: current ? { status: current.status } : undefined, after: { name: row.name, catchAll: input.catchAll, force: input.force, mx: mx.state } });
+      await recordAudit(tx, c, { action: 'inbound_domain.enable', workspaceId: value.workspaceId, target: { type: 'domain', id: row.id }, before: current ? { status: current.status } : undefined, after: { name: row.name, catchAll: input.catchAll, force: input.force, mx: mx?.state } });
     });
-    log('info', { code: 'MAILBOX_DOMAIN_ENABLE_QUEUED', region: row.region, mx: mx.state });
+    log('info', { code: 'MAILBOX_DOMAIN_ENABLE_QUEUED', region: row.region, mx: mx?.state });
     return c.json((await domainViews(c, [row]))[0]!, 202);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/disable`, operationId: 'disableInboundDomain', summary: 'Stop receiving for a domain', description: `Removes the domain from the ${productName} receipt rule. Receiving addresses and stored messages are kept.`, request: { params: IdParam }, responses: { 202: response(InboundDomainSchema), ...errors } }), async c => {
@@ -628,7 +645,9 @@ function registerAddresses(app: App) {
 import { endInbox, registerInboxes } from './inboxes.js';
 import { registerMailObjects } from './mail-object-route.js';
 import {registerMailGateway} from './mail-gateway.js';
+import { registerForwardedMail } from './inbound-forward.js';
 export function registerMailbox(app: App) {
+  registerForwardedMail(app);
   registerRouting(app);
   registerRituals(app);
   // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.

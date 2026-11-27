@@ -4060,6 +4060,18 @@ export type ConfigureSesAutoValidation = {
     confirm: true;
 };
 
+export type ForwardedMailAccepted = {
+    accepted: true;
+    /**
+     * This ID was already accepted for these recipients: nothing new was stored.
+     */
+    duplicate: boolean;
+    /**
+     * The envelope recipients on a receiving domain. Others are ignored.
+     */
+    recipients: Array<string>;
+};
+
 export type RoutingConfig = {
     version: number;
     routes: Array<MailRoute>;
@@ -16946,6 +16958,67 @@ export type ConfigureRegionAutoValidationResponses = {
 };
 
 export type ConfigureRegionAutoValidationResponse = ConfigureRegionAutoValidationResponses[keyof ConfigureRegionAutoValidationResponses];
+
+export type ReceiveForwardedMailData = {
+    body: Blob | File;
+    path?: never;
+    query?: never;
+    url: '/v1/events/forwarded-mail';
+};
+
+export type ReceiveForwardedMailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ReceiveForwardedMailError = ReceiveForwardedMailErrors[keyof ReceiveForwardedMailErrors];
+
+export type ReceiveForwardedMailResponses = {
+    /**
+     * Success
+     */
+    202: ForwardedMailAccepted;
+};
+
+export type ReceiveForwardedMailResponse = ReceiveForwardedMailResponses[keyof ReceiveForwardedMailResponses];
 
 export type GetRoutingData = {
     body?: never;

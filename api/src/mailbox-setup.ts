@@ -54,6 +54,8 @@ import {storageBinding} from './mailbox-ingest-input.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
 export {storageBinding};
 export async function mailboxS3(runtime: Runtime, wid:string, region: string, bucket:string, db:DbExecutor=runtime.db, resolved?:ReadyConnection|null) {
+  // Forwarded mail lives in the runtime's object storage (mail-objects.ts), read through MailObjects: no S3 client or AWS credentials.
+  if (bucket === 'local:') return { destroy() {} } as S3ClientType;
   let credentials=platformCredentials(runtime);
   if (runtime.config.multiTenant) {
     const binding=resolved===undefined ? (await db.execute<{binding:ReadyConnection|null}>(sql`SELECT ${storageBinding(wid,region,bucket)} AS binding`)).rows[0]!.binding : resolved;
@@ -333,6 +335,12 @@ export async function reconcileRegion(runtime: Runtime, region: string, workspac
 
 /** Queue one reconcile per region unless one is already waiting (a running one may have read older state). */
 export async function queueReconcile(db: DbExecutor, workspaceId: string, region: string) {
+  // A forwarded region (bucket local:, inbound-forward.ts) has nothing to set up in AWS: its hosts take their new state at once.
+  const forwarded = await db.execute(sql`WITH region AS (SELECT workspace_id,region FROM mailbox_regions WHERE workspace_id=${workspaceId} AND region=${region} AND bucket='local:'),
+    settled AS (UPDATE mailbox_domains m SET status=CASE WHEN m.status='disabling' THEN 'disabled' ELSE 'active' END,enabled_at=coalesce(m.enabled_at,now()),updated_at=now()
+      FROM region r WHERE m.workspace_id=r.workspace_id AND m.region=r.region AND m.status IN ('provisioning','waiting_for_mx','disabling'))
+    SELECT FROM region`);
+  if (forwarded.rowCount) return;
   const [waiting] = await db.select({ id: jobs.id }).from(jobs).where(and(eq(jobs.workspaceId, workspaceId), eq(jobs.type, 'mailbox.reconcile'), eq(jobs.status, 'pending'), sql`${jobs.payload}->>'region' = ${region}`)).limit(1);
   if (waiting) return waiting.id;
   return enqueue(db, { type: 'mailbox.reconcile', workspaceId, payload: { region } });
@@ -404,7 +412,8 @@ export async function refreshMailboxDns(runtime: Runtime) {
       WHERE jobs.status NOT IN ('pending','running') AND jobs.created_at<=now()-interval '50 minutes'`);
     return;
   }
-  const rows = await runtime.db.select().from(mailboxDomains).where(and(isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(50);
+  const rows = await runtime.db.select().from(mailboxDomains).where(and(isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`,
+    sql`NOT EXISTS (SELECT FROM mailbox_regions r WHERE r.workspace_id=${mailboxDomains.workspaceId} AND r.region=${mailboxDomains.region} AND r.bucket='local:')`)).limit(50);
   for (const row of rows) {
     const mx = await checkMx(row.name, row.region);
     await saveMailboxMx(runtime.db,row.workspaceId,row.domainId,mx);

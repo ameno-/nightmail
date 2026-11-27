@@ -386,6 +386,12 @@ function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>
 }
 async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetEmailIdentityCommandOutput, mode:'create'|'read'|'verify'='read') {
   const [stored]=await runtime.db.select({mx:mailboxDomains.mx,status:mailboxDomains.status}).from(mailboxDomains).where(and(eq(mailboxDomains.domainId,row.id),isNull(mailboxDomains.parentId)));
+  // With a mail forwarder (inbound-forward.ts) SES is never asked: nothing about sending is verified, and the domain's MX is
+  // the forwarder's to set, so no receiving record is listed.
+  if (runtime.config.mailForwarderSecret) {
+    const report=readiness(row,{});
+    return { ...report, receiving:state(stored?.status==='active'), dns:report.dns.filter(record=>record.purpose!=='receiving'), dnsStatus:'unavailable' as const, dnsUnavailableReason:'This installation receives through a mail forwarder and does not read SES.' };
+  }
   identity??=await sesCall(async ({ GetEmailIdentityCommand }) => (await getSes(runtime,row.region)).send(new GetEmailIdentityCommand({ EmailIdentity:row.name })));
   const report=readiness(row,identity,undefined,stored?.mx,undefined,mode==='create' ? null : await localDmarc(row.name,identity.MailFromAttributes?.MailFromDomain,mode==='verify'));
   if (stored?.status!=='active') report.receiving='pending';
@@ -979,7 +985,7 @@ export async function retrySendingDelivery(runtime: Runtime, tx: DbExecutor, a: 
 /** listDomains' own checks (the notMember path guard runs first): read permission and, self-hosted, a configured region with live SES. */
 export function domainReader(c: Ctx, requested?: string) {
   const a = actor(c);
-  if (!c.env.config.multiTenant) { region(c.env, requested ?? c.env.config.regions[0]!); assertSesConfigured(c.env); }
+  if (!c.env.config.multiTenant) { region(c.env, requested ?? c.env.config.regions[0]!); if (!c.env.config.mailForwarderSecret) assertSesConfigured(c.env); }
   return a;
 }
 type DomainQuery = { limit: number; region?: string; refresh: 'true' | 'false'; cursor?: string; /** The caller counts the quota in a statement of its own (getOverviewSetup). */ countedElsewhere?: boolean };
@@ -1010,6 +1016,7 @@ async function domainRows(c: Ctx, a: Actor, q: DomainQuery): Promise<z.infer<typ
     });
     return { data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null };
   }
+  if (c.env.config.mailForwarderSecret) return { data: await Promise.all(rows.slice(0, q.limit).map(({row}) => domainReadiness(c.env,row))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null };
   const data: z.infer<typeof domainSchema>[] = [];
   for (const {row,mx,status} of rows.slice(0, q.limit)) {
     if (data.length) await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1113,17 +1120,20 @@ export function registerOperations(app: App) {
       await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,'supersede')}`);
       return created(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),claim.token);
     }
-    assertSesConfigured(c.env);
+    const forwarded = !!c.env.config.mailForwarderSecret;
+    if (!forwarded) assertSesConfigured(c.env);
     const body = { name: input.name, region: input.region ?? c.env.config.regions[0]! };
-    const client = await getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
-    try { identity = await sesCall(({ GetEmailIdentityCommand }) => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
-    catch (error) {
-      if (!(error instanceof ApiError) || error.code !== 'SES_IDENTITY_NOT_FOUND') throw error;
-    }
-    if (!identity) {
-      try { await sesCall(({ CreateEmailIdentityCommand }) => client.send(new CreateEmailIdentityCommand({ EmailIdentity: body.name, DkimSigningAttributes: { NextSigningKeyLength: 'RSA_2048_BIT' } }))); }
-      catch (createError) { if (!(createError instanceof ApiError) || createError.code !== 'SES_IDENTITY_EXISTS') throw createError; }
-      await new Promise(resolve => setTimeout(resolve, 1000));
+    const client = forwarded ? undefined : await getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
+    if (client) {
+      try { identity = await sesCall(({ GetEmailIdentityCommand }) => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
+      catch (error) {
+        if (!(error instanceof ApiError) || error.code !== 'SES_IDENTITY_NOT_FOUND') throw error;
+      }
+      if (!identity) {
+        try { await sesCall(({ CreateEmailIdentityCommand }) => client.send(new CreateEmailIdentityCommand({ EmailIdentity: body.name, DkimSigningAttributes: { NextSigningKeyLength: 'RSA_2048_BIT' } }))); }
+        catch (createError) { if (!(createError instanceof ApiError) || createError.code !== 'SES_IDENTITY_EXISTS') throw createError; }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     }
     const { rows: [row] } = await c.env.db.execute<DomainRef>(sql`WITH saved AS (INSERT INTO operation_domains(id,workspace_id,name,region)
       VALUES (${id('dom')},${a.workspaceId},${body.name},${body.region}) ON CONFLICT ON CONSTRAINT operation_domain_scope

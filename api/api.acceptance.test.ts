@@ -25612,6 +25612,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
     import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/sending.js'),
     import('./src/operations.js'), import('./src/ses-region-state.js'), import('./src/dispatcher.js'), import('./src/jobs.js'), import('./src/newsletters.js'),
   ]);
+  const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
     ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
@@ -25623,7 +25624,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime.snsCertificateState = new SnsCertificateState();
   assert.deepEqual(runtime.config.simulatedSes, { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, 'Test dispatch must default to the 100 ms provider simulator.');
   runtime.config.simulatedSes.latencyMs = 0;
-  const app = createApp(), handlers = { ...jobHandlers, ...operationJobs, ...newsletterJobs };
+  const app = createApp(), handlers = { ...jobHandlers, ...operationJobs, ...newsletterJobs, ...mailboxIngestJobs };
   const rollback = new Error('Rollback isolated simulated SES fixtures');
   const fetchIssuer=globalThis.fetch; let unexpectedNetwork=0;
   t.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
@@ -25676,6 +25677,85 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
     });
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
+
+test('self-hosted forwarded mail reaches a mailbox without SES: attachment, repeat ID, wrong secret, unknown recipient', async t => {
+  const { loadConfig } = await import('./src/config.js');
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  const base = { PUBLIC_URL: PUBLIC_ORIGIN, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_SECRET: secret, AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT, DEFAULT_SES_REGION: REGION };
+  assert.equal(loadConfig({ ...base, MAIL_FORWARDER_SECRET: secret }).mailForwarderSecret, secret);
+  assert.equal(loadConfig(base).mailForwarderSecret, undefined);
+  for (const refused of [{ MAIL_FORWARDER_SECRET: 'too-short' }, { MAIL_FORWARDER_SECRET: secret, ENABLE_LIVE_SES: 'true' }, { MAIL_FORWARDER_SECRET: secret, MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google' }])
+    assert.throws(() => loadConfig({ ...base, ...refused }), /MAIL_FORWARDER_SECRET/);
+  await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs, fetch }) => {
+    const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+    runtime.storage = {
+      async put(key, body, contentType) { objects.set(key, { body: new Uint8Array(body), contentType }); },
+      async get(key) { return objects.get(key) ?? null; },
+      async stream(key) { const found = objects.get(key); return found ? { body: new Blob([found.body as BlobPart]).stream(), contentType: found.contentType } : null; },
+      async delete(key) { objects.delete(key); },
+    };
+    const wid = runtime.config.workspaceId, domain = `${unique('forwarded')}.example.com`.replaceAll('_', '-');
+    const file = 'quarterly numbers\n';
+    const mime = (messageId: string, extra: string[] = []) => ['From: Ada <ada@sender.example.org>', `To: me@${domain}`, 'Subject: Numbers', `Message-ID: <${messageId}@sender.example.org>`, ...extra,
+      'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="part"', '', '--part', 'Content-Type: text/plain; charset=utf-8', '', 'The numbers are attached.',
+      '--part', 'Content-Type: text/plain; name="numbers.txt"', 'Content-Disposition: attachment; filename="numbers.txt"', 'Content-Transfer-Encoding: base64', '', Buffer.from(file).toString('base64'), '--part--', ''].join('\r\n');
+    const first = mime('one');
+    const post = async (id: string, raw: string, to: string, authorization = `Bearer ${secret}`): Promise<Reply> => {
+      const response = await fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/forwarded-mail`, { method: 'POST', body: raw, headers: { authorization, 'content-type': 'message/rfc822',
+        'x-nightmail-message-id': id, 'x-nightmail-envelope-from': 'ada@sender.example.org', 'x-nightmail-envelope-to': to } }));
+      return { status: response.status, body: await response.json(), headers: response.headers };
+    };
+    const receipts = async () => (await db.query('SELECT count(*)::int AS n FROM mail_receipts WHERE workspace_id=$1', [wid])).rows[0].n as number;
+
+    error(await post('early', first, `me@${domain}`), 404, 'NOT_FOUND'); // Off until the secret is configured.
+    runtime.config.mailForwarderSecret = secret;
+    error(await post('early', first, `me@${domain}`), 422, 'FORWARD_RECIPIENT_UNKNOWN'); // The domain is not set up yet.
+
+    const created = ok(await local('POST', '/v1/domains', { name: domain, region: REGION }), 201);
+    const enabled = ok(await local('POST', `/v1/inbound/domains/${created.id}/enable`, {}), 202);
+    assert.deepEqual([enabled.status, enabled.dns], ['active', []]);
+    const inbox = ok(await local('POST', '/v1/inboxes', { type: 'persistent', domain, localPart: 'me' }), 201);
+    assert.equal(inbox.address, `me@${domain}`);
+
+    for (const authorization of ['', 'Bearer wrong', `Bearer ${secret}x`, secret])
+      error(await post('delivery-1', first, inbox.address, authorization), 401, 'FORWARD_UNAUTHORIZED');
+    error(await post('stranger', first, 'me@elsewhere.example.net'), 422, 'FORWARD_RECIPIENT_UNKNOWN');
+    assert.deepEqual([objects.size, await receipts()], [0, 0], 'A refused request stores nothing.');
+
+    const accepted = await post('delivery-1', first, `${inbox.address.toUpperCase()}, me@elsewhere.example.net`);
+    assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
+    assert.deepEqual(accepted.body, { accepted: true, duplicate: false, recipients: [inbox.address] });
+    // A repeat before and after ingest, even with other bytes, adds nothing.
+    assert.equal(ok(await post('delivery-1', mime('replaced'), inbox.address), 202).duplicate, true);
+    await run('mailbox.ingest');
+    assert.equal(ok(await post('delivery-1', first, inbox.address), 202).duplicate, true);
+    assert.deepEqual([await receipts(), (await jobs('mailbox.ingest')).filter(job => job.status === 'pending').length], [1, 0]);
+
+    const list = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages`)).data as Json[];
+    assert.equal(list.length, 1, JSON.stringify(list));
+    const message = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages/${list[0]!.id}`));
+    assert.match(message.text, /The numbers are attached\./);
+    assert.deepEqual(message.attachments.map((a: Json) => a.filename), ['numbers.txt']);
+    const download = async (url: string) => { const response = await fetch(new Request(url)); const text = await response.text(); assert.equal(response.status, 200, text); return text; };
+    assert.equal(await download(message.attachments[0].url), file);
+    const read = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages/${list[0]!.id}/attachments/${message.attachments[0].id}`));
+    assert.equal(read.text, file);
+    const detail = ok(await local('GET', `/v1/inbound/messages/${list[0]!.id}?includeDelivery=true`));
+    assert.equal(await download(detail.rawUrl), first, 'The raw message is kept as the first request sent it.');
+    assert.equal(await download(ok(await local('GET', `/v1/inbound/messages/${list[0]!.id}/attachments/${message.attachments[0].id}`)).url), file);
+
+    // The runner claims two or more waiting receipts together: the batched ingest reads the same store.
+    for (const id of ['two', 'three']) ok(await post(`delivery-${id}`, mime(id, ['In-Reply-To: <one@sender.example.org>', 'References: <one@sender.example.org>']), inbox.address), 202);
+    const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+    const waiting = (await db.query(`UPDATE jobs SET status='running',attempts=attempts+1 WHERE workspace_id=$1 AND type='mailbox.ingest' AND status='pending' RETURNING id,attempts,payload`, [wid])).rows;
+    const outcomes = await mailboxIngestJobs['mailbox.ingest']!.batch!(runtime, waiting.map(job => ({ job: { id: job.id, attempts: job.attempts, workspaceId: wid }, payload: job.payload })));
+    assert.equal(outcomes.length, 2, JSON.stringify(outcomes));
+    const threads = (await db.query('SELECT count(*)::int AS n, count(DISTINCT thread_id)::int AS threads FROM mail_messages WHERE workspace_id=$1', [wid])).rows[0];
+    assert.deepEqual(threads, { n: 3, threads: 1 }, JSON.stringify(outcomes));
+    const batched = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages`)).data as Json[];
+    for (const row of batched) assert.match(await download(ok(await local('GET', `/v1/inbound/messages/${row.id}?includeDelivery=true`)).rawUrl), /The numbers are attached|Content-Disposition/);
+  });
+});
 
 // Review of #52 (P1): the tear host accepted any URL whose authority was loopback, though
 // node-postgres lets query parameters redirect it, and never established that the database was

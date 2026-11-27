@@ -1,7 +1,7 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { allowMalformedSns, notFound, snsIngress } from './core.js';
+import { allowMalformedSns, notFound, snsIngress, FORWARDED_MAIL_PATH } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import { reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
 import { IMPORT_PREVIEW_RATE_PER_MINUTE, importPreviewReservationBytes } from './audience.js';
@@ -27,6 +27,7 @@ const supportPath = (pathname: string) => pathname === '/v1/support' || pathname
 function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname.startsWith('/i/')) return 'linked-images';
   if(pathname==='/internal/v1/mail')return 'mailbox';
+  if (pathname === FORWARDED_MAIL_PATH) return 'mailbox';
   if (pathname === '/internal/v1/analytics' || pathname === '/internal/v1/analytics/export') return 'analytics';
   if (pathname === '/internal/v1/database-disk') return 'disk-alert';
   if (pathname === '/v1/public/stats' || pathname === '/v1/public/signups') return 'public-stats';
@@ -309,7 +310,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     // SES owns its two lanes: a newly queued inbound receipt starts ingest; sending feedback uses its own queue.
     const wakeJobs = c.get('actor')?.wakeJobs;
-    const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
+    const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && c.req.path !== FORWARDED_MAIL_PATH && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
     const actor = c.get('actor'), targets = actor?.dispatchTargets;
     const dispatch = targets?.size && c.res.status < 300 ? c.env.dispatch : undefined;
     if (!wake && !dispatch) return;
@@ -331,6 +332,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (operatorPath(c.req.path)) return (await wrapModuleLoad(() => import('./support.js'))).operatorGate(c, next);
     if (supportPath(c.req.path)) return (await wrapModuleLoad(() => import('./support.js'))).supportGate(c, next);
     if (c.req.path === '/v1/public/support-keys') return next();
+    // A mail forwarder's secret is its own credential (inbound-forward.ts); the route checks it before reading the body.
+    if (c.req.method === 'POST' && c.req.path === FORWARDED_MAIL_PATH) return next();
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) || c.req.path.startsWith('/v1/inbound/') || filteredInboxPasswords(c) || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
     // A UI note's screenshot link is its own short-lived credential (src/ui-notes.ts), as is a stored preview's (src/preview-images.ts).
@@ -371,7 +374,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       const matched=c.req.matchedRoutes.some(r=>r.method===c.req.method && !r.path.endsWith('*'));
       // The raw-byte attachment upload reads and bounds its own body (a whole file, up to 25 MiB) once it holds the
       // isolate memory for it (sending.ts), so it is not buffered here first.
-      if (!(c.req.method==='POST' && c.req.path==='/v1/attachments/upload' && c.get('actor')))
+      // So does forwarded mail, after it checks the forwarder's secret (inbound-forward.ts).
+      if (!(c.req.method==='POST' && (c.req.path==='/v1/attachments/upload' && c.get('actor') || c.req.path===FORWARDED_MAIL_PATH)))
         await boundRequestBody(c,snsIngress(c.req.path)||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
     }
     // Reserve isolate memory for contact-import previews before Hono parses the 5 MiB JSON body (after boundRequestBody
