@@ -69,10 +69,10 @@ a.fac-cta .srt-cta-label { --fac-ems: 10.2; }
 @container (width < 133px) { a.fac-cta .srt-cta-arrow { display: none; } a.fac-cta .srt-cta-label { --fac-ems: 8.4; } }
 .fac-cta::before { content: ''; position: absolute; inset: 0; background: rgb(255 255 255); opacity: 0; pointer-events: none; transition: opacity 150ms var(--srt-ease), background-color 90ms var(--srt-ease); }
 .fac-cta svg { width: 1em; height: 1em; }
-@media (hover: hover) and (pointer: fine) { .fac-cta:hover:not(:disabled)::before { opacity: .35; } .fac-cta:hover:not(:disabled) .srt-cta-arrow { translate: .25em 0; } }
-.fac-cta:active:not(:disabled)::before { background: rgb(0 0 0); opacity: .08; }
-.fac-cta:active:not(:disabled) .srt-cta-label { translate: 0 1px; }
-.fac-cta:disabled { opacity: 1; }
+@media (hover: hover) and (pointer: fine) { .fac-cta:hover:not(:disabled, [aria-disabled='true'])::before { opacity: .35; } .fac-cta:hover:not(:disabled, [aria-disabled='true']) .srt-cta-arrow { translate: .25em 0; } }
+.fac-cta:active:not(:disabled, [aria-disabled='true'])::before { background: rgb(0 0 0); opacity: .08; }
+.fac-cta:active:not(:disabled, [aria-disabled='true']) .srt-cta-label { translate: 0 1px; }
+.fac-cta:is(:disabled, [aria-disabled='true']) { opacity: 1; }
 .fac-cta[data-busy] { cursor: progress; }
 .fac-cta:focus-visible { outline: none; }
 /* On a touch screen it is pressed a little past its plate where that is under 44 px tall. */

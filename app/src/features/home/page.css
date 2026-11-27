@@ -31,10 +31,10 @@
 .srt-cta { position: absolute; z-index: 3; display: inline-flex; align-items: center; justify-content: center; padding: 3px 0 0 2px; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-size: clamp(15px, var(--srt-u) * 1.9, 19px); font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; cursor: pointer; }
 .srt-cta::before { content: ''; position: absolute; inset: 3px 0 0 2px; background: var(--srt-cta); box-shadow: 0 -2px 0 var(--srt-cta-top), -1px 0 0 var(--srt-cta-side), -1px -2px 0 var(--srt-cta-side); outline: 1px solid var(--srt-cta-edge); outline-offset: -5px; pointer-events: none; transition: background-color 150ms var(--srt-ease), translate 90ms var(--srt-ease), box-shadow 90ms var(--srt-ease); }
 .srt-cta-label { position: relative; display: inline-flex; align-items: center; gap: .4em; transition: translate 90ms var(--srt-ease); }
-@media (hover: hover) and (pointer: fine) { .srt-cta:hover:not(:disabled)::before { background: var(--srt-cta-hover); } .srt-cta:hover:not(:disabled) .srt-cta-arrow { translate: 4px 0; } }
-.srt-cta:active:not(:disabled)::before { box-shadow: 0 0 0 var(--srt-cta-top), 0 0 0 var(--srt-cta-side), 0 0 0 var(--srt-cta-side); translate: -1px -2px; }
-.srt-cta:active:not(:disabled) .srt-cta-label { translate: -1px -2px; }
-.srt-cta:disabled { opacity: 1; }
+@media (hover: hover) and (pointer: fine) { .srt-cta:hover:not(:disabled, [aria-disabled='true'])::before { background: var(--srt-cta-hover); } .srt-cta:hover:not(:disabled, [aria-disabled='true']) .srt-cta-arrow { translate: 4px 0; } }
+.srt-cta:active:not(:disabled, [aria-disabled='true'])::before { box-shadow: 0 0 0 var(--srt-cta-top), 0 0 0 var(--srt-cta-side), 0 0 0 var(--srt-cta-side); translate: -1px -2px; }
+.srt-cta:active:not(:disabled, [aria-disabled='true']) .srt-cta-label { translate: -1px -2px; }
+.srt-cta:is(:disabled, [aria-disabled='true']) { opacity: 1; }
 .srt-cta[data-busy] { cursor: progress; }
 .srt-cta-arrow { transition: translate 200ms var(--srt-ease); }
 /* Focus: a square ring round a square button, clear of it. */

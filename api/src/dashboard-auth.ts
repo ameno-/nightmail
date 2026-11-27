@@ -4,7 +4,7 @@ import type {BillingAccountRow} from './billing/state.js';
 import {uiNotesAllowedQuery} from './operator-identity.js';
 import {lists} from './db/audience.js';
 import {ApiError,denied,digest,errors,isSimulatedSes,response,security,timed,type App,type Runtime} from './core.js';
-import {accountBrowserRoute,accountSessionActor,accountSessionUser,migrateLegacyCookies,requireDashboardOrigin,settleDefaultAccount} from './account-login.js';
+import {accountBrowserRoute,accountSessionActor,accountSessionUser,migrateLegacyCookies,requireDashboardOrigin,reserveAuthState,settleDefaultAccount} from './account-login.js';
 import {Workspace,WorkspaceRole,sessionMembershipsQuery,type SessionMembershipRow} from './workspaces.js';
 import {ConnectionSummary,connectionSummaryQuery,connectionSummaryOf,type ConnectionSummaryRow,HOSTED_STARTING_SECONDS} from './provider-connections.js';
 import { clientIpHeader, productName, requestedScopes } from './brand.js';
@@ -12,9 +12,7 @@ import { MAIL_PORTS } from './mail-servers.js';
 import { WORKSPACE_FOCUS } from './workspace-focus.js';
 
 export async function reserveSignIn(runtime:Runtime,headers:Headers) {
-  const peer=await digest(headers.get(clientIpHeader) ?? 'unknown');
-  const result=await runtime.db.execute(sql`SELECT reserve_auth_state(${peer}) AS ok`);
-  if (!result.rows[0]?.ok) throw new ApiError(429,'AUTH_STATE_LIMIT','Too many pending sign-ins. Try again later.');
+  await reserveAuthState(runtime.db,await digest(headers.get(clientIpHeader) ?? 'unknown'));
 }
 export async function verifiedDashboardUser(runtime:Runtime,headers:Headers,requireCurrentEmail=false) {
   // A bearer credential (API key, MCP or agent token) never rides the session cookie. It is refused with 403, as on

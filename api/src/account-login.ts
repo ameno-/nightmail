@@ -5,6 +5,7 @@ import { ApiError, digest, log, logError, wrapModuleLoad, type Actor, type Ctx, 
 import { setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
 import { acceptedMethods, githubVerifiedAddress, isStaffSignIn, provenMailbox, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
+import { AUTH_STATE_SECONDS } from './auth-state.js';
 import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
@@ -16,6 +17,26 @@ const verifiedEmail = z.email().max(320);
  * address (far above the time a link takes to make). */
 export const LINK_ANSWER_MS = 500;
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
+/**
+ * Reserves one of a peer's pending sign-ins (reserve_auth_state: 8 at once, each for 11 minutes), or refuses with 429
+ * AUTH_STATE_LIMIT and when the peer's oldest one ends, as Retry-After and in the error's details, so the page can say how
+ * long to wait instead of inviting another press. The wait is about this peer's own slots only; the cap is unchanged.
+ */
+export async function reserveAuthState(db: DbExecutor, peerHash: string) {
+  const reserved = await db.execute<{ ok: boolean }>(sql`SELECT reserve_auth_state(${peerHash}) AS ok`);
+  if (reserved.rows[0]?.ok) return;
+  const { rows: [next] } = await db.execute<{ wait: number | null }>(sql`SELECT ceil(extract(epoch FROM min(expires_at) - clock_timestamp()))::int AS wait
+    FROM auth_state_slots WHERE peer = ${peerHash} AND expires_at > clock_timestamp()`);
+  const seconds = Math.min(AUTH_STATE_SECONDS, Math.max(1, next?.wait ?? AUTH_STATE_SECONDS)), minutes = Math.ceil(seconds / 60);
+  throw Object.assign(new ApiError(429, 'AUTH_STATE_LIMIT', `Too many pending sign-ins. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`),
+    { retryAfterSeconds: seconds, details: [{ retryAfterSeconds: seconds }] });
+}
+/** A refused sign-in body: the schema's own top-level field names, in the answer and the request log, never a value or a key
+ *  the caller made up (a body that isn't an object, or has unknown keys, is logged as body). */
+function invalidAuthInput(issues: readonly { path: readonly PropertyKey[] }[], message: string) {
+  const fields = [...new Set(issues.map(issue => issue.path[0]).filter((key): key is string => typeof key === 'string'))].join(', ');
+  return Object.assign(new ApiError(422, 'AUTH_INPUT_INVALID', message, fields || undefined), { logField: fields || 'body' });
+}
 class AuthenticationMethodRequired extends Error {}
 /** place: one held for its address or open, which a sign-in proving the mailbox could take (signups.ts placeReady).
  * staleLink: the sign-in link it followed was used, expired or not one of ours. */
@@ -122,8 +143,7 @@ async function connectedAccounts(runtime: Runtime, jar: Jar, db: DbExecutor = ru
 export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: string, prompt?: 'select_account', method?: 'google') {
   const origin = new URL(runtime.config.publicUrl).origin;
   if (returnUrl.origin !== origin || returnUrl.username || returnUrl.password) throw loginFailed();
-  const slots = await runtime.db.execute(sql`SELECT reserve_auth_state(${await digest(peer)}) AS ok`);
-  if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
+  await reserveAuthState(runtime.db, await digest(peer));
   const { metadata, client, authentication, callback, options } = await provider(runtime);
   const state = oidc.generateRandomState(), binding = oidc.generateRandomState();
   const verifier = oidc.generateRandomCodeVerifier(), nonce = oidc.generateRandomNonce();
@@ -524,13 +544,13 @@ export async function accountBrowserRoute(c: Ctx) {
     let value: unknown = null;
     try { value = text.trim() ? JSON.parse(text) : {}; } catch { /* refused below */ }
     const input = schema.safeParse(value);
-    if (!input.success) throw new ApiError(422, 'AUTH_INPUT_INVALID', 'The request body is invalid.');
+    if (!input.success) throw invalidAuthInput(input.error.issues, 'The request body is invalid.');
     return input.data as z.infer<T>;
   };
   if (path === '/api/auth/sign-in/account' && c.req.method === 'POST') {
     // method: staff tools ask for a Google sign-in (account-policy.ts), the only proof of staff.
     const input = z.object({ callbackURL:z.url().max(2048), prompt:z.literal('select_account').optional(), method:z.literal('google').optional() }).strict().safeParse(await c.req.json().catch(()=>null));
-    if (!input.success) throw new ApiError(422,'AUTH_INPUT_INVALID','Supply the dashboard return URL.');
+    if (!input.success) throw invalidAuthInput(input.error.issues,'Supply the dashboard return URL.');
     // A tab on an earlier origin signs in on the current one: it goes to the current origin's root, a constant built
     // from config alone (nothing of the request, so it can't be steered elsewhere). No flow starts on the earlier
     // origin. Remove after rename cleanup.
@@ -601,8 +621,7 @@ export async function accountBrowserRoute(c: Ctx) {
     // still ask for a link.
     if (!runtime.config.multiTenant) throw new ApiError(404,'NOT_FOUND','Authentication endpoint was not found.');
     const { email } = await body(z.object({ email: verifiedEmail }).strict());
-    const slots = await runtime.db.execute(sql`SELECT reserve_auth_state(${await digest(`signin-link:${c.req.header(clientIpHeader) ?? 'unknown'}`)}) AS ok`);
-    if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
+    await reserveAuthState(runtime.db, await digest(`signin-link:${c.req.header(clientIpHeader) ?? 'unknown'}`));
     // Making a link writes more than finding no held place, so the answer waits until a fixed time after the request, and
     // a failure is logged rather than answered: neither its timing nor its status says whether a place is held.
     const answerAt = Date.now() + LINK_ANSWER_MS;

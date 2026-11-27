@@ -1,4 +1,4 @@
-import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type FormEvent, type ReactNode } from 'react'
+import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ComponentProps, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
@@ -9,11 +9,14 @@ import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { clearLandingFocus, noteLandingLocation, rememberLandingFocus } from './landing-focus'
-import { Alert, Button, Field, Input, PageHeader, ToastScope, useToast } from '../components/ui'
+import { Alert, Button, Field, Icon, Input, PageHeader, ToastScope, useToast } from '../components/ui'
+import { LoaderCircle } from 'lucide-react'
 import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
+import { validEmail } from '../lib/domain'
+import { countdown, keepWait, keptWait, useSecondsLeft, waitDeadline, waitLeft, waitSeconds, type Wait } from '../lib/countdown'
 import { queries, type QueryDef } from './queries'
 import { invalidateResources, resourceOf, staleAfterWrite, type InvalidationTarget } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
@@ -36,11 +39,15 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
    *  Overview; focus (a comparison's) rides along as ?focus=, which onboarding reads. select: the account service shows its
    *  chooser first (a support email's sign-in link, which may be for another account than this browser's). */
   signIn: (focus?: WorkspaceFocus, select?: boolean) => void
-  /** A press starting on a sign-in button (pointer down): the sign-in request starts then, as the homepage's button does. */
-  signInIntent: (event: { button: number }, focus?: WorkspaceFocus) => void
+  /** A press starting on a sign-in button (a mouse's pointer down): the sign-in request starts then, as the homepage's button does. */
+  signInIntent: (event: { button: number; pointerType: string }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
   signingIn: boolean
+  /** When a refused start's wait (429 AUTH_STATE_LIMIT) ends (lib/countdown.ts): every
+   *  sign-in button is held until then, counting it down (useSecondsLeft). */
+  signInWaitUntil: Wait | null
   notice: string | null; dismissNotice: () => void }
+const SIGN_IN_WAIT_KEY = 'nightmail.sign-in-wait'
 const homeChunk = chunk(() => import('../features/home'))
 export const loadHome = homeChunk.preload
 export const HomePage = homeChunk.page(m => m.HomePage)
@@ -196,7 +203,7 @@ function waitlistAddress() {
 // waits, every place taken, and ?position=N says where in the order a raise lets the waitlist in (1 is next); someone
 // told they're in who signed in with another address asks for a link to that one. ?link=expired: the sign-in link it
 // followed was used or ran out.
-function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
+function WaitlistPage({ busy, error, waitUntil, onSwitch }: { busy: boolean; error: unknown; waitUntil: Wait | null; onSwitch: () => void }) {
   const [email] = useState(waitlistAddress), [search] = useState(() => new URLSearchParams(window.location.search))
   const place = search.get('place'), ready = (place === 'held' || place === 'ready') && email !== null, expired = search.get('link') === 'expired'
   const position = /^[1-9]\d{0,6}$/.test(search.get('position') ?? '') ? Number(search.get('position')) : null
@@ -208,27 +215,75 @@ function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown
         <p className="muted">Got an email saying you’re in? Sign in with that address, or get a sign-in link sent to it.</p></>}
     <SignInLinkForm to={ready ? email : null} />
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
-    <Button variant={ready ? 'secondary' : 'primary'} loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
+    <SignInButton variant={ready ? 'secondary' : 'primary'} loading={busy} waitUntil={waitUntil} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</SignInButton>
     <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>
   </SignedOutPage>
 }
+// A button that starts a sign-in. Held after a refused start (429 AUTH_STATE_LIMIT), it counts the wait down. Its label,
+// the label with the spinner while a start is out, and the wait are laid out in one cell, so going from one to another
+// moves nothing. Busy or held it is unavailable but never disabled: a disabled button drops keyboard focus, and the
+// screen reader's place, to the page. Presses (Enter and Space too) are ignored instead, and its name stays the action's,
+// so the countdown isn't read out every second; the toast said why once.
+function SignInButton({ waitUntil, loading = false, children, onClick, ...props }: Omit<ComponentProps<typeof Button>, 'children' | 'disabled'> & { waitUntil: Wait | null; children: string }) {
+  const left = useSecondsLeft(waitUntil), shown = left ? 'wait' : loading ? 'busy' : 'idle', unavailable = shown !== 'idle'
+  return <Button {...props} aria-disabled={unavailable || undefined} aria-busy={loading || undefined} aria-label={left ? children : undefined} onClick={event => { if (!unavailable) onClick?.(event) }}><span className="signed-out__countdown">
+    <span data-shown={shown === 'idle' || undefined} aria-hidden={shown !== 'idle' || undefined}>{children}</span>
+    <span className="signed-out__busy" data-shown={shown === 'busy' || undefined} aria-hidden={shown !== 'busy' || undefined}><Icon icon={LoaderCircle} size="sm" className="ui-spinner" />{children}</span>
+    <span data-shown={shown === 'wait' || undefined} aria-hidden>Try again in {countdown(left)}</span>
+  </span></Button>
+}
 // A sign-in link to an address with a place (api/src/signups.ts sendSigninLink): the refused sign-in's own address when a
 // place is held for it or open, in one click, else the address typed. The answer never says whether there is a place.
-// Its words replace the hint in one slot sized for the longest, so asking shifts nothing.
-const linkLines = { idle: 'The link works once, for 30 minutes.', sent: 'If there’s a place for that address, a link is on its way.', failed: 'Couldn’t ask for a link. Try again in a few minutes.' }
+// Asked, the form turns into what to do next: the address as typed (so a typo shows), and Send again after a minute.
+// At the cap on pending sign-ins (429 AUTH_STATE_LIMIT) it says the earlier links are on their way and counts down the
+// wait the API gives (Retry-After). An address the API wouldn't take is caught here first (the same shape, lib/domain.ts),
+// and one press makes one request. Both views share one cell sized for the taller, and the lines under the button share
+// one slot, so nothing moves when an answer comes.
+const RESEND_SECONDS = 60
+const linkLines = { idle: 'The link works once, for 30 minutes.', invalid: 'Check the address, like name@company.com.', failed: 'Couldn’t ask for a link. Try again in a minute.' }
+type LinkState = { view: 'ask'; line: keyof typeof linkLines } | { view: 'sent'; address: string; until: Wait; capped: boolean }
 function SignInLinkForm({ to }: { to: string | null }) {
-  const [typed, setTyped] = useState(''), [state, setState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
-  async function send(event: FormEvent) {
-    event.preventDefault()
-    setState('sending')
-    try { await accountApi.signInLink(to ?? typed.trim()); setState('sent') } catch { setState('failed') }
+  const [typed, setTyped] = useState(''), [state, setState] = useState<LinkState>({ view: 'ask', line: 'idle' }), [sending, setSending] = useState(false)
+  const inFlight = useRef(false), field = useRef<HTMLInputElement>(null), box = useRef<HTMLDivElement>(null), again = useRef<HTMLButtonElement>(null), focusAgain = useRef(false)
+  const sent = state.view === 'sent', left = useSecondsLeft(sent ? state.until : null)
+  // Asked from the form, focus moves to Send again as the form goes inert, rather than dropping to the page.
+  useEffect(() => { if (sent && focusAgain.current) { focusAgain.current = false; again.current?.focus() } }, [sent])
+  async function send(address: string) {
+    if (inFlight.current) return
+    if (!validEmail(address)) { setState({ view: 'ask', line: 'invalid' }); field.current?.focus(); return }
+    inFlight.current = true
+    setSending(true)
+    try {
+      await accountApi.signInLink(address)
+      focusAgain.current = !!box.current?.contains(document.activeElement)
+      setState({ view: 'sent', address, until: waitDeadline(RESEND_SECONDS), capped: false })
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'AUTH_STATE_LIMIT') { focusAgain.current = !!box.current?.contains(document.activeElement); setState({ view: 'sent', address, until: waitDeadline(waitSeconds(error)), capped: true }) }
+      else setState({ view: 'ask', line: error instanceof ApiError && error.code === 'AUTH_INPUT_INVALID' ? 'invalid' : 'failed' })
+    } finally { inFlight.current = false; setSending(false) }
   }
-  const shown = state === 'sending' ? 'idle' : state
-  return <form className="signed-out__link-form" onSubmit={event => void send(event)}>
-    {to ? null : <Field label="Address you joined the waitlist with" htmlFor="waitlist-link-address"><Input id="waitlist-link-address" type="email" autoComplete="email" required value={typed} onChange={event => { setTyped(event.target.value); setState('idle') }} /></Field>}
-    <Button type="submit" variant={to ? 'primary' : 'secondary'} loading={state === 'sending'} data-analytics="sign-in/waitlist-link">Email me a sign-in link</Button>
-    <p className="signed-out__status muted" role="status">{(Object.keys(linkLines) as (keyof typeof linkLines)[]).map(key => <span key={key} data-shown={key === shown || undefined}>{linkLines[key]}</span>)}</p>
-  </form>
+  const ask = (event: FormEvent) => { event.preventDefault(); void send(to ?? typed.trim()) }
+  const line = state.view === 'ask' ? state.line : 'idle'
+  const capped = sent && state.capped
+  return <div ref={box} className="signed-out__link-box" data-sent={sent || undefined}>
+    <form className="signed-out__link-form" noValidate onSubmit={ask} inert={sent} aria-hidden={sent || undefined}>
+      {to ? null : <Field label="Address you joined the waitlist with" htmlFor="waitlist-link-address"><Input ref={field} id="waitlist-link-address" type="email" autoComplete="email" required value={typed} aria-invalid={line === 'invalid' || undefined} aria-describedby="waitlist-link-line" onChange={event => { setTyped(event.target.value); if (line !== 'idle') setState({ view: 'ask', line: 'idle' }) }} /></Field>}
+      <Button type="submit" variant={to ? 'primary' : 'secondary'} aria-disabled={sending || undefined} aria-busy={sending || undefined} data-analytics="sign-in/waitlist-link">{sending && !sent ? <Icon icon={LoaderCircle} size="sm" className="ui-spinner" /> : null}Email me a sign-in link</Button>
+      <p id="waitlist-link-line" className="signed-out__status muted" role="status">{(Object.keys(linkLines) as (keyof typeof linkLines)[]).map(key => <span key={key} data-shown={key === line || undefined} data-tone={key === 'idle' ? undefined : 'danger'}>{linkLines[key]}</span>)}</p>
+    </form>
+    <div className="signed-out__link-sent" inert={!sent} aria-hidden={!sent || undefined}>
+      <p className="signed-out__link-title" role="status">{sent ? 'Check your email' : null}</p>
+      <p className="signed-out__link-address"><bdi data-own-address="">{sent ? state.address : '\u00a0'}</bdi></p>
+      <p className="signed-out__link-text">
+        <span data-shown={!capped || undefined} aria-hidden={capped || undefined}>If there’s a place for this address, a link is on its way. Nothing after a few minutes? Look in spam{to ? '' : ', or check the address'}.</span>
+        <span data-shown={capped || undefined} aria-hidden={!capped || undefined}>You’ve asked a few times. If there’s a place for this address, a link is already on its way.</span>
+      </p>
+      <div className="signed-out__link-actions">
+        <Button ref={again} aria-disabled={left > 0 || sending || undefined} aria-busy={(sending && sent) || undefined} aria-label={left > 0 ? 'Send again' : undefined} onClick={() => { if (sent && !left && !sending) void send(state.address) }} data-analytics="sign-in/waitlist-link-again"><span className="signed-out__countdown">{([['sending', 'Sending…'], ['wait', `Send again in ${countdown(left)}`], ['ready', 'Send again']] as const).map(([key, label]) => { const shown = key === (sending ? 'sending' : left > 0 ? 'wait' : 'ready'); return <span key={key} data-shown={shown || undefined} aria-hidden={!shown || key === 'wait' || undefined}>{label}</span> })}</span></Button>
+        {to ? null : <Button variant="ghost" disabled={sending} onClick={() => { setState({ view: 'ask', line: 'idle' }); requestAnimationFrame(() => field.current?.focus()) }}>Change address</Button>}
+      </div>
+    </div>
+  </div>
 }
 /** Pages anyone can open, signed in or not. Continuing an emailed support request (features/support/continue.tsx) is one:
  *  a person signed in without a workspace has no /v1/me but can confirm it, and someone signed out signs in from it. */
@@ -465,8 +520,27 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   async function logout() { setAuthError(null); try { await signOutAccount() } catch (error) { setAuthError(error) } }
   // Every sign-in request replaces the browser's single OAuth state cookie, so it starts on pointer down
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
-  // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
+  // used by that click only; a pointer down that never becomes a click is dropped after a few seconds. Only a mouse's: on a
+  // touch screen a scroll that begins on the button is a pointer down too, and every start holds one of the network's
+  // pending sign-ins for 11 minutes (reserve_auth_state) and asks the account service, so a touch starts on the click.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
+  // A start refused at the cap on pending sign-ins (429 AUTH_STATE_LIMIT; the cap is per network, not per person): said
+  // once in a toast (why only: the buttons are the clock), which covers nothing it would move, then every sign-in button
+  // stays disabled and counts down the API's wait, and no press or pointer down asks again until it ends. Kept for the tab, so a reload doesn't ask again.
+  // Never longer than the API holds anyone (lib/countdown.ts): a kept wait that isn't a real time within that is dropped.
+  const [signInWait, setSignInWait] = useState<Wait | null>(() => keptWait(SIGN_IN_WAIT_KEY))
+  const held = () => waitLeft(signInWait) > 0
+  useEffect(() => {
+    if (signInWait === null) return
+    const timer = window.setTimeout(() => { setSignInWait(null); keepWait(SIGN_IN_WAIT_KEY, null) }, waitLeft(signInWait))
+    return () => window.clearTimeout(timer)
+  }, [signInWait])
+  function holdSignIn(error: ApiError) {
+    const deadline = waitDeadline(waitSeconds(error))
+    setSignInWait(deadline)
+    keepWait(SIGN_IN_WAIT_KEY, deadline)
+    toast('Too many sign-ins from this network just now.', 'info')
+  }
   // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").
   // method: it asks for that sign-in (staff tools need Google).
   function accountUrl(select = false, method?: 'google', focus?: WorkspaceFocus) {
@@ -488,20 +562,21 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       return url.href
     })
   }
-  function prepareLogin(event: { button: number }, focus?: WorkspaceFocus) {
-    if (busy || event.button !== 0) return
+  function prepareLogin(event: { button: number; pointerType: string }, focus?: WorkspaceFocus) {
+    if (busy || held() || event.button !== 0 || event.pointerType !== 'mouse') return
     const url = accountUrl(false, undefined, focus)
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
   }
   const login = () => startLogin(false)
   async function startLogin(select: boolean, method?: 'google', focus?: WorkspaceFocus) {
+    if (held()) return
     setBusy(true); setAuthError(null)
     if (focus) rememberLandingFocus(focus, window.location.pathname)
     const pending = signIn.current
     signIn.current = null
     try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method, focus)); expectAccount(); analytics().flush(); window.location.assign(url) }
-    catch (error) { setAuthError(error); setBusy(false) }
+    catch (error) { setBusy(false); if (error instanceof ApiError && error.code === 'AUTH_STATE_LIMIT') holdSignIn(error); else setAuthError(error) }
   }
   const signedOut = !checkIdentity || (identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED')
   const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
@@ -527,23 +602,23 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   const allowToast = useMemo(() => () => isCurrentScope(scope), [scope])
-  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (focus, select) => void startLogin(select === true, undefined, focus), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (focus, select) => void startLogin(select === true, undefined, focus), signInIntent: prepareLogin, signingIn: busy, signInWaitUntil: signInWait, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
-    : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
+    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} waitUntil={signInWait} onSwitch={() => void startLogin(true)} />
+    : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy, waitUntil: signInWait }} notice={authNotice} /></Suspense>
     // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
     // address says there is no page there.
     // /connect, from the link an agent showed: say what is waiting, so a person who has never signed in knows why.
     : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={pathname === '/connect' ? 'Sign in to approve your agent' : `Sign in to ${productName}`}>
         {authNotice}
         {pathname === '/connect' && <p className="muted">{connectLead(new URLSearchParams(window.location.search).get('code'))}</p>}
-        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</Button>
+        <SignInButton variant="primary" loading={busy} waitUntil={signInWait} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</SignInButton>
         <SignInConsent className="muted" />
       </SignedOutPage>
       : <SignedOutPage title="Page not found">
         {authNotice}
-        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/not-found">Sign in</Button>
+        <SignInButton variant="primary" loading={busy} waitUntil={signInWait} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/not-found">Sign in</SignInButton>
         <SignInConsent className="muted" />
         <Link className="signed-out__link" to="/">Go to {productName}</Link>
       </SignedOutPage>

@@ -26,7 +26,7 @@ body { margin: 0; background: var(--color-deep); color: var(--color-text); font-
 button, input, textarea, select { font: inherit; color: inherit; }
 button, a, input, textarea { -webkit-tap-highlight-color: var(--color-transparent); }
 button { cursor: pointer; }
-button:disabled, [data-disabled] { cursor: not-allowed; opacity: .5; }
+button:disabled, [data-disabled], .ui-button[aria-disabled='true'], [data-cta='sign-in'][aria-disabled='true'] { cursor: not-allowed; opacity: .5; }
 a { color: inherit; }
 h1, h2, h3, p { margin: 0; }
 h1, h2, h3 { font-weight: var(--font-weight-regular); }
@@ -55,17 +55,17 @@ html, .page-surface { scroll-padding-block: var(--focus-reach); }
 /* Hover fills only where a pointer can hover: on a touch screen a tap would leave them stuck on the control. Keyboard
    focus shows a stronger fill on every screen. A control is its solid fill alone: hover, focus and press are solid steps
    (--color-control-*), never a hairline. */
-@media (hover: hover) and (pointer: fine) { .ui-button--secondary:hover:not(:disabled), .ui-button--danger:hover:not(:disabled) { background: var(--color-control-hover); } }
-@media (hover: hover) and (pointer: fine) { .ui-button--ghost:hover:not(:disabled) { background: var(--color-hover); color: var(--color-text); } .ui-button--ghost:not(.ui-icon-button):hover:not(:disabled) { color: var(--color-accent-text); } }
-@media (hover: hover) and (pointer: fine) { .ui-button--primary:hover:not(:disabled) { background: var(--color-accent-hover); } }
+@media (hover: hover) and (pointer: fine) { .ui-button--secondary:hover:not(:disabled, [aria-disabled='true']), .ui-button--danger:hover:not(:disabled, [aria-disabled='true']) { background: var(--color-control-hover); } }
+@media (hover: hover) and (pointer: fine) { .ui-button--ghost:hover:not(:disabled, [aria-disabled='true']) { background: var(--color-hover); color: var(--color-text); } .ui-button--ghost:not(.ui-icon-button):hover:not(:disabled, [aria-disabled='true']) { color: var(--color-accent-text); } }
+@media (hover: hover) and (pointer: fine) { .ui-button--primary:hover:not(:disabled, [aria-disabled='true']) { background: var(--color-accent-hover); } }
 :is(.ui-button--secondary, .ui-button--danger):focus-visible { background: var(--color-control-focus); }
 .ui-button--ghost:focus-visible { background: var(--color-hover); color: var(--color-text); }
 .ui-button--ghost:not(.ui-icon-button):focus-visible { color: var(--color-accent-text); }
 .ui-button--primary:focus-visible { background: var(--color-accent-hover); }
 a.ui-button:focus-visible { text-decoration: none; }
-.ui-button:active:not(:disabled) { background-color: var(--color-pressed); transform: scale(.97); }
-:is(.ui-button--secondary, .ui-button--danger):active:not(:disabled) { background-color: var(--color-control-pressed); }
-.ui-button--primary:active:not(:disabled) { background: var(--color-accent-pressed); }
+.ui-button:active:not(:disabled, [aria-disabled='true']) { background-color: var(--color-pressed); transform: scale(.97); }
+:is(.ui-button--secondary, .ui-button--danger):active:not(:disabled, [aria-disabled='true']) { background-color: var(--color-control-pressed); }
+.ui-button--primary:active:not(:disabled, [aria-disabled='true']) { background: var(--color-accent-pressed); }
 .ui-icon-button { width: var(--control-height); padding: 0; }
 .ui-icon-button.ui-button--sm { width: var(--control-height-sm); }
 .ui-input { --input-pad-x: var(--control-pad-x); display: block; width: 100%; min-width: 0; height: var(--control-height); border: 0; border-radius: var(--radius-sm); padding: 0 var(--input-pad-x); appearance: none; -webkit-appearance: none; background: var(--color-control); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; line-height: var(--leading-sm); transition: background var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard); }
@@ -322,6 +322,7 @@ a.ui-tab { text-decoration: none; }
 .srt-cta-labels { display: grid; place-items: center; }
 .srt-cta-labels > .srt-cta-label { grid-area: 1 / 1; }
 .srt-cta-labels > [data-off], .srt-wait-line[data-off] { visibility: hidden; }
+.srt-cta-retry { font-variant-numeric: tabular-nums; }
 .ui-toasts { position: fixed; bottom: var(--space-24); right: var(--space-24); z-index: 100; display: flex; flex-direction: column; gap: var(--space-8); width: min(420px, calc(100vw - 48px)); pointer-events: none; }
 .ui-toasts .ui-alert { pointer-events: auto; background: var(--color-overlay-surface); box-shadow: var(--shadow-popover); animation: toast-in 220ms var(--ease-out-strong); }
 .ui-toasts .ui-alert > div:first-child { flex: 1; min-width: 0; }
