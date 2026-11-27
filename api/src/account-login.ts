@@ -68,8 +68,12 @@ async function privateKeyAuthentication(privateKey: string) {
   return oidc.PrivateKeyJwt({ key: signing, kid: jwk.kid });
 }
 // A client secret goes the way the issuer's discovery document says it takes one. Basic first; a document that lists no
-// methods means Basic (OpenID Connect Discovery 1.0, section 3). An issuer that takes neither is never sent the secret.
+// methods means Basic (OpenID Connect Discovery 1.0, section 3). An issuer that takes neither is never sent the secret,
+// and neither is a token or pushed request endpoint on another origin than the issuer's.
 function secretAuthentication(metadata: oidc.AuthorizationServer, secret: string) {
+  const origin = new URL(metadata.issuer).origin;
+  if ([metadata.token_endpoint, metadata.pushed_authorization_request_endpoint].some(endpoint => endpoint !== undefined && new URL(endpoint).origin !== origin))
+    throw new ApiError(503, 'AUTH_NOT_CONFIGURED', "The sign-in issuer's token or pushed authorization request endpoint is not on the issuer's origin.");
   const methods = metadata.token_endpoint_auth_methods_supported ?? ['client_secret_basic'];
   if (methods.includes('client_secret_basic')) return oidc.ClientSecretBasic(secret);
   if (methods.includes('client_secret_post')) return oidc.ClientSecretPost(secret);
