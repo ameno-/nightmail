@@ -223,6 +223,8 @@ export interface Runtime {
   /** Starts work now on a database connection of its own that outlives the request (the Worker's waitUntil), for work
    * the request starts but doesn't wait for (startHostedMail). Absent where the request's own pool outlives it (Node). */
   detach?: (work: (runtime: Runtime) => Promise<void>) => Promise<void>;
+  /** Node's independent pool for deprecation counters. Never record on a request's transaction. */
+  deprecatedCallDb?: Database;
   /** Wakes inbox long polls as mail is stored (inbox-wake.ts): the DISPATCHER namespace on Workers, pg_notify on Node. */
   inboxWake?: import('./inbox-wake.js').InboxWake;
   /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */

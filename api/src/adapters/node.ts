@@ -162,6 +162,8 @@ export function nodeRuntime(env: Record<string, string | undefined>): { runtime:
   // Keep the API/runner alive to reconnect; never log the error's client/config data.
   pool.on('error', () => log('error', { code: 'POSTGRES_POOL_ERROR', message: 'An idle PostgreSQL connection failed; the pool will reconnect.' }));
   const inboxWake = nodeInboxWake(postgresConnection(env.DATABASE_URL));
-  const runtime: Runtime = { db: drizzle(pool), storage: s3Storage(env), config: loadConfig(env), webhookFetch: nodeWebhookFetch, inboxWake };
-  return { runtime, close: async () => { await inboxWake.close(); await pool.end(); } };
+  const counters = new Pool({ ...postgresConnection(env.DATABASE_URL), max: 2, connectionTimeoutMillis: 1000, idleTimeoutMillis: 30000 });
+  counters.on('error', () => log('error', { code: 'DEPRECATED_COUNTER_POOL_ERROR' }));
+  const runtime: Runtime = { db: drizzle(pool), deprecatedCallDb: drizzle(counters), storage: s3Storage(env), config: loadConfig(env), webhookFetch: nodeWebhookFetch, inboxWake };
+  return { runtime, close: async () => { await inboxWake.close(); await Promise.all([pool.end(), counters.end()]); } };
 }

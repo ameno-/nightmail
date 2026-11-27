@@ -4179,6 +4179,50 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       }
       const ownerEmail=address(), otherEmail=address(), guestEmail=address();
       const a=await workspaceFixture(ownerEmail,true), b=await workspaceFixture(otherEmail,true), guest=(await workspaceFixture(guestEmail,false)).cookie;
+      await mx.test('deprecation notices preserve invitation responses and count only the older route', async t => {
+        const owner = await workspaceFixture(address(), true);
+        let resolve!: () => void;
+        const release = new Promise<void>(done => { resolve = done; });
+        let fail = false;
+        const writes: Promise<void>[] = [];
+        const isolated: typeof runtime = { ...runtime, detach: work => {
+          const result = release.then(() => { if (fail) throw new Error('synthetic counter unavailable'); return work(runtime); });
+          writes.push(result);
+          return result;
+        } };
+        const post = (resource: string, email: string) => http('POST', `${base}/${resource}`, undefined, { email, role: 'member' },
+          { origin, cookie: owner.cookie }, 5000, origin, r => app.fetch(r, isolated));
+        const count = async () => Number((await pool.query('SELECT coalesce(sum(calls),0) AS n FROM deprecated_call_days WHERE workspace_id=$1', [owner.org.id])).rows[0].n);
+        const before = await count(), current = await post('invitations', address()), reference = ok(current, 201);
+        for (const header of ['deprecation', 'sunset', 'link']) assert.equal(current.headers.get(header), null);
+        assert.equal(writes.length, 0);
+        const email = address(), older = await post('members', email), result = ok(older, 201);
+        // Only the generated values differ. The full set of fields and the next-step text stay identical.
+        const normalized = (v: Json) => JSON.stringify(v).replaceAll(v.email, 'EMAIL').replaceAll(v.id, 'ID').replaceAll(v.expiresAt, 'EXPIRY');
+        assert.equal(normalized(result), normalized(reference));
+        const headers = (reply: Reply) => {
+          assert.equal(reply.headers.get('sunset'), 'Thu, 25 Feb 2027 23:59:59 GMT');
+          assert.equal(reply.headers.get('deprecation'), '@' + Date.parse('2027-02-25T23:59:59Z') / 1000);
+          assert.equal(reply.headers.get('link'), '</docs/operations/createWorkspaceInvitation.md>; rel="successor-version"');
+        };
+        headers(older);
+        assert.equal(await count(), before, 'A blocked counter must not delay the HTTP result.');
+        resolve(); await Promise.all(writes);
+        assert.equal(await count(), before + 1);
+        const conflict = await post('members', email);
+        error(conflict, 409, 'ALREADY_INVITED_OR_MEMBER'); headers(conflict);
+        await Promise.all(writes);
+        assert.equal(await count(), before + 2);
+        fail = true;
+        const errors = t.mock.method(console, 'error', () => {});
+        const uncounted = await post('members', address());
+        assert.equal(normalized(ok(uncounted, 201)), normalized(reference)); headers(uncounted);
+        await Promise.allSettled(writes);
+        assert.equal(await count(), before + 2);
+        assert.equal(writes.length, 3);
+        const losses = errors.mock.calls.map(c => JSON.parse(String(c.arguments[0]))).filter(v => v.code === 'DEPRECATED_CALL_WRITE_LOST');
+        assert.deepEqual(losses.map(v => [v.operation, v.lostWrites]), [['inviteWorkspaceMember', 1]]);
+      });
       const invitation=ok(await local('POST',`${base}/invitations`,{email:guestEmail,role:'member'},a.cookie),201);
       // The link opens the dashboard's review of it, not the homepage at the site's root.
       assert.equal(new URL(invitation.acceptUrl).pathname+new URL(invitation.acceptUrl).search,`/overview?invitation=${encodeURIComponent(invitation.id)}`);

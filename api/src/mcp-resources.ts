@@ -1,4 +1,5 @@
 import type { Tool } from '@modelcontextprotocol/server';
+import { retiringOperations } from './deprecation.js';
 import type { McpOperation } from './mcp-catalog.js';
 
 // Names are the only indirection: an action always resolves to one catalog operation.
@@ -192,6 +193,8 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
     if (!visible.length) return [];
     // The schema already enumerates actions. Keep extra prose only where it adds a safety instruction.
     const notes=visible.filter(({op})=>Object.hasOwn(actionSummaries,op.tool.name)).map(({op})=>actionSummary(op.tool.name));
+    const retired = visible.filter(({ op }) => retiringOperations.has(op.tool.name));
+    if (retired.length) notes.push(retired.length === visible.length ? 'Deprecated' : 'Deprecated: ' + retired.map(({ action }) => action).join(', '));
     const description = [label,...notes].join('. ')+'.';
     const oneOf = visible.map(({ action, op }) => {
       const { $defs = {}, properties = {}, required = [] } = op.tool.inputSchema;

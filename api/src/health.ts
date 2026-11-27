@@ -520,6 +520,8 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
           folded AS (INSERT INTO health_hours AS h (hour,kind,key,n,errors,ms,slowest,hist) SELECT s.hour,s.kind,s.key,s.n,s.errors,s.ms,s.slowest,x.hist FROM sums s LEFT JOIN hists x USING (hour,kind,key) ORDER BY 1,2,3
             ON CONFLICT (hour,kind,key) DO UPDATE SET n=h.n+excluded.n,errors=h.errors+excluded.errors,ms=h.ms+excluded.ms,slowest=greatest(h.slowest,excluded.slowest),
               hist=CASE WHEN h.hist IS NULL THEN excluded.hist WHEN excluded.hist IS NULL THEN h.hist ELSE ARRAY(SELECT a+b FROM unnest(h.hist,excluded.hist) WITH ORDINALITY u(a,b,i) ORDER BY i) END),
+          expired_deprecations AS (DELETE FROM deprecated_call_days WHERE ctid IN
+            (SELECT ctid FROM deprecated_call_days WHERE day < (now() AT TIME ZONE 'UTC')::date - 31 ORDER BY day LIMIT 256 FOR UPDATE SKIP LOCKED)),
           aged AS (DELETE FROM health_hours WHERE hour<now()-interval '30 days')
         UPDATE health_state SET rollup=${JSON.stringify(rollup)}::jsonb,generated_at=now() WHERE singleton`);
       if (findings.length) await tx.execute(sql`INSERT INTO health_alerts AS a (key,kind,severity,value,unit,words)
