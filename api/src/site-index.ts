@@ -13,8 +13,9 @@ export const SITE_INDEX = '/llms-site.txt';
  *  rendering the page fetches only what robots.txt allows. (/v1/me, refused the same way, leaves the docs signed out.) */
 export const CRAWL_DISALLOW = ['/v1/', '/api/', '/mcp', '/internal/', '/unsubscribe/', '/i/'];
 /** The site's own pages at the top level that the build writes (app/price-pages.ts: the use-case pages, docs/agents.ts).
- *  The Worker serves them from the build's files, as it does the pages under isSitePage's directories. The build stops
- *  when this list and the pages it writes differ (price-pages.ts). */
+ *  Served from the build's files before the Worker, as the pages under isSitePage's directories are; the Worker answers
+ *  only an address under them with no file (not found). The build stops when this list and the pages it writes differ
+ *  (price-pages.ts). */
 export const SITE_ROOT_PAGES = ['/email-for-ai-agents', '/cheapest-email-api', '/free-email-api'];
 /** The public pages, as one pattern: the homepage, the price calculator and every page under /pricing, /compare,
  *  /alternatives, /docs and /legal, and the top-level pages above. Search engines may index them; every other address

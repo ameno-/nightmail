@@ -529,6 +529,16 @@ jobs:
       - name: Health check
         run: bash .github/scripts/health.sh "$PUBLIC_URL"
 
+      # Cloudflare Web Analytics is off for nightmail.dev: Cloudflare injects its script into the HTML it serves when it is
+      # on. Tell us if it is switched back on. If it is, the content security policy (app/public/_headers) blocks the script,
+      # so the only effect is a console error on every page, not a broken page. Production only: dev.nightmail.dev is
+      # another account's zone, with Web Analytics still on. It marks the step failed and annotates the run but doesn't
+      # fail the deploy: the Worker is already live, and a zone setting is no reason to stop the support Worker's deploy.
+      - name: No page carries Cloudflare's analytics script
+        if: needs.authorize.outputs.stage == 'production'
+        continue-on-error: true
+        run: bash .github/scripts/no-analytics.sh "$PUBLIC_URL"
+
       - name: Live dev E2E
         if: needs.authorize.outputs.stage == 'dev'
         id: e2e
