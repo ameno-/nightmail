@@ -30,6 +30,7 @@ export function BillingBanner() {
       <p className="standing-banner__what">{copy.what}</p>
       <p className="standing-banner__did">{canAdminister ? copy.did : 'Ask a workspace owner or admin to add credit in Settings → Billing.'}</p>
     </div>
-    {canAdminister && !here && <Link className="ui-button ui-button--secondary ui-button--sm standing-banner__fix" to="/settings#billing">{kind === 'recharge' ? 'Update card' : 'Add credit'}</Link>}
+    {/* Kept on Billing itself (it scrolls to the card there), so the banner is the same height on every page and nothing under it moves. */}
+    {canAdminister && <Link className="ui-button ui-button--secondary ui-button--sm standing-banner__fix" to="/settings#billing" replace={here}>{kind === 'recharge' ? 'Update card' : 'Add credit'}</Link>}
   </div>
 }

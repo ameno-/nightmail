@@ -582,6 +582,19 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`Accepted mail stamp: all ${stamped + never} inserts into sending_email_events: ${stamped} give created_at clock_timestamp() for accepted mail in their own projection, ${never} never write it.`);
 }
 
+// 14. Announced changes to the legal pages (src/policy-changes.ts). The pages date themselves by a change's `announced`
+// day and the build counts its 31 days' notice from it, so a change that is new here, or whose day changed, must be
+// announced today (UTC): the day this runs, which in the merge queue is the day it merges. Only a change's own pull
+// request is checked; one that leaves the file's days alone passes on any day.
+{
+  const before = failed, file = 'api/src/policy-changes.ts', { POLICY_CHANGES } = await import('../src/policy-changes.js');
+  const days = (source: string | null) => new Map([...(source ?? '').matchAll(/(\w+): \{ announced: '([^']*)'/g)].map(match => [match[1]!, match[2]!]));
+  const here = days(readFileSync(new URL('src/policy-changes.ts', api), 'utf8')), there = days(atBase(file)), today = new Date().toISOString().slice(0, 10);
+  if (here.size !== Object.keys(POLICY_CHANGES).length) fail('Announced changes', `Can't read each change's announced day in ${file}: write each as name: { announced: 'YYYY-MM-DD', from: '…' }.`, file);
+  for (const [name, day] of here) if (there.get(name) !== day && day !== today) fail('Announced changes', `${name} is announced on ${day}, but this change merges on ${today} (UTC). Set its announced to ${today}, so the legal pages' updated date and the 31 days' notice count from the day it ships.`, file);
+  if (failed === before) console.log(`Announced changes: ${here.size} in ${file}, each announced on its own day.`);
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;

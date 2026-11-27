@@ -136,6 +136,12 @@ The abuse sample records how far it has read each workspace (`api/src/abuse.ts` 
 
 **Fails when** an insert gives `created_at` anything else for accepted mail, leaves it to the default, or can't be read as `INSERT … (columns) SELECT/VALUES …`. **Fix:** stamp accepted mail with `clock_timestamp()` in the insert, or add the marker if the statement never writes type `accepted`.
 
+### Announced changes
+
+A change to the legal pages that takes effect later (`api/src/policy-changes.ts`) has the day it was announced and the day it takes effect. The pages show that day as their updated date, and the build refuses a change that takes effect less than 31 days after it (`app/legal-markdown.ts`: 30 days' notice, and a day for it to reach production). **Fails when** a pull request adds a change or edits its `announced` day to anything but the day the check runs (UTC). In the merge queue that is the day it merges, so a change written on Friday and merged on Monday fails until its day is Monday's.
+
+**Fix:** set `announced` to today. If that leaves less than 31 days before `from`, the build says so: move `from` too, and the wording that names it follows by itself. A pull request that doesn't touch the days isn't checked.
+
 ### BYO role templates
 
 Connected AWS accounts run a published role template (`api/byo-templates/<major>.<minor>.yaml`, served from S3 as `byo/<version>.yaml`), and Nightmail must keep working with every supported version. **Fails when** a published file was edited, renamed or deleted, a new file isn't named `<major>.<minor>.yaml`, or a new version isn't newer than the newest published one.
