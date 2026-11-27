@@ -46646,38 +46646,71 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('SES capacity: incompatible stored observations and rollup memory cannot stop the same Health tick', async t => {
+  test('SES capacity: regional state recovery across versions', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { healthTick } = await import('./src/health.js');
+      const { healthTick } = await import('./src/health.js'), { sampleSesCounts } = await import('./src/ses-quota-health.js');
       runtime.config.multiTenant=runtime.config.liveEnabled=true;
-      const region='us-east-2', account='111122223333', high={at:Date.now()-60000,used:9000,limit:10000,source:'AWS'};
-      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES($1,$2,'ready')",[region,account]);
-      await db.query(`INSERT INTO ses_quota_samples(region,account,attempted_at,finished_at,latest,last_good) VALUES($1,$2,now(),now(),$3,$3)`,
-        [region,account,JSON.stringify({Tenant:high})]);
-      const tick=()=>healthTick(runtime,{queues:[{name:'feedback-dlq',depth:1,oldestMs:3000}]},{force:true,post:async()=>{}});
-      await tick();
-      const memory=async()=>(await db.query("SELECT rollup->'memory'->'ses' AS ses FROM health_state")).rows[0].ses;
-      const healthy=await memory();
-      const logs=t.mock.method(console,'warn',()=>{});
-      for (const [label,latest,good,remembered] of [
-        ['bad timestamp',{}, {Tenant:{...high,at:'yesterday'}}, healthy],
-        ['null latest',null,{Tenant:high},healthy],
-        ['other row shape',{resources:[high]}, {},healthy],
-        ['other memory shape',{Tenant:high},{Tenant:high},{[account+':'+region]:{minutes:42}}],
-      ] as const) {
-        await db.query('UPDATE ses_quota_samples SET latest=$1::jsonb,last_good=$2::jsonb',[JSON.stringify(latest),JSON.stringify(good)]);
-        await db.query("UPDATE health_state SET generated_at='2001-01-01',rollup=jsonb_set(rollup,'{memory,ses}',$1::jsonb)",[JSON.stringify(remembered)]);
-        await db.query("DELETE FROM health_alerts WHERE key='dead-letters:feedback-dlq'; UPDATE health_alerts SET seen_at=now()-interval '5 minutes'");
-        const started=performance.now(); await tick(); const ms=Math.round(performance.now()-started);
-        t.diagnostic(`SES capacity: ${label}: full Health tick ${ms} ms`); assert.ok(ms<1000);
-        assert.equal((await db.query("SELECT generated_at>now()-interval '1 minute' AS wrote FROM health_state")).rows[0].wrote,true);
-        assert.deepEqual(await memory(),remembered);
-        const rows=(await db.query("SELECT key,severity,words FROM health_alerts")).rows;
-        assert.ok(rows.some(r=>r.key==='ses-tenants:'+region && r.severity==='critical'));
-        assert.ok(rows.some(r=>r.key==='dead-letters:feedback-dlq'));
-        assert.ok(rows.some(r=>r.key==='ses-unread:section' && /could not be read/.test(r.words)));
+      const ohio='us-east-2', virginia='us-east-1', account='111122223333', key=account+':'+ohio;
+      const high={at:Date.now()-60000,used:9000,limit:10000,source:'AWS'};
+      for (const region of [ohio,virginia]) {
+        await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES($1,$2,'ready')",[region,account]);
+        await db.query(`INSERT INTO ses_quota_samples(region,account,attempted_at,finished_at,latest,last_good) VALUES($1,$2,now(),now(),$3,$3)`,
+          [region,account,JSON.stringify({Tenant:high})]);
       }
-      assert.equal(logs.mock.calls.filter(c=>String(c.arguments[0]).includes('SES_HEALTH_UNREADABLE')).length,1);
+      const tick=async()=>{
+        await db.query("DELETE FROM health_alerts WHERE key='dead-letters:feedback-dlq'; UPDATE health_state SET generated_at='2001-01-01'");
+        const started=performance.now();
+        await healthTick(runtime,{queues:[{name:'feedback-dlq',depth:1,oldestMs:3000}]},{force:true,post:async()=>{}});
+        assert.ok(performance.now()-started<1000);
+        assert.equal((await db.query("SELECT generated_at>now()-interval '1 minute' AS wrote FROM health_state")).rows[0].wrote,true);
+        assert.equal((await db.query("SELECT FROM health_alerts WHERE key='dead-letters:feedback-dlq'")).rowCount,1);
+      };
+      const memory=async()=>(await db.query("SELECT rollup->'memory'->'ses' AS ses FROM health_state")).rows[0].ses;
+      const tenant=async()=>(await db.query("SELECT severity,words,seen_at>now()-interval '1 minute' AS seen FROM health_alerts WHERE key=$1",['ses-tenants:'+ohio])).rows[0];
+      const corruptMemory=()=>db.query("UPDATE health_state SET rollup=jsonb_set(rollup,ARRAY['memory','ses',$1],$2::jsonb)",[key,JSON.stringify({minutes:42})]);
+      const sample=async(used:number)=>{
+        await db.query("UPDATE ses_quota_samples SET attempted_at=now()-interval '16 minutes' WHERE region=$1",[ohio]);
+        await sampleSesCounts(runtime,async()=>['tenant','tenantquota'].map(Id=>({Id,StatusCode:'Complete',Values:[Id==='tenant'?used:10000],Timestamps:[new Date()]})));
+      };
+      await tick();
+      await t.test('Wrong-shape regional memory rebuilds without resetting another region',async()=>{
+        const va=account+':'+virginia, minute={at:Math.floor(Date.now()/60000)*60000-120000,limit:200,recipients:81,throttled:0};
+        await db.query("UPDATE health_state SET rollup=jsonb_set(rollup,ARRAY['memory','ses',$1,'minutes'],$2::jsonb)",[va,JSON.stringify([minute])]);
+        const logs=t.mock.method(console,'warn',()=>{});
+        await corruptMemory(); await tick(); await tick();
+        const ses=await memory();
+        assert.deepEqual(ses[key].good.Tenant,high);
+        assert.deepEqual(ses[va].minutes,[minute]); assert.deepEqual(ses[va].good.Tenant,high);
+        const resets=logs.mock.calls.map(c=>JSON.parse(String(c.arguments[0]))).filter(l=>l.code==='SES_HEALTH_MEMORY_RESET');
+        assert.deepEqual(resets.map(l=>l.region),[ohio]);
+      });
+      await t.test('Unknown stored fields leave known AWS findings readable',async()=>{
+        const extra={Tenant:{...high,used:9200,futureUnit:'items'},FutureResource:{version:2}};
+        await db.query('UPDATE ses_quota_samples SET latest=$2,last_good=$2 WHERE region=$1',[ohio,JSON.stringify(extra)]);
+        await tick();
+        assert.match((await tenant()).words,/9,200 of 10,000/);
+        assert.deepEqual((await memory())[key].good,{Tenant:{...high,used:9200}});
+      });
+      await t.test('An invalid known point is discarded and the next good sample restores the finding',async()=>{
+        const invalid={Tenant:{...high,at:'9999999999999999',used:0},EmailIdentity:high};
+        await db.query('UPDATE ses_quota_samples SET latest=$2,last_good=$2 WHERE region=$1',[ohio,JSON.stringify(invalid)]);
+        await db.query("UPDATE health_alerts SET seen_at=now()-interval '5 minutes'"); await tick();
+        assert.equal((await tenant()).seen,false); assert.equal((await tenant()).severity,'critical');
+        assert.equal((await memory())[key].good.Tenant.used,9200);
+        assert.equal((await db.query("SELECT FROM health_alerts WHERE key='ses-identities:us-east-2' AND severity='critical'")).rowCount,1);
+        await sample(9400); await tick();
+        assert.match((await tenant()).words,/9,400 of 10,000/); assert.equal((await tenant()).seen,true);
+      });
+      await t.test('An open critical survives a memory reset and is reported again on fresh AWS evidence',async()=>{
+        await corruptMemory();
+        await db.query("UPDATE ses_quota_samples SET latest='null',last_good='{}' WHERE region=$1",[ohio]);
+        await db.query("UPDATE health_alerts SET seen_at=now()-interval '5 minutes'"); await tick();
+        assert.deepEqual((await memory())[key].good,{}); assert.equal((await tenant()).severity,'critical'); assert.equal((await tenant()).seen,false);
+        assert.equal((await db.query("SELECT FROM health_alerts WHERE key='ses-unread:us-east-2:ses-tenants' AND words LIKE '%could not be read%'")).rowCount,1);
+        await sample(9600); await tick();
+        const alert=await tenant(); assert.equal(alert.severity,'critical'); assert.equal(alert.seen,true);
+        assert.match(alert.words,/9,600 of 10,000/);
+      });
     });
   });
 
