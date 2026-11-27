@@ -7,14 +7,9 @@
   Strict-Transport-Security: max-age=31536000; includeSubDomains
 # No rule for /assets/* or /fonts/*: a path there with no file is answered with the dashboard shell, which must not be
 # kept. The build appends a cache rule for each file it has in those directories (asset-headers.ts).
-# The price pages and their Markdown twins: revalidated as every page is, and never transformed on the way, so Cloudflare
-# adds nothing to them (its analytics beacon, which the CSP refuses). The Worker answers them from here (api/src/worker.ts,
-# untransformed: it says the same, and compresses them, which no-transform stops Cloudflare doing). The site's other
-# Markdown and text files say their character set.
-/pricing
-  Cache-Control: public, max-age=0, must-revalidate, no-transform
-/compare/*
-  Cache-Control: public, max-age=0, must-revalidate, no-transform
+# Every page (the price and comparison pages, the docs, the legal pages) is served from the edge as Workers Assets
+# sends it, revalidated, and compressed by Cloudflare. Cloudflare Web Analytics is off for the zone (27 Nov 2026), so
+# nothing is added to them on the way. The Markdown and text files say their character set.
 /*.md
   Content-Type: text/markdown; charset=utf-8
 /*.txt

@@ -9,7 +9,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-import { isMissingComparePage, isMissingDocsPage, isMissingLegalPage, isPublicPage, isSitePage, isSiteRootPage, movedPage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isMissingLegalPage, isPublicPage, movedPage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
@@ -21,10 +21,11 @@ function fastSecure(response: Response): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-// A page from the static assets, as Workers Assets sent it but never transformed on the way: Cloudflare otherwise adds
-// its analytics beacon to HTML, which the CSP refuses (an error in every visitor's console). no-transform also stops
-// Cloudflare compressing it, so the Worker does: a Content-Encoding the client accepts has the runtime encode the body
-// (brotli, else gzip), and a price page's 95 kB of HTML goes out as about 18 kB.
+// A page this Worker answers from the static assets (the homepage, a dashboard route's shell, a page not found), as
+// Workers Assets sent it but never transformed on the way, and compressed here, which no-transform stops Cloudflare
+// doing: a Content-Encoding the client accepts has the runtime encode the body (brotli, else gzip). (no-transform kept
+// Cloudflare's analytics beacon off these pages; Web Analytics is now off for the zone. The pages served before the
+// Worker, the price, docs and legal pages, are compressed by Cloudflare.)
 function untransformed(response: Response, request: Request, status = response.status): Response {
   const headers = new Headers(response.headers), cache = headers.get('cache-control') ?? 'public, max-age=0, must-revalidate';
   if (!/\bno-transform\b/.test(cache)) headers.set('cache-control', `${cache}, no-transform`);
@@ -368,15 +369,8 @@ export default {
       if (pathname.startsWith('/assets/') || pathname.startsWith('/og/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
       if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok || page.status === 304) return untransformed(page, request); }
-      // A price page (app/price-pages.ts writes one per comparison, /compare's and the vendors' pricing pages), or its
-      // Markdown twin: the file,
-      // compressed here (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash)
-      // go back as they are.
-      if (pathname === '/pricing' || pathname === '/compare' || isSitePage(pathname) || isSiteRootPage(pathname)) {
-        const page = await assets.fetch(request);
-        if (page.ok || page.status === 304) return untransformed(page, request);
-        if (page.status !== 404) return fastSecure(page);
-      }
+      // The price, comparison, docs and legal pages are files, served before this Worker (wrangler configs: not in
+      // run_worker_first); one reaches it only when there is no such file: not found below, or moved.
       const shell = await assets.fetch(new Request(new URL('/', url), request));
       // An operation's reference page under its old name moves to the new one (site-index.ts, RENAMED_OPERATIONS), and
       // /alternatives to /compare (movedPage).
