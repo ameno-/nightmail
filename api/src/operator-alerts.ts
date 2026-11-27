@@ -72,7 +72,7 @@ const count = (n: unknown) => Number(n).toLocaleString('en-US');
 /** "1 in 20", or "Most" or "All" past one in two. */
 const share = (slow: number, mail: number) => mail / slow >= 2 ? `1 in ${Math.round(mail / slow)}` : slow >= mail ? 'All' : 'Most';
 const whole = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-const cents = (n: number) => `${(n / 100).toFixed(2)}`;
+const cents = (n: number) => `$${(n / 100).toFixed(2)}`;
 /** Amazon's account status for a region in words: "on probation", "shut down, sending disabled", "healthy again". */
 const accountWords = (p: Record<string, unknown>) => p.healthy === true ? 'healthy again' : [p.enforcement === 'PROBATION' ? 'on probation' : p.enforcement === 'SHUTDOWN' ? 'shut down'
   : p.enforcement === 'HEALTHY' ? null : typeof p.enforcement === 'string' && /^[A-Z_]{1,40}$/.test(p.enforcement) ? `enforcement status ${p.enforcement}` : 'enforcement status unknown',
