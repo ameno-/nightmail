@@ -7,6 +7,7 @@ import { slackCard, supportCostAlert } from './operator-alerts.js';
 import { aiCostToday } from './support-ai-cost.js';
 import { disabledSettings } from './config.js';
 import { postSlack } from './reputation-alerts.js';
+import { mentionFor, sendMentioned } from './operator-mention.js';
 
 // Health: the system says when something falls behind (docs/operations.md is the runbook).
 //
@@ -462,7 +463,17 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
   const result = (ran: boolean, open = 0): TickResult => ({ ran, ms: Date.now() - started, statements, open, cards });
   const send = async (card: HealthCard) => {
     if (!url) return false;
-    try { await post(url, card.card); cards.push(card); return true; }
+    try {
+      // A held link domain's opening card mentions the operator, decided once for its episode (since), so a card Slack
+      // refused is posted the same way next tick; its reminders and its cleared card never do (src/operator-mention.ts).
+      const held = card.state === 'open' && card.key.startsWith('link-domain-held:');
+      const episode = sql`'health:'||${card.key}::text||':'||(SELECT extract(epoch FROM since)::bigint FROM health_alerts WHERE key=${card.key})::text`;
+      if (held) statements += 4;
+      const mention = held ? await mentionFor(runtime, { id: episode, kind: 'link_domain_held', subject: card.key.slice('link-domain-held:'.length) }) : null;
+      let sent = card.card;
+      await sendMentioned(runtime, async message => { await post(url, message); sent = message; }, card.card, mention, episode);
+      cards.push({ ...card, card: sent }); return true;
+    }
     catch { log('warn', { code: 'HEALTH_ALERT_FAILED', alert: card.key.split(':')[0] }); return false; }
   };
   let memory: Memory;
