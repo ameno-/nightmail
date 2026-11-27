@@ -53,13 +53,14 @@ export function credentialCtes(table: typeof agentTokens | typeof apiKeys | type
 }
 // With `charge`, a request it refuses authenticates uncharged (used is null); its own handler answers it.
 export async function chargeCredential<T extends Record<string, unknown>>(c: Ctx, table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL, charge?: SQL) {
-  const result = await c.env.db.execute<T & { used: number | null; max_requests: number }>(sql`WITH ${credentialCtes(table,credential,charge)} SELECT credential.*,budget.used FROM credential ${charge ? sql`LEFT JOIN budget ON true` : sql`,budget`}`);
+  const result = await c.env.db.execute<T & { workspace_id: string; used: number | null; max_requests: number }>(sql`WITH ${credentialCtes(table,credential,charge)} SELECT credential.*,budget.used FROM credential ${charge ? sql`LEFT JOIN budget ON true` : sql`,budget`}`);
   const row = result.rows[0];
-  if (row && row.used !== null) checkBudget(c, row.used, row.max_requests);
+  if (row && row.used !== null) checkBudget(c, row.used, row.max_requests, row.workspace_id);
   return row;
 }
-export function checkBudget(c: Ctx, used: number, maxRequests: number) {
+export function checkBudget(c: Ctx, used: number, maxRequests: number, workspace?: string) {
   if (used <= maxRequests) return;
+  if (workspace) c.set('rateLimitedWorkspace', workspace);
   c.header('Retry-After', '60');
   throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${maxRequests}-request minute budget. Retry after the window resets.`, undefined, true);
 }
