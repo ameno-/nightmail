@@ -97,7 +97,8 @@ export interface Config {
   previousOrigins?: string[];
   /** The stack and role name prefix a new BYO connection gets (BYO_STACK_PREFIX). */
   byoStackPrefix?: 'Bane' | 'Nightmail';
-  accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256' };
+  /** The dashboard's OIDC client, which proves itself with a private key (private_key_jwt) or a client secret. */
+  accountClient?: { id: string; algorithm: 'RS256' | 'ES256' } & ({ privateKey: string; secret?: never } | { secret: string; privateKey?: never });
   /** The `acr` values accepted on ID tokens and on every MCP access token, one of which each must carry. Hosted
    * installations accept only the account service's sign-in methods (GitHub, Google and email). */
   accountRequiredAcr?: string[];

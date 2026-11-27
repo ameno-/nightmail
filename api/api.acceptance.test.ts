@@ -1034,6 +1034,134 @@ test('optional Worker secrets disable only their feature on a partial rollout; c
     assert.throws(()=>loadConfig({...base,...bad,NIGHTMAIL_POSTMASTER_CREDENTIALS:'bad'}),{code:'CONFIG_INVALID'});
 });
 
+test('a self-hosted dashboard signs in with a client secret at an issuer with RS256 ID tokens and no DPoP or PAR', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  // The shape Cloudflare Access documents for a SaaS OIDC application: the issuer has a path naming the client.
+  const origin = 'https://self.example.org', clientId = randomUUID().replaceAll('-', ''), secret = Buffer.from(randomBytes(32)).toString('hex');
+  const issuer = `https://team.cloudflareaccess.example/cdn-cgi/access/sso/oidc/${clientId}`;
+  const keys = generateKeyPairSync('rsa',{modulusLength:2048}), allowed = randomUUID(), refused = randomUUID();
+  const base = {PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:clientId, NIGHTMAIL_ROOT_SECRET:Buffer.from(randomBytes(32)).toString('hex'),
+    ACCOUNT_REQUIRED_ACR:'', ACCOUNT_ID_TOKEN_ALG:'RS256', AUTH_ALLOWED_SUBJECTS:allowed};
+  // Exactly one client credential, and only with a client ID.
+  for (const bad of [{}, {ACCOUNT_CLIENT_SECRET:secret, ACCOUNT_CLIENT_PRIVATE_KEY:'{}'}, {ACCOUNT_CLIENT_ID:'', ACCOUNT_CLIENT_SECRET:secret}])
+    assert.throws(() => loadConfig({...base, ...bad}), {code:'CONFIG_INVALID'}, JSON.stringify(Object.keys(bad)));
+  const runtimeFor = (extra:Record<string,string>): import('./src/core.js').Runtime => ({ config:loadConfig({...base, ...extra}), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
+    storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} });
+  let runtime = runtimeFor({ACCOUNT_CLIENT_SECRET:secret});
+  cleanup(t,async()=>{
+    await db.query('DELETE FROM nightmail_users WHERE id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$1)',[issuer]);
+    await db.query('DELETE FROM nightmail_signin_attempts WHERE issuer=$1',[issuer]);
+  });
+  let subject = allowed, nonce = '', challenge = '', claimedNonce: string | undefined;
+  const exchanges: string[] = [];
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    const target = new URL(url);
+    assert.ok(target.href.startsWith(issuer + '/'), target.href);
+    const headers = new Headers(init?.headers);
+    switch(target.href.slice(issuer.length)) {
+      // No pushed_authorization_request_endpoint, no dpop_signing_alg_values_supported, no listed token endpoint methods.
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorization',token_endpoint:issuer+'/token',jwks_uri:issuer+'/jwks',userinfo_endpoint:issuer+'/userinfo',
+        response_types_supported:['code'],id_token_signing_alg_values_supported:['RS256'],code_challenge_methods_supported:['S256']});
+      case '/jwks': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'access',alg:'RS256',use:'sig'}]});
+      case '/userinfo':
+        assert.equal(headers.get('authorization'),'Bearer fixture'); assert.equal(headers.get('dpop'),null);
+        return Response.json({sub:subject,email:'person@example.org',email_verified:true});
+      case '/token': {
+        const form = new URLSearchParams(String(init?.body)), basic = /^Basic (.+)$/.exec(headers.get('authorization') ?? '')?.[1];
+        assert.equal(headers.get('dpop'),null); assert.equal(form.get('client_assertion'),null); assert.equal(form.get('client_secret'),null);
+        assert.equal(createHash('sha256').update(form.get('code_verifier')!).digest('base64url'),challenge,'PKCE S256');
+        assert.ok(basic, 'client_secret_basic');
+        const [id, sent] = Buffer.from(basic,'base64').toString().split(':').map(decodeURIComponent);
+        exchanges.push(sent === secret ? 'right secret' : 'wrong secret');
+        if (id !== clientId || sent !== secret) return Response.json({error:'invalid_client'},{status:401});
+        const now = Math.floor(Date.now()/1000), body = [{alg:'RS256',kid:'access'},{iss:issuer,aud:clientId,iat:now,exp:now+300,sub:subject,nonce:claimedNonce ?? nonce}].map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+        return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('RSA-SHA256',Buffer.from(body),keys.privateKey)).toString('base64url')});
+      }
+      default: throw Error('unexpected issuer endpoint');
+    }
+  });
+  let peer = 0;
+  const request = (path:string, method:string, cookie='', body?:object, headers:Record<string,string>={origin}) => app.fetch(new Request(origin+path,{method,headers:{...headers,cookie,'content-type':'application/json','x-nightmail-client-ip':`198.51.100.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
+  async function login(state?: string) {
+    peer++;
+    const start = await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
+    assert.equal(start.status,200);
+    const authorize = new URL((await start.json() as {url:string}).url), params = authorize.searchParams;
+    assert.equal(authorize.origin+authorize.pathname,issuer+'/authorization');
+    assert.equal(params.get('client_id'),clientId); assert.equal(params.get('code_challenge_method'),'S256'); assert.equal(params.get('client_secret'),null);
+    nonce = params.get('nonce')!; challenge = params.get('code_challenge')!;
+    const cookie = start.headers.getSetCookie()[0]!.split(';')[0]!;
+    return request('/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state:state ?? params.get('state')!}),'GET',cookie,undefined,{});
+  }
+  const sessionCookie = (response:Response) => response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0];
+  const refusal = (response: Response) => { assert.equal(response.headers.get('location'),origin+'/?auth=error'); assert.equal(sessionCookie(response),undefined); };
+
+  const accepted = await login(), session = sessionCookie(accepted);
+  assert.ok(session, accepted.headers.get('location') ?? '');
+  const me = await request('/v1/me','GET',session);
+  assert.equal(me.status,200);
+  assert.equal((await me.json() as {workspaceId:string}).workspaceId,'default');
+  assert.deepEqual(exchanges.splice(0),['right secret']);
+  // State and nonce are still checked: a wrong state never reaches the token endpoint.
+  refusal(await login('not-the-state'));
+  assert.deepEqual(exchanges.splice(0),[]);
+  claimedNonce = 'not-the-nonce';
+  refusal(await login());
+  claimedNonce = undefined;
+  assert.deepEqual(exchanges.splice(0),['right secret']);
+  // A subject the issuer vouches for but AUTH_ALLOWED_SUBJECTS does not list gets no session or user.
+  subject = refused;
+  refusal(await login());
+  assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,refused])).rowCount,0);
+  assert.equal((await db.query('SELECT outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,refused])).rows[0].outcome,'not_approved');
+  subject = allowed; exchanges.splice(0);
+  // A wrong secret: the issuer refuses the exchange.
+  runtime = runtimeFor({ACCOUNT_CLIENT_SECRET:'wrong-'+secret});
+  refusal(await login());
+  assert.deepEqual(exchanges.splice(0),['wrong secret']);
+  // An ID token signed with an algorithm other than the configured one is refused.
+  runtime = runtimeFor({ACCOUNT_CLIENT_SECRET:secret, ACCOUNT_ID_TOKEN_ALG:'ES256'});
+  refusal(await login());
+  assert.deepEqual(exchanges.splice(0),['right secret']);
+});
+
+test('a client secret is sent only by a method the issuer lists', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const db = await fixtureDatabase(t), app = createApp(), origin = 'https://self.example.org';
+  let methods: string[] = [], seen: {authorization:string|null; secret:string|null; clientId:string|null} | undefined, issuer = '', peer = 0;
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    if (String(url) === issuer+'/.well-known/openid-configuration') return Response.json({issuer,authorization_endpoint:issuer+'/authorization',token_endpoint:issuer+'/token',jwks_uri:issuer+'/jwks',token_endpoint_auth_methods_supported:methods});
+    assert.equal(String(url),issuer+'/token');
+    const form = new URLSearchParams(String(init?.body));
+    seen = {authorization:new Headers(init?.headers).get('authorization'), secret:form.get('client_secret'), clientId:form.get('client_id')};
+    return Response.json({error:'invalid_grant'},{status:400});
+  });
+  async function exchange(listed: string[]) {
+    methods = listed; seen = undefined; issuer = `https://${randomUUID()}.example.org`; peer++;
+    const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard', ACCOUNT_CLIENT_SECRET:'fixture-value', ACCOUNT_REQUIRED_ACR:'', NIGHTMAIL_ROOT_SECRET:Buffer.from(randomBytes(32)).toString('hex')}),
+      db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+    const send = (path:string, init:RequestInit) => app.fetch(new Request(origin+path,{...init,headers:{...init.headers as Record<string,string>,'x-nightmail-client-ip':`203.0.113.${peer}`}}),runtime);
+    const start = await send('/api/auth/sign-in/account',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({callbackURL:origin+'/'})});
+    const body = await start.json() as {url?:string; error?:{code:string}};
+    if (start.status !== 200) return {status:start.status, code:body.error!.code};
+    const state = new URL(body.url!).searchParams.get('state')!;
+    await send('/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state}),{headers:{cookie:start.headers.getSetCookie()[0]!.split(';')[0]!}});
+    return {status:200};
+  }
+  await exchange(['client_secret_post']);
+  assert.deepEqual(seen,{authorization:null,secret:'fixture-value',clientId:'dashboard'});
+  await exchange(['client_secret_post','client_secret_basic']);
+  assert.deepEqual(seen,{authorization:'Basic '+Buffer.from('dashboard:fixture%2Dvalue').toString('base64'),secret:null,clientId:null});
+  // An issuer that takes no secret is never sent one.
+  assert.deepEqual(await exchange(['private_key_jwt','none']),{status:503,code:'AUTH_NOT_CONFIGURED'});
+  assert.equal(seen,undefined);
+});
+
 test('OIDC dashboard callback verifies the token, consumes bound state once and creates a revocable session', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');

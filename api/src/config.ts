@@ -28,6 +28,8 @@ const values = z.object({
   ACCOUNT_ISSUER: optional(z.url({ protocol: /^https$/ })),
   ACCOUNT_CLIENT_ID: optional(z.string().min(1)),
   ACCOUNT_CLIENT_PRIVATE_KEY: optional(z.string().min(1)),
+  // For an issuer that takes a client secret instead of a signed assertion. Set this or the private key, never both.
+  ACCOUNT_CLIENT_SECRET: optional(z.string().min(1)),
   ACCOUNT_ID_TOKEN_ALG: z.enum(['ES256', 'RS256']).default('ES256'),
   // The OAuth scopes the MCP server asks for: bane:* until account.anoma.ly supports nightmail:*, then nightmail.
   // Access tokens with either are accepted.
@@ -332,7 +334,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (v.MAILGW_PUBLIC_DOMAIN && !v.MAILGW_API_TOKEN) disabled('mailGateway');
   const logSettings = [v.CF_OBSERVABILITY_TOKEN, v.CF_OBSERVABILITY_ACCOUNT_ID, v.CF_OBSERVABILITY_SCRIPT];
   if (logSettings.some(Boolean) && !logSettings.every(Boolean)) disabled('supportLogs');
-  if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
+  const credentials = [v.ACCOUNT_CLIENT_PRIVATE_KEY, v.ACCOUNT_CLIENT_SECRET].filter(Boolean).length;
+  if (credentials !== (v.ACCOUNT_CLIENT_ID ? 1 : 0)) throw new ApiError(503,'CONFIG_INVALID','Set ACCOUNT_CLIENT_ID with exactly one of ACCOUNT_CLIENT_PRIVATE_KEY and ACCOUNT_CLIENT_SECRET.');
   // Hosted sign-in and MCP accept only the account service's own methods (METHOD_ACR). A missing, empty or misspelled
   // value must stop the installation instead of silently accepting every authentication method.
   const requiredAcr = v.ACCOUNT_REQUIRED_ACR ? [...new Set(v.ACCOUNT_REQUIRED_ACR.split(' '))] : undefined;
@@ -456,7 +459,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', domainNsCheck: v.MULTI_TENANT === 'true', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
     analyticsPush: v.ANALYTICS_PUSH_URL && v.ANALYTICS_PUSH_SECRET ? { url: v.ANALYTICS_PUSH_URL, secret: v.ANALYTICS_PUSH_SECRET } : undefined,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
-    accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
+    accountClient: v.ACCOUNT_CLIENT_ID ? { id:v.ACCOUNT_CLIENT_ID, algorithm:v.ACCOUNT_ID_TOKEN_ALG,
+      ...v.ACCOUNT_CLIENT_SECRET ? { secret:v.ACCOUNT_CLIENT_SECRET } : { privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY! } } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
     publicUrl: url.origin, linkHost, linkHosts, linkWarmup: v.NIGHTMAIL_LINK_WARMUP, linkedImages: (v.CAMPAIGN_IMAGES ?? (url.protocol === 'https:' ? 'linked' : 'embedded')) === 'linked', sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',

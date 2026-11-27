@@ -62,20 +62,31 @@ function loginIssue(error: unknown, requiredAcr?: string[]) {
 type Provider = { metadata: oidc.AuthorizationServer; client: oidc.Client; authentication: oidc.ClientAuth; callback: string; options: { signal: () => AbortSignal } };
 const PROVIDER_TTL_MS = 600_000;
 let cachedProvider: { key: string; at: number; value: Promise<Provider> } | null = null;
+async function privateKeyAuthentication(privateKey: string) {
+  const jwk = JSON.parse(privateKey) as JsonWebKey & {kid:string};
+  const signing = await crypto.subtle.importKey('jwk', jwk, {name:'ECDSA', namedCurve:'P-256'}, false, ['sign']);
+  return oidc.PrivateKeyJwt({ key: signing, kid: jwk.kid });
+}
+// A client secret goes the way the issuer's discovery document says it takes one. Basic first; a document that lists no
+// methods means Basic (OpenID Connect Discovery 1.0, section 3). An issuer that takes neither is never sent the secret.
+function secretAuthentication(metadata: oidc.AuthorizationServer, secret: string) {
+  const methods = metadata.token_endpoint_auth_methods_supported ?? ['client_secret_basic'];
+  if (methods.includes('client_secret_basic')) return oidc.ClientSecretBasic(secret);
+  if (methods.includes('client_secret_post')) return oidc.ClientSecretPost(secret);
+  throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'The sign-in issuer accepts neither client_secret_basic nor client_secret_post.');
+}
 async function provider(runtime: Runtime): Promise<Provider> {
   const { accountIssuer, accountClient, publicUrl } = runtime.config;
   if (!accountIssuer || !accountClient) throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Configure the OIDC client to enable dashboard sign-in.');
   // Kept per configuration: a changed client, key or required sign-in method (which decides whether pushed requests apply) reads it again.
-  const key = JSON.stringify([accountIssuer, accountClient.id, accountClient.algorithm, accountClient.privateKey, publicUrl, runtime.config.accountRequiredAcr ?? null]);
+  const key = JSON.stringify([accountIssuer, accountClient.id, accountClient.algorithm, accountClient.privateKey, accountClient.secret, publicUrl, runtime.config.accountRequiredAcr ?? null]);
   if (cachedProvider?.key === key && Date.now() - cachedProvider.at < PROVIDER_TTL_MS) return cachedProvider.value;
   const value = (async () => {
     const issuer = new URL(accountIssuer);
     const options = { signal: () => AbortSignal.timeout(6000) };
     const metadata = await oidc.processDiscoveryResponse(issuer, await oidc.discoveryRequest(issuer, options));
     const client: oidc.Client = { client_id: accountClient.id, id_token_signed_response_alg: accountClient.algorithm };
-    const jwk = JSON.parse(accountClient.privateKey) as JsonWebKey & {kid:string};
-    const signing = await crypto.subtle.importKey('jwk', jwk, {name:'ECDSA', namedCurve:'P-256'}, false, ['sign']);
-    const authentication = oidc.PrivateKeyJwt({ key: signing, kid: jwk.kid });
+    const authentication = accountClient.secret === undefined ? await privateKeyAuthentication(accountClient.privateKey) : secretAuthentication(metadata, accountClient.secret);
     const callback = new URL('/api/auth/callback/account',publicUrl).href;
     return { metadata, client, authentication, callback, options };
   })();
