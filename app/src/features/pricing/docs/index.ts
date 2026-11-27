@@ -73,13 +73,15 @@ export function docProblems(): string[] {
   }
   // What a page shows besides its table's cells, its headline, its button and its row of links, every disclosure closed
   // (Ryan: "way too much text … nobody's reading that"; then "i don't think we need the thing that says list prices
-  // before tax"): the line under the heading, with the day, at most 10 words; nothing under a table but How we compared,
-  // which holds its whole note; the facts at most four of at most six words; in all at most what the pages carry now (34
-  // words on a ranking page or a vendor's, 36 on a comparison), so nothing creeps back. (The sign-in terms under the button
-  // are the shared component's, and a comparison's closed questions are its questions, not fine print: neither is counted.)
+  // before tax"): the line under the heading, with the day and the size the headline prices (by contacts or inboxes, the
+  // mail too, since the figures hold only at that mail), at most 15 words; nothing under a table but How we compared,
+  // which holds its whole note; the facts at most four of at most six words; in all at most what the pages carry now (39
+  // words on a ranking page, 40 on a vendor's pricing or alternatives page, 42 on a comparison), so nothing creeps back.
+  // (The sign-in terms under the button are the shared component's, and a comparison's closed questions are its
+  // questions, not fine print: neither is counted.)
   for (const doc of [...DOCS, ...Object.values(comparisons).map(comparisonDoc)]) {
-    const caption = plain(doc.caption ?? doc.answer[0] ?? []), comparison = doc.path.startsWith('/compare/')
-    if (wordCount(caption) > 10 || !/checked \d/.test(caption.replaceAll('\u00a0', ' '))) problems.push(`${doc.path}'s line under the heading should be at most 10 words with the day read: "${caption}"`)
+    const caption = plain(doc.caption ?? doc.answer[0] ?? []), comparison = doc.path.startsWith('/compare/'), vendor = /^\/(?:pricing|alternatives)\//.test(doc.path)
+    if (wordCount(caption) > 15 || !/checked \d/.test(caption.replaceAll('\u00a0', ' '))) problems.push(`${doc.path}'s line under the heading should be at most 15 words with the day read: "${caption}"`)
     let words = wordCount(caption)
     for (const section of doc.sections) {
       if (!section.quiet && !(doc.sections.length === 1 && section.blocks[0]?.kind === 'table')) words += wordCount(section.title)
@@ -94,7 +96,7 @@ export function docProblems(): string[] {
         } else words += wordCount(plain(block.text))
       }
     }
-    const most = comparison ? 36 : 34
+    const most = comparison ? 42 : vendor ? 40 : 39
     if (words > most) problems.push(`${doc.path} shows ${words} words besides its table, headline, button and links: at most ${most}.`)
   }
   if (new Set(DOCS.map(doc => doc.path)).size !== DOCS.length) problems.push('Two pages have the same address (docs/registry.ts).')

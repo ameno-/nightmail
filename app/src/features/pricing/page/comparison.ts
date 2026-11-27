@@ -69,13 +69,10 @@ export function comparisonDoc(c: Comparison): PageDoc {
     path: c.path, title: c.title, searchTitle: c.searchTitle, description: c.description,
     h1: verdictHeading(c, v),
     answer: [[v.at]],
-    // The line under the heading at most 10 words: by contacts or inboxes, the count alone (the line under the table says
-    // the mail).
-    ...m.per === 'contact' || m.per === 'inbox' ? { caption: [`Per ${formatCount(opening)} ${m.per === 'contact' ? 'contacts' : 'agent inboxes'} · checked ${dayOf(c.offer.checked).replaceAll(' ', '\u00a0')}`] } : {},
+    // (The line under the heading is answer, the verdict's size and the day: by contacts or inboxes, the count and the mail
+    // it means, perSize, since the headline's figures hold only at that mail.)
     // The table, and under it only How we compared, closed, with the whole note and the pages read (page.tsx).
-    sections: [{ id: 'sizes', title: `A month at each size ${vendor} prices`, quiet: true, blocks: [folded(priceTable(c, terms, opening),
-      // (By inboxes, the mail the verdict's figure prices, said first: the pre-merge check reads it on the page.)
-      m.per === 'inbox' ? `At ${formatCount(opening)} inboxes, ${formatCount(v.u.received)} received and ${formatCount(v.u.sent)} sent a month.` : undefined)] },
+    sections: [{ id: 'sizes', title: `A month at each size ${vendor} prices`, quiet: true, blocks: [folded(priceTable(c, terms, opening))] },
     // What Nightmail has that the vendor charges for or lacks, in four short lines (facts.ts, briefFacts).
     briefFactsSection(rowLines(c.rows))],
     questions: comparisonQuestions(c),

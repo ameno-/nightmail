@@ -72,7 +72,7 @@ export function cheapestEmailApi(): Doc {
     `Email API prices, checked ${when}: ${productName} and ${n} email-sending APIs it compared itself with. ${at} emails a month: ${productName} ${middle.ours}, others from ${money(lowestAll)}.`,
   ], 160, 140)
   const doc: Doc = {
-    path, title: 'Email API prices', searchTitle, description, h1, answer: [[caption]], caption: [`Per ${at} emails a month · checked ${when.replaceAll(' ', '\u00a0')}`], sections, questions: [],
+    path, title: 'Email API prices', searchTitle, description, h1, answer: [[caption]], caption: [`${capital(spelled(shown.length))} of ${n} email APIs, per ${at} emails a month · checked ${when.replaceAll(' ', '\u00a0')}`], sections, questions: [],
     cardWords: { lines: [`${productName} ${middle.ours}.`, `${shown.length} others from ${money(lowest)}.`], caption: fitWords([`${capital(spelled(shown.length))} of ${n} email APIs compared, ${at} emails a month.`, `${capital(spelled(shown.length))} of ${n} email APIs compared, checked ${when}.`], 70) },
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] }, lead: scope,
     related: [

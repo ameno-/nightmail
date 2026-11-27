@@ -51,7 +51,7 @@ export function emailForAgents(): Doc {
   const terms = `${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month${allFree ? `, so up to ${formatCount(freeInboxes)} inboxes with this mail cost nothing on a domain of your own (the built-in domain sends only to your workspace’s members)` : ''}.`
   const table = (rows: (typeof group)[number][], note: string): Table => ({ kind: 'table', numeric: [1, 2, 3], caption: [note], head, rows: [nightmailRow, ...rows.map(row)] })
   const sections: Section[] = [
-    { id: 'agents', title: `Email for AI agents: a month at ${AGENT_SIZES.join(', ')} inboxes`, quiet: true, blocks: [folded(table(shown, `${claim} Each inbox receives ${m.receivedPerInbox} and sends ${m.sentPerInbox} emails a month. ${terms} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash(shown)}`))] },
+    { id: 'agents', title: `Email for AI agents: a month at ${AGENT_SIZES.join(', ')} inboxes`, quiet: true, blocks: [folded(table(shown, `These are the ${group.length} agent-inbox services ${productName} has compared itself with, not every one. ${claim} Each inbox receives ${m.receivedPerInbox} and sends ${m.sentPerInbox} emails a month. ${terms} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash(shown)}`))] },
     // Its price facts, the free allowance first, then that an inbox costs nothing (PANELS.receive) and agents' MCP.
     briefFactsSection([{ shared: 'free' }, 'No charge per inbox', { shared: 'agents' }, { shared: 'teammates' }], []),
   ]
@@ -68,7 +68,7 @@ export function emailForAgents(): Doc {
     `${lead}, and ${shown.length} others from ${money(lowest)}.`,
   ], 160, 140)
   return {
-    path, title: 'Email for AI agents', searchTitle, description, h1, answer: [[caption]], caption: [`Per ${AGENT_SIZES[1]} agent inboxes · checked ${when.replaceAll(' ', '\u00a0')}`], sections, questions: [],
+    path, title: 'Email for AI agents', searchTitle, description, h1, answer: [[caption]], caption: [`Per ${AGENT_SIZES[1]} agent inboxes, ${m.receivedPerInbox} in and ${m.sentPerInbox} out each · checked ${when.replaceAll(' ', '\u00a0')}`], sections, questions: [],
     cardWords: { lines: [`${productName} ${middle.ours}.`, `${shown.length} others from ${money(lowest)}.`], caption: fitWords([`${AGENT_SIZES[1]} agent inboxes, ${each}, checked ${when}.`, `${AGENT_SIZES[1]} agent inboxes, checked ${when}.`], 70) },
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] },
     related: [

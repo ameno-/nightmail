@@ -122,7 +122,7 @@ export function vendorAlternatives(c: Comparison): Doc {
   ]
   const cardWords: Doc['cardWords'] = { lines: [`${productName} ${middleBill.ours}.`, `${counted.length} others from ${money(lowest)}.`], caption: fitWords([`${vendor} and ${spelled(shown.length)} alternatives, ${size.replace(/^Per /, '')}, checked ${when}.`, `${vendor} and ${spelled(shown.length)} alternatives, checked ${when}.`, `${vendor} and ${shown.length} more, checked ${when}.`], 70) }
   return {
-    path, title: `${vendor} alternatives`, searchTitle, description, h1, answer: [[caption]], caption: [`${vendor} alternatives, per ${formatCount(sizes[1]!)} ${m.per === 'contact' ? 'contacts' : 'emails'} · checked ${when.replaceAll(' ', '\u00a0')}`], cardWords, sections, questions: [],
+    path, title: `${vendor} alternatives`, searchTitle, description, h1, answer: [[caption]], cardWords, sections, questions: [],
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] },
     related, focus: c.focus, modified: checked.at(-1)!,
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }, { name: `${vendor} alternatives`, path }],

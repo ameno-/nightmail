@@ -147,7 +147,7 @@ export function freeEmailApi(): Doc {
     `Free email APIs, checked ${when}: ${productName}, ${free}, beside the ${apis.rows.length} of ${apis.all.length} compared with ${smaller}.`,
   ].find(text => text.length <= 160 && text.length >= 140) ?? ''
   const doc: Doc = {
-    path, title: 'Free email API plans', searchTitle, description, h1, answer: [[caption]], caption: [`${apis.rows.length} email APIs’ ${what} · checked ${when.replaceAll(' ', '\u00a0')}`], sections, questions: [],
+    path, title: 'Free email API plans', searchTitle, description, h1, answer: [[caption]], caption: [`${apis.rows.length} ${listOf(['smaller free plans', ...kinds.has('trial') ? ['trials'] : [], ...kinds.has('once') ? ['one-offs'] : []])} · checked ${when.replaceAll(' ', '\u00a0')}`], sections, questions: [],
     cardWords: { lines: [`${formatCount(nightmail.freeSent)} emails free.`, 'Every month.'], caption: [`${productName}, beside ${spelled(apis.rows.length)} email APIs’ ${what}, checked ${when}.`, `Beside ${apis.rows.length} email APIs’ ${what}, checked ${when}.`].find(t => t.length <= 70)! },
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] }, lead,
     related: [

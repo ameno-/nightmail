@@ -29,9 +29,9 @@ export type Table = {
 }
 /** A list's full: the longer list the Markdown twin keeps where the page shows a short one (facts.ts, briefFactsSection). */
 /** A table as a page shows it: nothing under it but its whole note, folded into "How we compared" (page.tsx; the owner:
- *  "i don't think we need the thing that says list prices before tax"), led by a sentence of its own where the page needs
- *  one; the Markdown twin keeps the note where the caption was (docs/doc.ts). */
-export const folded = ({ caption, ...table }: Table, lead?: string): Table => ({ caption: [], method: lead ? [`${lead} `, ...caption] : caption, ...table })
+ *  "i don't think we need the thing that says list prices before tax"); the Markdown twin keeps the note where the caption
+ *  was (docs/doc.ts). */
+export const folded = ({ caption, ...table }: Table): Table => ({ caption: [], method: caption, ...table })
 export type Block = { kind: 'p'; text: Text } | { kind: 'list'; items: Text[]; full?: Text[] } | Table
 /** quiet: its title is for screen readers only (the price table straight under the verdict: page.tsx); a page whose
  *  only section is a table has it so without saying. */

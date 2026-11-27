@@ -190,7 +190,7 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
   ]
   const others = pricingPages.filter(other => other.slug !== c.slug).map(other => ({ title: `${other.vendor} pricing`, path: `/pricing/${other.slug}`, line: `What ${other.vendor} costs, plan by plan.` }))
   const doc: Doc = {
-    path, title: `${vendor} pricing`, searchTitle, description, h1, answer: [[caption]], ...m.per === 'contact' ? { caption: [`Per ${formatCount(verdictAt.n)} contacts · checked ${day.replaceAll(' ', '\u00a0')}`] } : {}, cardWords, sections, questions: [],
+    path, title: `${vendor} pricing`, searchTitle, description, h1, answer: [[caption]], cardWords, sections, questions: [],
     // (The note under the table names its sources and the day, so the page's end doesn't list them again.)
     sources: [], cited: tableRead, copy: { sections: [plansTable], questions, sources: sourcesOf(c), related: others },
     related, focus: c.focus, modified: lastChecked(c),
