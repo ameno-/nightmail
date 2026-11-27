@@ -128,6 +128,12 @@ An operation's `summary` is its name: the docs page's title in the browser tab a
 
 **Fix:** keep a short name ("Create an inbox app password") and move the sentence, word for word, to the start of the operation's `description`, a warning ("Password shown once") first. Then run `bun run sdk` in `api/`.
 
+### Accepted mail stamp
+
+Every statement that inserts into `sending_email_events` either stamps `created_at` with `clock_timestamp()` (for accepted mail, not simulated, at least) or carries `/* premerge-accepted: never (why) */` inside the statement. The abuse sample records how far it has read each workspace and relies on accepted mail being stamped with the database's clock inside the statement that writes it (`api/src/abuse.ts` `settledThrough`). Mail stamped with another clock, or with its transaction's start, can become visible behind that mark and never be read.
+
+**Fails when** an insert into `sending_email_events` has neither: no `created_at` stamped with `clock_timestamp()` and no marker. **Fix:** stamp accepted mail with `clock_timestamp()` in the insert, or add the marker if the statement can never write type `accepted`. The check is textual: it makes each writer say which.
+
 ### BYO role templates
 
 Connected AWS accounts run a published role template (`api/byo-templates/<major>.<minor>.yaml`, served from S3 as `byo/<version>.yaml`), and Nightmail must keep working with every supported version. **Fails when** a published file was edited, renamed or deleted, a new file isn't named `<major>.<minor>.yaml`, or a new version isn't newer than the newest published one.
