@@ -27,12 +27,19 @@
   }
   if (!shell || !root || document.documentElement.dataset.shell === 'off') { if (shell) shell.remove(); start(); return }
 
+  // (where a mouse or pen went down: a click after it moved more than 6 px is a drag, which holds no press on the set,
+  // as on the page itself, tv.tsx's DRAG)
+  let down = null
+  shell.addEventListener('pointerdown', event => { down = event.pointerType === 'touch' ? null : [event.clientX, event.clientY] })
   shell.addEventListener('click', event => {
     // Only a press a person made is held for the app: a click a script dispatched is not.
     if (!event.isTrusted) return
+    const from = down
+    down = null
     const button = event.target instanceof Element && event.target.closest(set.press || 'button[data-cta="sign-in"]')
     if (!button) {
-      if (event.target instanceof Element && event.target.closest('.chy-set') && !event.target.closest('button:not(.chy-screen), a')) { window.__nightmailShellZap = true; start() }
+      const dragged = event.detail > 0 && from && Math.hypot(event.clientX - from[0], event.clientY - from[1]) > 6
+      if (!dragged && event.target instanceof Element && event.target.closest('.chy-set') && !event.target.closest('button:not(.chy-screen), a')) { window.__nightmailShellZap = true; start() }
       return
     }
     window.__nightmailShellPress = button

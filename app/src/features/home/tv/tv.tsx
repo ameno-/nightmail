@@ -34,6 +34,9 @@ const sceneStyle: CSSProperties = { left: `${-SET.x / SET.width * 100}%`, top: `
 const BUTTON_X = .9206, BUTTON_Y = [.1044, .1446, .1837, .2239, .2620, .3012, .3404, .3805]
 const KNOB_Y = [.4568, .5311]
 const HIT = { w: .040, h: .039 }, CAP = { w: .0262, h: .0295 }, DIAL = .05
+/** How far (px) a mouse or pen may move between going down and up on the set for it to be a press, not a drag (the
+ *  painted first screen's boot.js holds its press to the same). */
+const DRAG = 6
 
 // What is on: channel 1 is the tape (the page's own comparison); each of the next six says one more thing about what
 // Nightmail costs, every figure from the billing code (pricing/prices.ts: nightmail) or the comparison (data.ts). Channel 8 is on the air: Nightmail's old television commercial (crt/commercial), fetched and shown when its key is pressed.
@@ -686,8 +689,15 @@ export function TvHome({ start, notice }: HomeProps) {
   const next = () => tune(deck.channel >= CHANNELS.length ? 0 : (deck.channel + 1) % CHANNELS.length)
   // A press on the set itself (its glass or its cabinet, not one of its controls) changes the channel, as its keys do,
   // with their clunk. With the remote in the hand the press is the remote's (remote.tsx), so the channel changes once.
-  const held = useRef(false)
-  const press = (event: { target: EventTarget }) => {
+  // A mouse or pen that went down on the set and moved more than DRAG px before coming up is a drag (across the glass,
+  // or the remote by its handle), not a press: its click is the set's too, and does nothing. Enter and Space have no
+  // pointer (detail 0) and always press; a touch that moves is a scroll, which makes no click.
+  const held = useRef(false), down = useRef<{ x: number; y: number } | null>(null)
+  const grab = (event: { pointerType: string; clientX: number; clientY: number }) => { down.current = event.pointerType === 'touch' ? null : { x: event.clientX, y: event.clientY } }
+  const press = (event: { target: EventTarget; detail: number; clientX: number; clientY: number }) => {
+    const from = down.current
+    down.current = null
+    if (event.detail > 0 && from && Math.hypot(event.clientX - from.x, event.clientY - from.y) > DRAG) return
     if (held.current || (event.target as Element).closest('button:not(.chy-screen), a, input, [data-cta]')) return
     noise('channel'); next()
   }
@@ -755,7 +765,7 @@ export function TvHome({ start, notice }: HomeProps) {
     <div className="chy-col">
       {/* In words, for whoever can't watch the picture (words.tsx): what it is here, the rest after the way in. */}
       <Heading />
-      <div className="chy-set" ref={box} onClick={press} onClickCapture={event => { if ((event.target as Element).closest('[data-cta]')) return; fresh.current = !sound.current?.started; sound.current?.start() }}>
+      <div className="chy-set" ref={box} onPointerDown={grab} onClick={press} onClickCapture={event => { if ((event.target as Element).closest('[data-cta]')) return; fresh.current = !sound.current?.started; sound.current?.start() }}>
         {/* The glass is the set's press for the keyboard: reached by Tab, it shows the channel on, as a set does. */}
         <button type="button" className="chy-screen" aria-label="Television screen: next channel" onFocus={event => { if (event.currentTarget.matches(':focus-visible')) say(`CH ${String(deck.number).padStart(2, '0')}`) }}>
           {flat ? <ul className="chy-flat" aria-hidden="true">{list}</ul> : <Tube deck={deck} onLight={light} onFlat={fall} />}
