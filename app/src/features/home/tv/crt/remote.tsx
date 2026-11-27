@@ -168,12 +168,12 @@ const rad = (degrees: number) => degrees * Math.PI / 180
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
 const ease = (v: number) => { const k = clamp(v); return k * k * (3 - 2 * k) }
 
-export function Remote({ light, onZap, onDigit }: { light: RoomLight; onZap: () => void; onDigit: (digit: string) => void }) {
+export function Remote({ light, onZap, onDigit, onHold }: { light: RoomLight; onZap: () => void; onDigit: (digit: string) => void; onHold?: (held: boolean) => void }) {
   const canvas = useRef<HTMLCanvasElement>(null), spot = useRef<HTMLButtonElement>(null)
   const [held, setHeld] = useState(false), [ready, setReady] = useState(true)
   const state = useRef({ held: false, over: false, flashAt: -1e9, zap: null as { at: number; sent: boolean } | null }).current
-  const zap = useRef(onZap), digit = useRef(onDigit)
-  zap.current = onZap; digit.current = onDigit
+  const zap = useRef(onZap), digit = useRef(onDigit), hold = useRef(onHold)
+  zap.current = onZap; digit.current = onDigit; hold.current = onHold
   useEffect(() => {
     const el = canvas.current, button = spot.current, room = el?.closest<HTMLElement>('.chy-set')
     if (!el || !button || !room) return
@@ -258,14 +258,15 @@ export function Remote({ light, onZap, onDigit }: { light: RoomLight; onZap: () 
       gl.drawArrays(gl.TRIANGLES, 0, 3)
     }
     const move = (event: PointerEvent) => { if (event.pointerType === 'touch') return; const box = room.getBoundingClientRect(); cursor = { x: event.clientX - box.left, y: event.clientY - box.top } }
-    const set = (to: boolean) => { state.held = to; setHeld(to) }
+    const set = (to: boolean) => { state.held = to; setHeld(to); hold.current?.(to) }
     const pick = (event: MouseEvent) => {
       if (touch.matches) { if (!state.zap) state.zap = { at: performance.now(), sent: false }; return }
       const box = room.getBoundingClientRect(); cursor = { x: event.clientX - box.left, y: event.clientY - box.top }
       set(!state.held)
     }
-    // in the hand, a press anywhere that is not a control of its own sends the next channel
-    const press = (event: MouseEvent) => { if (!state.held || (event.target as Element).closest('button, a, input, [role="slider"]')) return; state.flashAt = performance.now(); zap.current() }
+    // in the hand, a press anywhere that is not a control of its own sends the next channel (the set's glass is not one:
+    // while the remote is held, the set leaves a press on itself to it)
+    const press = (event: MouseEvent) => { if (!state.held || (event.target as Element).closest('button:not(.chy-screen), a, input, [role="slider"]')) return; state.flashAt = performance.now(); zap.current() }
     // in the hand, Escape puts it down, and the keyboard's digits are its number pad
     const escape = (event: KeyboardEvent) => {
       if (!state.held) return

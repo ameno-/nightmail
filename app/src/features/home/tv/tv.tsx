@@ -300,7 +300,7 @@ const easeOut = (v: number) => 1 - (1 - clamp(v)) ** 3
 /** The set's controls, as the tube reads them every frame. channel: which of STATIONS is on, and number: what the set
  *  calls it on screen. wake: draw again (the tube sets it). air: the commercial, once it is ready to be shown on
  *  channel 8; subtitles: whether what it says is also written on the screen. */
-type Deck = RoomLight & { channel: number; number: number; subtitles: boolean; power: boolean; bad: number; thumpAt: number; switchAt: number; note: string; noteAt: number; air: Broadcast | null; wake: () => void; hear: (snow: number, bad: number, on: boolean) => void }
+type Deck = RoomLight & { channel: number; number: number; subtitles: boolean; power: boolean; bad: number; switchAt: number; note: string; noteAt: number; air: Broadcast | null; wake: () => void; hear: (snow: number, bad: number, on: boolean) => void }
 
 function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) => void; onFlat: () => void }) {
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -415,7 +415,7 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
       if (deck.power && !wasOn) leave()
       wasOn = deck.power
       level = still ? Number(deck.power) : clamp(level + (deck.power ? dt / 450 : -dt / 300) * Number(now - began > 150))
-      const boot = now - bootAt, thump = now - deck.thumpAt, flick = now - deck.switchAt
+      const boot = now - bootAt, flick = now - deck.switchAt
       const channel = STATIONS[deck.channel]!, first = deck.channel === 0 && boot < 2100 && flick > boot
       const power = easeOut(level)
       // channel 8: static until the broadcast is ready; then it is drawn for this frame (960 px wide on a sharp tube, 640 on
@@ -423,8 +423,8 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
       const air = channel.kind === 'air' ? deck.air : null, aired = air?.frame(el.width > 820 ? 960 : 640)
       // nothing on (channel 8 before its broadcast is ready, or a number no channel has): static
       const nothing = (channel.kind === 'air' && !air) || channel.kind === 'dead'
-      const snow = nothing ? 1 : still ? 0 : Math.max(first && boot >= 350 ? clamp(1 - (boot - 350) / 550) : 0, clamp(.9 - thump / 380), clamp(1 - flick / 260), aired?.static ?? 0)
-      const roll = still ? 0 : Math.max(first && boot >= 900 ? 1 - easeOut((boot - 900) / 550) : 0, .5 * (1 - easeOut(thump / 450)), deck.bad > 1.75 ? (now / 2600) % 1 : 0, aired?.roll ?? 0)
+      const snow = nothing ? 1 : still ? 0 : Math.max(first && boot >= 350 ? clamp(1 - (boot - 350) / 550) : 0, clamp(1 - flick / 260), aired?.static ?? 0)
+      const roll = still ? 0 : Math.max(first && boot >= 900 ? 1 - easeOut((boot - 900) / 550) : 0, deck.bad > 1.75 ? (now / 2600) % 1 : 0, aired?.roll ?? 0)
       const rows = still || !first ? 9 : boot < 1150 ? 0 : Math.min(9, 1 + Math.floor((boot - 1150) / 100))
       const play = channel.kind === 'list' && !!channel.tape && (still || !first || boot >= 900)
       const said = now - deck.noteAt
@@ -646,13 +646,13 @@ function CopyForAgent() {
 const More = ({ lead }: { lead?: boolean }) => <>{lead && <span aria-hidden="true"> · </span>}<a href="/pricing">Pricing</a><span aria-hidden="true"> · </span><a href="/docs">API docs</a><span aria-hidden="true"> · </span><CopyForAgent /></>
 
 /** home.html's first screen (app/home-shell.ts: this page as first rendered, with a still of the tape behind the glass),
- *  over this one until now: it goes, handing on the label's focus. */
+ *  over this one until now: it goes, handing its focus on to the same control here (the label, or the glass). */
 function takeOver(set: HTMLElement | null) {
   const shell = document.getElementById('home-shell')
   if (!shell) return
-  const focused = shell.contains(document.activeElement)
+  const focused = ['.chyp-go', '.chy-screen'].find(control => shell.contains(document.activeElement) && document.activeElement?.closest(control))
   shell.remove()
-  if (focused) [...set?.closest('.chy')?.querySelectorAll<HTMLElement>('.chyp-go') ?? []].find(el => el.getClientRects().length)?.focus()
+  if (focused) [...set?.closest('.chy')?.querySelectorAll<HTMLElement>(focused) ?? []].find(el => el.getClientRects().length)?.focus()
 }
 
 /** The homepage: the television, the price list it plays, and the way in. */
@@ -663,7 +663,7 @@ export function TvHome({ start, notice }: HomeProps) {
   const full = useSignupsFull(visitor), said = notice || <p role="status">{full ? 'Full for now. Join the waitlist and we’ll email you when a place opens.' : ''}</p>
   const [flat, setFlat] = useState(false), [on, setOn] = useState(true), [channel, setChannel] = useState(0), [bad, setBad] = useState(0), [muted, setMuted] = useState(false)
   const box = useRef<HTMLDivElement>(null)
-  const deck = useRef<Deck>({ channel: 0, number: 1, subtitles: false, power: true, bad: 0, thumpAt: -1e9, switchAt: -1e9, note: '', noteAt: -1e9, air: null, wake: () => {}, hear: () => {}, glow: [.38, .49, .75], level: 0 }).current
+  const deck = useRef<Deck>({ channel: 0, number: 1, subtitles: false, power: true, bad: 0, switchAt: -1e9, note: '', noteAt: -1e9, air: null, wake: () => {}, hear: () => {}, glow: [.38, .49, .75], level: 0 }).current
   // The sound starts with the visitor's first use of the set (a browser plays nothing before that); the speaker's
   // grille turns it off and on.
   const sound = useRef<Sound | null>(null), fresh = useRef(false)
@@ -672,15 +672,25 @@ export function TvHome({ start, notice }: HomeProps) {
   const noise = (name: Noise, level?: number, after?: number) => sound.current?.play(name, level, after)
   const light = useRef((level: number) => { box.current?.style.setProperty('--light', level.toFixed(3)); takeOver(box.current) }).current
   const fall = useRef(() => { setFlat(true); box.current?.style.setProperty('--light', '1'); requestAnimationFrame(() => takeOver(box.current)) }).current
-  // A press on home.html's Get started made while this code loaded signs in now; its first screen gives way once the
-  // picture is drawn (light, fall), or after a while if it never is.
+  // A press on home.html's Get started made while this code loaded signs in now, and one on its set changes the channel
+  // (boot.js holds them); its first screen gives way once the picture is drawn (light, fall), or after a while if it never is.
   useEffect(() => {
-    const held = window as Window & { __nightmailHomeStart?: boolean }
-    if (held.__nightmailHomeStart && !start.signedIn) { delete held.__nightmailHomeStart; start.onSignIn() }
+    const shell = window as Window & { __nightmailHomeStart?: boolean; __nightmailShellZap?: boolean }
+    if (shell.__nightmailHomeStart && !start.signedIn) { delete shell.__nightmailHomeStart; start.onSignIn() }
+    if (shell.__nightmailShellZap) { delete shell.__nightmailShellZap; sound.current?.start(); noise('channel'); next() }
     const late = setTimeout(() => takeOver(box.current), 3000)
     return () => clearTimeout(late)
   }, [])
   const tune = (to: number, number = to + 1) => { setChannel(to); deck.channel = to; deck.number = number; deck.switchAt = performance.now(); deck.wake() }
+  /** The next of the eight channels, round from 8 to 1; from a number off the keys, channel 1. */
+  const next = () => tune(deck.channel >= CHANNELS.length ? 0 : (deck.channel + 1) % CHANNELS.length)
+  // A press on the set itself (its glass or its cabinet, not one of its controls) changes the channel, as its keys do,
+  // with their clunk. With the remote in the hand the press is the remote's (remote.tsx), so the channel changes once.
+  const held = useRef(false)
+  const press = (event: { target: EventTarget }) => {
+    if (held.current || (event.target as Element).closest('button:not(.chy-screen), a, input, [data-cta]')) return
+    noise('channel'); next()
+  }
   // The remote's number pad (remote.tsx: in the hand, the keyboard's digits are its keys). A number is typed as on a
   // set of the time: each digit shows in the corner with dashes for the ones to come, and the set tunes when three
   // are in or the typing stops. 1 to 8 are the keys' channels; the rest is OFF_KEYS, above.
@@ -745,8 +755,9 @@ export function TvHome({ start, notice }: HomeProps) {
     <div className="chy-col">
       {/* In words, for whoever can't watch the picture (words.tsx): what it is here, the rest after the way in. */}
       <Heading />
-      <div className="chy-set" ref={box} onClickCapture={event => { if ((event.target as Element).closest('[data-cta]')) return; fresh.current = !sound.current?.started; sound.current?.start() }}>
-        <button type="button" className="chy-screen" aria-label="Television screen" onClick={() => { deck.thumpAt = performance.now(); deck.wake() }}>
+      <div className="chy-set" ref={box} onClick={press} onClickCapture={event => { if ((event.target as Element).closest('[data-cta]')) return; fresh.current = !sound.current?.started; sound.current?.start() }}>
+        {/* The glass is the set's press for the keyboard: reached by Tab, it shows the channel on, as a set does. */}
+        <button type="button" className="chy-screen" aria-label="Television screen: next channel" onFocus={event => { if (event.currentTarget.matches(':focus-visible')) say(`CH ${String(deck.number).padStart(2, '0')}`) }}>
           {flat ? <ul className="chy-flat" aria-hidden="true">{list}</ul> : <Tube deck={deck} onLight={light} onFlat={fall} />}
         </button>
         <span className="chy-glow" />
@@ -765,7 +776,7 @@ export function TvHome({ start, notice }: HomeProps) {
         <button type="button" className="chy-grille" style={at(.882, .713, .1, .3)} aria-label="Sound" aria-pressed={!muted} onClick={() => { const to = fresh.current ? false : !muted; setMuted(to); sound.current?.mute(to); say(to ? 'MUTE' : 'SOUND ON') }} />
         <Dial y={KNOB_Y[0]!} label="Tracking" stops={[-55, 0, 55]} index={bad} onIndex={i => { noise('knob'); setBad(i); deck.bad = i; deck.wake() }} onAngle={angle => { deck.bad = (angle + 55) / 55; deck.wake() }} />
         <Dial y={KNOB_Y[1]!} label="Power" stops={[-50, 40]} index={Number(on)} onIndex={i => { noise('knob', .7); noise(i === 1 ? 'on' : 'off', .6, .05); if (i === 1) noise('tape', .3, .9); setOn(i === 1); deck.power = i === 1; deck.wake() }} />
-        <Remote light={deck} onZap={() => { noise('remote'); tune(deck.channel >= CHANNELS.length ? 0 : (deck.channel + 1) % CHANNELS.length) }} onDigit={digit} />
+        <Remote light={deck} onZap={() => { noise('remote'); next() }} onDigit={digit} onHold={to => { held.current = to }} />
         <Label start={start} />
       </div>
       <div className="chy-under">

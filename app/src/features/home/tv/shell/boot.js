@@ -6,9 +6,10 @@
 // data-entry) and the page's: data-shell, the first screen's id (home-shell); data-wait, the pictures to wait for (the
 // set's photograph and the tape's still, .chy-scene and .hs-still), or none to wait for the reader; data-keep, what the
 // app may show under it in the meantime (.boot-loader, .chy); data-press, the buttons whose press is held (the
-// homepage's Get started, button[data-cta="sign-in"], shown pressed at once). The app's stylesheet goes in before the
-// page's own inlined one (style[data-shell-css]) where there is one, so it can't restyle the painted page while the app
-// loads. Where theme.js turned the first screen off (html[data-shell=off]: an address it doesn't show), the app starts
+// homepage's Get started, button[data-cta="sign-in"], shown pressed at once), and a press on the set itself (its glass
+// or its cabinet, .chy-set, not one of its controls), which changes the channel once the page is up. The app's
+// stylesheet goes in before the page's own inlined one (style[data-shell-css]) where there is one, so it can't restyle
+// the painted page while the app loads. Where theme.js turned the first screen off (html[data-shell=off]: an address it doesn't show), the app starts
 // at once.
 ;(() => {
   const me = document.currentScript, set = me.dataset, root = document.getElementById('root')
@@ -30,7 +31,10 @@
     // Only a press a person made is held for the app: a click a script dispatched is not.
     if (!event.isTrusted) return
     const button = event.target instanceof Element && event.target.closest(set.press || 'button[data-cta="sign-in"]')
-    if (!button) return
+    if (!button) {
+      if (event.target instanceof Element && event.target.closest('.chy-set') && !event.target.closest('button:not(.chy-screen), a')) { window.__nightmailShellZap = true; start() }
+      return
+    }
     window.__nightmailShellPress = button
     if (!set.press) { window.__nightmailHomeStart = true; button.setAttribute('aria-busy', 'true'); button.dataset.busy = '' }
     start()
