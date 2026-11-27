@@ -46081,7 +46081,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO deliverability_checks(kind,subject,status,checked_at,held_at) VALUES ('dbl',$1,'listed',now(),now())`, [domain]);
       try {
         const line = `Marketing link domain held: Marketing releases using ${domain} are paused after a confirmed DBL listing.`;
-        assert.deepEqual((await tick()).map(card => [card.text, card.blocks[0].text]), [[`${LEAD} ${line}`, { type: 'mrkdwn', text: `${LEAD} ${line}`, verbatim: true }]]);
+        assert.deepEqual((await tick()).map(card => [card.text, card.blocks[0].text]), [[`${LEAD} ${line}`, { type: 'mrkdwn', text: `${LEAD} ${line.replace(domain, `\`${domain}\``)}`, verbatim: true }]]);
         await db.query(`UPDATE health_alerts SET sent_at=now()-interval '16 minutes' WHERE key=$1`, [key]);
         assert.deepEqual((await tick()).map(card => card.text), [line], 'A reminder: unmentioned.');
         await db.query('UPDATE deliverability_checks SET held_at=NULL WHERE subject=$1', [domain]);
@@ -46172,30 +46172,35 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       } finally { await db.query('DELETE FROM deliverability_checks WHERE subject=$1', [domain]); await db.query('DELETE FROM health_alerts WHERE key=$1', [`link-domain-held:${domain}`]); }
     });
   });
+  /** Amazon's GetAccount for a region of the test's own, read as the 10-minute check reads it (the simulator answers the others). read returns the check's status, the state told and the operator cards posted. */
+  async function amazonAccountReads(t: TestContext, runtime: import('./src/core.js').Runtime, db: pg.Client, region: string, pool: string) {
+    const { refreshDeliverabilitySources } = await import('./src/glass-deliverability.js'), { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+    const multiTenant = runtime.config.multiTenant; runtime.config.multiTenant = true; t.after(() => { runtime.config.multiTenant = multiTenant; });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture') ON CONFLICT DO NOTHING`, [region, pool, `arn:aws:sns:${region}:${pool}:mentions`]);
+    // Amazon's answer for this region: an account, or a failed read.
+    let answer: Json | Error = {};
+    const send = SESv2Client.prototype.send;
+    t.mock.method(SESv2Client.prototype, 'send', async function (this: InstanceType<typeof SESv2Client>, command: unknown, ...rest: unknown[]) {
+      if (command instanceof GetAccountCommand && await this.config.region() === region) {
+        if (answer instanceof Error) throw answer;
+        return { ProductionAccessEnabled: true, VdmAttributes: { VdmEnabled: 'DISABLED' }, ...answer };
+      }
+      return (send as (...args: unknown[]) => Promise<unknown>).call(this, command, ...rest);
+    });
+    const read = async (account: Json | Error) => {
+      answer = account;
+      await db.query(`UPDATE deliverability_checks SET next_at=now() WHERE kind='ses' AND subject=$1`, [region]);
+      await refreshDeliverabilitySources(runtime, { fetch: (async () => { throw new Error('No request expected'); }) as typeof fetch });
+      const check = (await db.query(`SELECT status,told FROM deliverability_checks WHERE kind='ses' AND subject=$1`, [region])).rows[0];
+      return [check.status, check.told, (await postOperatorAlerts(t, runtime, db)).map(card => [card.text, cardLine(card), card.blocks[0].accessory.url])];
+    };
+    const done = async () => { await db.query('DELETE FROM deliverability_checks WHERE subject=$1', [region]); await db.query('DELETE FROM provider_pool_regions WHERE region=$1 AND aws_account_id=$2', [region, pool]); };
+    return { read, done };
+  }
   test('MX operator mentions: Amazon\'s account status for a region posts one card per change of state from the 10-minute read and mentions when it gets worse, even with the 6 mentions of the hour used, at most once per region an hour; healthy again posts unmentioned, a first healthy reading posts nothing and a failed read changes nothing', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { refreshDeliverabilitySources } = await import('./src/glass-deliverability.js'), { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
-      const multiTenant = runtime.config.multiTenant; runtime.config.multiTenant = true; t.after(() => { runtime.config.multiTenant = multiTenant; });
-      const f = await mentionFixture(t, runtime, db), region = 'ap-southeast-7', pool = '555566667777';
-      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture') ON CONFLICT DO NOTHING`, [region, pool, `arn:aws:sns:${region}:${pool}:mentions`]);
+      const f = await mentionFixture(t, runtime, db), region = 'ap-southeast-7', { read, done } = await amazonAccountReads(t, runtime, db, region, '555566667777');
       try {
-        // Amazon's answer for this region (other regions get the simulator's own): an account, or a failed read.
-        let answer: Json | Error = {};
-        const send = SESv2Client.prototype.send;
-        t.mock.method(SESv2Client.prototype, 'send', async function (this: InstanceType<typeof SESv2Client>, command: unknown, ...rest: unknown[]) {
-          if (command instanceof GetAccountCommand && await this.config.region() === region) {
-            if (answer instanceof Error) throw answer;
-            return { ProductionAccessEnabled: true, VdmAttributes: { VdmEnabled: 'DISABLED' }, ...answer };
-          }
-          return (send as (...args: unknown[]) => Promise<unknown>).call(this, command, ...rest);
-        });
-        const read = async (account: Json | Error) => {
-          answer = account;
-          await db.query(`UPDATE deliverability_checks SET next_at=now() WHERE kind='ses' AND subject=$1`, [region]);
-          await refreshDeliverabilitySources(runtime, { fetch: (async () => { throw new Error('No request expected'); }) as typeof fetch });
-          const check = (await db.query(`SELECT status,told FROM deliverability_checks WHERE kind='ses' AND subject=$1`, [region])).rows[0];
-          return [check.status, check.told, (await postOperatorAlerts(t, runtime, db)).map(card => [card.text, cardLine(card), card.blocks[0].accessory.url])];
-        };
         const glass = `${PUBLIC_ORIGIN}/glass?view=deliverability`, card = (words: string, mention = false) => [`${mention ? `${LEAD} ` : ''}Amazon account: Thailand (ap-southeast-7): ${words}`, `${mention ? `${LEAD} ` : ''}:cloud: *Amazon account* Thailand (ap-southeast-7): ${words}`, glass];
 
         // The first reading, healthy: told, no card.
@@ -46218,7 +46223,80 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual(await read({ EnforcementStatus: 'HEALTHY', SendingEnabled: false }), ['ok', 'HEALTHY+sending_disabled', [card('sending disabled. 1 urgent card before this one went out without a mention (more than 6 an hour).', true)]]);
         assert.deepEqual((await f.mentions()).filter((row: Json) => row.kind === 'amazon_account').map((row: Json) => [row.subject, row.capped, row.mentioned]),
           [[region, false, true], [region, false, false], [region, false, true]], 'Healthy again is never asked: only worse is.');
-      } finally { await db.query('DELETE FROM deliverability_checks WHERE subject=$1', [region]); await db.query('DELETE FROM provider_pool_regions WHERE region=$1 AND aws_account_id=$2', [region, pool]); }
+      } finally { await done(); }
+    });
+  });
+  test('MX operator mentions: a read of Amazon\'s account status without a recognised enforcement status is no reading: no card and nothing told, whether the field is missing or its value unknown', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      await mentionFixture(t, runtime, db);
+      const { read, done } = await amazonAccountReads(t, runtime, db, 'ca-west-1', '555566668888');
+      try {
+        assert.deepEqual(await read({ EnforcementStatus: 'HEALTHY', SendingEnabled: true }), ['ok', 'healthy', []]);
+        assert.deepEqual(await read({ SendingEnabled: true }), ['ok', 'healthy', []], 'No status: nothing.');
+        assert.deepEqual(await read({ EnforcementStatus: 'HEALTHY', SendingEnabled: true }), ['ok', 'healthy', []], 'So healthy again is nothing either.');
+        assert.deepEqual(await read({ EnforcementStatus: 'SUSPENDED', SendingEnabled: true }), ['ok', 'healthy', []], 'A status it does not know: nothing.');
+        assert.deepEqual(await read({ EnforcementStatus: 'HEALTHY', SendingEnabled: true }), ['ok', 'healthy', []]);
+        assert.deepEqual((await read({ EnforcementStatus: 'PROBATION', SendingEnabled: true }))[2], [[`${LEAD} Amazon account: Calgary (ca-west-1): on probation.`, `${LEAD} :cloud: *Amazon account* Calgary (ca-west-1): on probation.`, `${PUBLIC_ORIGIN}/glass?view=deliverability`]], 'A real change still posts.');
+      } finally { await done(); }
+    });
+  });
+  test('MX operator mentions: deciding a mention waits at most a second for its lock; with the lock held, or the ledger missing, the card posts unmentioned at once, stays so on a retry and is counted as not mentioned, and an abuse alert is still posted at most twice', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const f = await mentionFixture(t, runtime, db), holder = await fixtureDatabase(t), mentioned = (card: Json) => String(card.text).startsWith(LEAD);
+      const timeout = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+      // Another session holds the mention lock throughout.
+      await holder.query('BEGIN'); await holder.query(`SELECT pg_advisory_xact_lock(hashtextextended('operator.mention',0))`);
+      const osprey = await f.workspace('Osprey'), posts: Json[] = [], alert = await f.stored('high', 'new');
+      try {
+        // A pause: unmentioned within the limit. Slack refuses that post (500), so the job will try again.
+        await f.pause(osprey);
+        let started = Date.now();
+        assert.deepEqual((await postOperatorAlerts(t, runtime, db, 500)).map(mentioned), [false]);
+        assert.ok(Date.now() - started < 2500, `Posted within the lock limit (${Date.now() - started} ms).`);
+        // A high abuse alert Slack doesn't answer, twice: each try within the limit, unmentioned, and never a third post.
+        started = Date.now();
+        assert.match(await postAbuseAlert(t, runtime, alert, timeout, posts), /^waits /);
+        await db.query(`UPDATE abuse_alerts SET claimed_at=claimed_at-interval '6 minutes' WHERE id=$1`, [alert]);
+        assert.equal(await postAbuseAlert(t, runtime, alert, timeout, posts), 'done');
+        assert.equal(await postAbuseAlert(t, runtime, alert, () => 200, posts), 'done');
+        assert.ok(Date.now() - started < 5000, `Three tries within the limits (${Date.now() - started} ms).`);
+        assert.deepEqual([posts.map(mentioned), (await db.query('SELECT status FROM abuse_alerts WHERE id=$1', [alert])).rows[0].status], [[false, false], 'unconfirmed']);
+      } finally { await holder.query('ROLLBACK'); }
+      // Released: the pause's retry is still unmentioned (decided once: never a late mention). The next card mentions and
+      // counts the two that went out without one.
+      assert.deepEqual((await postOperatorAlerts(t, runtime, db)).map(card => card.text), ['Paused: Osprey, too many bounces.']);
+      assert.deepEqual((await f.mentions()).map((row: Json) => [row.kind, row.mentioned, row.over]), [['abuse_high', false, true], ['paused', false, true]]);
+      await f.pause(await f.workspace('Plover'));
+      assert.deepEqual((await postOperatorAlerts(t, runtime, db)).map(card => card.text), [`${LEAD} Paused: Plover, too many bounces. 2 urgent cards before this one went out without a mention (more than 6 an hour).`]);
+      // The ledger missing (a database without its migration): the card posts unmentioned, as without the setting.
+      await db.query('ALTER TABLE operator_mentions RENAME TO operator_mentions_away');
+      try {
+        await f.pause(await f.workspace('Quail'));
+        assert.deepEqual((await postOperatorAlerts(t, runtime, db)).map(card => card.text), ['Paused: Quail, too many bounces.']);
+      } finally { await db.query('ALTER TABLE operator_mentions_away RENAME TO operator_mentions'); }
+    });
+  });
+  test('MX operator mentions: a held link domain\'s mentioned card shows the domain exactly as Health has it, in a code span, whatever characters it holds; unmentioned, its card is as before', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { healthTick } = await import('./src/health.js');
+      await mentionFixture(t, runtime, db);
+      // _ and * reach the card as they are; Health never prints ~ or a backtick (safe()): that domain reads "other".
+      const tag = randomUUID().slice(0, 6), plain = `links_rv*${tag}.example`, odd = `links~rv\`${tag}.example`, keys = [plain, odd].map(d => `link-domain-held:${d}`);
+      const line = (domain: string, code = false) => `Marketing link domain held: Marketing releases using ${code ? `\`${domain}\`` : domain} are paused after a confirmed DBL listing.`;
+      const tick = async () => (await healthTick(runtime, { queues: [] }, { post: async () => {}, force: true })).cards.filter(c => keys.includes(c.key))
+        .map(c => [c.key === keys[0] ? 'plain' : 'odd', c.state, c.card.text, (c.card as Json).blocks[0].text]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+      await db.query(`INSERT INTO deliverability_checks(kind,subject,status,checked_at,held_at) VALUES ('dbl',$1,'listed',now(),now()),('dbl',$2,'listed',now(),now())`, [plain, odd]);
+      try {
+        assert.deepEqual(await tick(), [
+          ['odd', 'open', `${LEAD} ${line('other')}`, { type: 'mrkdwn', text: `${LEAD} ${line('other', true)}`, verbatim: true }],
+          ['plain', 'open', `${LEAD} ${line(plain)}`, { type: 'mrkdwn', text: `${LEAD} ${line(plain, true)}`, verbatim: true }],
+        ]);
+        await db.query(`UPDATE health_alerts SET sent_at=now()-interval '16 minutes' WHERE key=ANY($1)`, [keys]);
+        assert.deepEqual(await tick(), [
+          ['odd', 'reminder', line('other'), { type: 'plain_text', text: line('other'), emoji: false }],
+          ['plain', 'reminder', line(plain), { type: 'plain_text', text: line(plain), emoji: false }],
+        ], 'Unmentioned: as before.');
+      } finally { await db.query('DELETE FROM deliverability_checks WHERE subject=ANY($1)', [[plain, odd]]); await db.query('DELETE FROM health_alerts WHERE key=ANY($1)', [keys]); }
     });
   });
   test('MX health: each incident of 23 November is an alert within its minutes, with a stable key, a severity and the number that matters, in words that carry numbers, codes and IDs only; a failed probe neither opens nor clears', async () => {

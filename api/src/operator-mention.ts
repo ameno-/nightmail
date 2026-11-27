@@ -1,6 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { log, type Runtime } from './core.js';
 import { SlackRefused } from './reputation-alerts.js';
+import { WRITE_LIMITS } from './health-counters.js';
 
 // Urgent operator cards mention the operator by name, so Slack notifies their phone. Who: OPERATOR_SLACK_MENTION, a
 // Slack user ID in the repository's production configuration (wrangler.prod.jsonc); unset (dev, tests, self-hosted),
@@ -14,7 +15,9 @@ import { SlackRefused } from './reputation-alerts.js';
 // The decision is made once per card (operator_mentions, keyed by the card's own ID: its job, its alert, its Health
 // episode), so every retry of a card posts it the same way. A mention can never cost a card: if Slack refuses the
 // mentioned message (a 4xx other than 429), the same card is posted at once without it, and the mention is dropped.
-// Anything going wrong with the decision itself (the database) posts the card unmentioned.
+// The decision runs under the standard limits (WRITE_LIMITS: a second for a lock, three for a statement), so a held lock
+// or anything else going wrong with it posts the card unmentioned at once, never late: it is then recorded as not
+// mentioned where that is possible, so a retry posts it the same way and the next mention counts it.
 
 /** Card kinds that mention the operator: 'capped' share the hourly ceiling, 'own' have only the one-per-subject bound. */
 export const MENTIONS: Record<string, 'capped' | 'own'> = {
@@ -29,7 +32,7 @@ export type Mention = { user: string; skipped: number };
 
 /**
  * Whether this card mentions the operator, decided once for the card (a retry gets the same answer): null for no.
- * card is the card's stable ID; subject what it is about. Never throws.
+ * card is the card's stable ID; subject what it is about. Never throws, and never takes longer than WRITE_LIMITS allow.
  */
 export async function mentionFor(runtime: Pick<Runtime, 'db' | 'config'>, card: { id: string | SQL; kind: string; subject: string }): Promise<Mention | null> {
   const user = runtime.config.operatorSlackMention, rule = Object.hasOwn(MENTIONS, card.kind) ? MENTIONS[card.kind] : undefined;
@@ -37,6 +40,7 @@ export async function mentionFor(runtime: Pick<Runtime, 'db' | 'config'>, card: 
   const capped = rule === 'capped', id = typeof card.id === 'string' ? sql`${card.id}::text` : card.id;
   try {
     const row = await runtime.db.transaction(async tx => {
+      await tx.execute(WRITE_LIMITS);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended('operator.mention',0))`);
       return (await tx.execute<{ mentioned: boolean; skipped: number }>(sql`WITH card AS (SELECT ${id} AS id),
           prior AS (SELECT m.mentioned,m.skipped FROM operator_mentions m JOIN card ON m.card=card.id),
@@ -53,6 +57,12 @@ export async function mentionFor(runtime: Pick<Runtime, 'db' | 'config'>, card: 
     return row?.mentioned ? { user, skipped: Number(row.skipped) } : null;
   } catch {
     log('warn', { code: 'OPERATOR_MENTION_FAILED', kind: card.kind });
+    // Not mentioned: kept so (a retry of this card is unmentioned too) and, if capped, told by the next mention. Best effort,
+    // under the same limits and without the lock.
+    await runtime.db.transaction(async tx => {
+      await tx.execute(WRITE_LIMITS);
+      await tx.execute(sql`INSERT INTO operator_mentions(card,kind,subject,capped,mentioned,over) VALUES ((${id}),${card.kind},${card.subject},${capped},false,${capped}) ON CONFLICT (card) DO NOTHING`);
+    }).catch(() => {});
     return null;
   }
 }
@@ -89,10 +99,12 @@ export function withMention<T extends Message>(message: T, mention: Mention): T 
  * Posts a card through send, mentioned when mention says so. If Slack refuses the mentioned card (a 4xx other than
  * 429: Slack took nothing), it is posted again at once without the mention, and the mention is dropped; that post's
  * outcome is the card's. Anything else (a 429, a 5xx, no answer) is the card's own outcome, as without a mention.
+ * mentionable: the card to mention, when it reads differently in mrkdwn (Health's held link domain); message is posted
+ * without the mention.
  */
-export async function sendMentioned(runtime: Pick<Runtime, 'db'>, send: (message: Message) => Promise<void>, message: Message, mention: Mention | null, card: string | SQL) {
+export async function sendMentioned(runtime: Pick<Runtime, 'db'>, send: (message: Message) => Promise<void>, message: Message, mention: Mention | null, card: string | SQL, mentionable: Message = message) {
   if (!mention) return send(message);
-  try { return await send(withMention(message, mention)); }
+  try { return await send(withMention(mentionable, mention)); }
   catch (error) {
     if (!(error instanceof SlackRefused) || error.status === 429 || error.status < 400 || error.status >= 500) throw error;
     log('warn', { code: 'OPERATOR_MENTION_REFUSED', status: error.status });

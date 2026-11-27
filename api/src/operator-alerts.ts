@@ -74,9 +74,8 @@ const share = (slow: number, mail: number) => mail / slow >= 2 ? `1 in ${Math.ro
 const whole = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 const cents = (n: number) => `$${(n / 100).toFixed(2)}`;
 /** Amazon's account status for a region in words: "on probation", "shut down, sending disabled", "healthy again". */
-const accountWords = (p: Record<string, unknown>) => p.healthy === true ? 'healthy again' : [p.enforcement === 'PROBATION' ? 'on probation' : p.enforcement === 'SHUTDOWN' ? 'shut down'
-  : p.enforcement === 'HEALTHY' ? null : typeof p.enforcement === 'string' && /^[A-Z_]{1,40}$/.test(p.enforcement) ? `enforcement status ${p.enforcement}` : 'enforcement status unknown',
-  p.sending === false ? 'sending disabled' : null].filter(Boolean).join(', ');
+const accountWords = (p: Record<string, unknown>) => p.healthy === true ? 'healthy again'
+  : [p.enforcement === 'PROBATION' ? 'on probation' : p.enforcement === 'SHUTDOWN' ? 'shut down' : null, p.sending === false ? 'sending disabled' : null].filter(Boolean).join(', ');
 
 /** One card: an emoji, a bold label and a few words, an Open button, and the same words as the plain-text fallback. */
 export const slackCard = (card: { emoji: string; label: string } | null, words: string, url: string) => ({
@@ -294,18 +293,22 @@ export async function blocklistAlert(db: DbExecutor, workspaceId: string, campai
   return queue(db, workspaceId, 'blocklisted', {}, { daily: false, episode: campaignId });
 }
 
+/** The enforcement statuses GetAccount reports. A read with none of them is no reading. */
+const ENFORCEMENT = new Set(['HEALTHY', 'PROBATION', 'SHUTDOWN']);
 /** A region's state: healthy, or the enforcement status and whether sending is disabled ("PROBATION", "SHUTDOWN+sending_disabled"). */
-const accountState = (enforcement: string | null, sending: boolean) => enforcement === 'HEALTHY' && sending ? 'healthy' : `${enforcement ?? 'UNKNOWN'}${sending ? '' : '+sending_disabled'}`;
+const accountState = (enforcement: string, sending: boolean) => enforcement === 'HEALTHY' && sending ? 'healthy' : `${enforcement}${sending ? '' : '+sending_disabled'}`;
 /** How bad a state is: healthy; not healthy but sending; or sending stopped (shut down or disabled). */
 const accountRank = (state: string) => state === 'healthy' ? 0 : /^SHUTDOWN|\+sending_disabled$/.test(state) ? 2 : 1;
 /**
  * Amazon account: the 10-minute GetAccount read for a region (glass-deliverability.ts refreshDeliverabilitySources), only
  * a read that succeeded. Queues a card when the region's state differs from the last one told (deliverability_checks.told),
  * in the transaction that records it, so a card that can't be queued leaves it untold for the next read. The first
- * reading is told without a card when healthy. A worse state than the last told one mentions the operator. Never throws.
+ * reading is told without a card when healthy. A worse state than the last told one mentions the operator. A read without
+ * a recognised enforcement status (ENFORCEMENT) is no reading: no card, nothing told. Never throws.
  */
 export async function amazonAccountAlert(runtime: Runtime, region: string, detail: Record<string, unknown>) {
-  const enforcement = typeof detail.enforcement === 'string' && /^[A-Z_]{1,40}$/.test(detail.enforcement) ? detail.enforcement : null;
+  const enforcement = typeof detail.enforcement === 'string' && ENFORCEMENT.has(detail.enforcement) ? detail.enforcement : null;
+  if (!enforcement) return false;
   const sending = detail.sendingEnabled !== false, state = accountState(enforcement, sending);
   try {
     return await runtime.db.transaction(async tx => {
