@@ -224,6 +224,11 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
   if (redirect && 'error' in result) Object.assign(result, { data: result.error, error: undefined });
   if (result.response) {
     assertResponse(op,result.response.status,result.response.headers.get('content-type'),result.response.ok || redirect ? result.data : 'error' in result ? result.error : undefined);
+    if (op === 'listInboxAppPasswords') {
+      const headers = result.response.headers;
+      check(headers.get('deprecation') === '@1795737600' && headers.get('sunset') === 'Thu, 25 Feb 2027 23:59:59 GMT'
+        && headers.get('link')?.includes('</docs/operations/listAppPasswords.md>; rel="successor-version"'), 'missing inbox password deprecation notice');
+    }
     const requestId = result.response.headers.get('x-request-id');
     check(requestId && (!apiError || apiError.requestId === requestId),`${op}: missing or mismatched request ID`);
     (result.response.ok || redirect ? successResponses : errorResponses).add(op);
@@ -309,7 +314,8 @@ async function devBoundaries() {
   await expectDenial(()=>api('createInboxFolder',{path:missingInbox,body:{path:'Check'}}),404,'NOT_FOUND');
   await expectDenial(()=>api('updateInboxFolder',{path:missingFolder,body:{subscribed:false}}),404,'NOT_FOUND');
   await expectDenial(()=>api('deleteInboxFolder',{path:missingFolder}),404,'NOT_FOUND');
-  check(!(await api('listInboxAppPasswords',{path:missingInbox})).data.length,'unexpected password listing');
+  check(!(await api('listAppPasswords',{query:{inboxId:missingInbox.id}})).data.length,'unexpected filtered password listing');
+  await api('listInboxAppPasswords',{path:missingInbox}); // Keep the legacy route’s notice covered.
   check((await api('listAppPasswords',{})).data.every(p=>p.inboxId.startsWith('mbx_')&&!('password' in p)),'invalid workspace password listing');
   await expectDenial(()=>api('createInboxAppPassword',{path:missingInbox,body:{name:'Check',protocols:['imap']}}),409,'INBOX_UNAVAILABLE');
   await expectDenial(()=>api('revokeInboxAppPassword',{path:{...missingInbox,passwordId:'app_missing'}}),404,'NOT_FOUND');
