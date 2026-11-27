@@ -27399,8 +27399,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   // the workspace's own verifies; it receives at every address into one default inbox, and drops spam and viruses before
   // they are counted. A pause stops its sending, a revoke stops everything, and its label is never given out again.
   test('built-in domain: given on creation and by the backfill, unique and never a reserved name, sends within its caps and scope, receives into a catch-all inbox, refused when paused or revoked',async t=>{
-    await simulatedSesFixture(t,async({runtime,db,local,run})=>t.test('synthetic transports',async t=>{
-      const [{runDispatcher},{SESv2Client,GetAccountCommand,SendEmailCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,DeleteTenantResourceAssociationCommand},builtin,{onboardNewUser,ownerName},{acceptInboundNotification},{storeIncoming},{ingestInput},{matchRouting},{sql},{render}]=await Promise.all([
+    await simulatedSesFixture(t,async({runtime,db,local,request,run})=>t.test('synthetic transports',async t=>{
+      const [{runDispatcher},{SESv2Client,GetAccountCommand,SendEmailCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,DeleteTenantResourceAssociationCommand},builtin,{onboardNewUser,ownerName},{acceptInboundNotification,mailboxIngestJobs},{storeIncoming},{ingestInput},{matchRouting},{sql},{render}]=await Promise.all([
         import('./src/dispatcher.js'),import('@aws-sdk/client-sesv2'),import('./src/builtin-domain.js'),import('./src/workspaces.js'),import('./src/mailbox-ingest.js'),import('./src/mailbox-ingest-store.js'),
         import('./src/mailbox-ingest-input.js'),import('./src/routing-match.js'),import('drizzle-orm'),import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href)]);
       const wid=runtime.config.workspaceId,acct='111122225555',oh='us-east-2',parent='nightmail-fixture.email',topic=`arn:aws:sns:${oh}:${acct}:bane-feedback`;
@@ -27604,44 +27604,112 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           const row=(await db.query('SELECT thread_id,mailbox_id FROM mailbox_messages WHERE message_id=$1',[id])).rows[0];
           return {id,thread:row.thread_id as string,box:row.mailbox_id as string};};
         const answer=(m:{id:string;thread:string;box:string},extra:Json={})=>local('POST',`/v1/inbound/threads/${m.thread}/reply`,{addressId:m.box,replyToMessageId:m.id,text:'Thanks, on it.',...extra});
-        const refusedFor=async(reply:Promise<Reply>)=>{const e=error(await reply,422,'BUILTIN_DOMAIN_RECIPIENT');assert.equal(e.retryable,false);return e.details[0].reply as string;};
+        // Each refusal also names the failed condition in the request log, as a code from a fixed list (never text or addresses).
+        const lines:Json[]=[],logged=(reply:Reply)=>lines.find(l=>l.event==='request'&&l.requestId===reply.headers.get('x-request-id'));
+        const consoles=(['error','warn','info'] as const).map(level=>t.mock.method(console,level,(line:string)=>{try{lines.push(JSON.parse(String(line)));}catch{/* not a log line */}}));
+        const refusedFor=async(reply:Promise<Reply>,reason:string)=>{const r=await reply,e=error(r,422,'BUILTIN_DOMAIN_RECIPIENT');assert.equal(e.retryable,false);
+          assert.equal(logged(r)?.reason,reason,e.details[0].reply);return e.details[0].reply as string;};
         const nextDay=()=>db.query("UPDATE sending_emails SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1",[wid]); // The built-in caps of its own count sends, not these.
         await nextDay();
+        // End to end, as production runs it: an outside sender that passes authentication writes to a built-in address (SES's
+        // notification, then ingest reading the raw message), and an API key answers through the thread reply: granted,
+        // recorded, and handed to SES for that sender alone.
+        {
+          const {S3Client}=await import('@aws-sdk/client-s3'),mid=unique('builtin-outside'),to=`hello@${host}`,sender='person@outside.example';
+          const mime=Buffer.from(`From: Outside Person <${sender}>\r\nTo: ${to}\r\nSubject: A question\r\nDate: ${new Date().toUTCString()}\r\nMessage-ID: <${mid}@outside.example>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello, can you help?\r\n`);
+          const s3=t.mock.method(S3Client.prototype,'send',async(cmd:any)=>{
+            if(cmd.constructor.name==='HeadObjectCommand')return {ContentLength:mime.length,ETag:'"fixture"'};
+            if(cmd.constructor.name==='GetObjectCommand')return {ContentLength:mime.length,ETag:'"fixture"',Body:{transformToByteArray:async()=>new Uint8Array(mime),transformToWebStream:()=>new Response(new Uint8Array(mime)).body}};
+            return {};
+          });
+          try {
+            assert.equal(await acceptInboundNotification(runtime,{topicArn:inbound,region:oh,message:{notificationType:'Received',mail:{messageId:mid,source:sender,commonHeaders:{subject:'A question',from:[`Outside Person <${sender}>`]}},
+              receipt:{timestamp:new Date().toISOString(),recipients:[to],spamVerdict:{status:'PASS'},virusVerdict:{status:'PASS'},spfVerdict:{status:'PASS'},dkimVerdict:{status:'PASS'},dmarcVerdict:{status:'PASS'},
+                action:{type:'S3',bucketName:bucket,topicArn:inbound,objectKey:'staging/'+mid}}}}),1);
+            const job=(await db.query("UPDATE jobs SET status='running' WHERE type='mailbox.ingest' AND payload->>'sesMessageId'=$1 AND status='pending' RETURNING id,workspace_id",[mid])).rows[0];
+            await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:mid},{id:job.id,workspaceId:job.workspace_id,attempts:1});
+          } finally { s3.mock.restore(); }
+          const got=(await db.query('SELECT m.id,l.thread_id,l.mailbox_id,l.reply_author_verified FROM mail_messages m JOIN mailbox_messages l ON l.message_id=m.id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid])).rows[0];
+          assert.equal(got?.reply_author_verified,true,'Ingest records its author as authenticated.');
+          // Mail the steps above left queued would go out first (the dispatcher takes the oldest), within this workspace's caps.
+          await db.query("UPDATE sending_emails SET status='canceled' WHERE workspace_id=$1 AND status='queued'",[wid]);
+          const key=ok(await local('POST','/v1/api-keys',{name:'Built-in agent',permissions:['read','send','manage']}),201),before=sent.length;
+          ok(await request('POST',`/v1/inbound/threads/${got.thread_id}/reply`,key.secret,{addressId:got.mailbox_id,replyToMessageId:got.id,text:'Happy to help.'}),202);
+          assert.deepEqual((await db.query('SELECT recipient FROM builtin_replies WHERE workspace_id=$1 AND message_id=$2',[wid,got.id])).rows,[{recipient:sender}]);
+          const ours=()=>sent.slice(before).filter(s=>[...s.Destination?.ToAddresses??[],...s.Destination?.CcAddresses??[],...s.Destination?.BccAddresses??[]].includes(sender));
+          await runDispatcher(runtime,{region:oh,accountId:acct});
+          assert.deepEqual(ours().map(s=>[s.FromEmailAddress.includes(from),s.Destination.ToAddresses,s.Destination.CcAddresses??[],s.Destination.BccAddresses??[]]),[[true,[sender],[],[]]],'SES gets it once, from the built-in address, for the sender alone.');
+          await nextDay();
+        }
+        // Nightmail's support (an address of NIGHTMAIL_SUPPORT_ADDRESS_IDS, at a platform domain) is the one own address it
+        // answers: once per message support sent, within the workspace's daily count but not the count per recipient.
+        const platform='platform.builtin-fixture.example',supportAddress=`support@${platform}`,supportBox=`mbx_${randomUUID().replaceAll('-','')}`,platformWs=unique('ws-platform'),savedSupport=runtime.config.support;
+        runtime.config.previousOrigins=[`https://${platform}`];runtime.config.support={...savedSupport,addressIds:[supportBox]};
+        await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[platformWs]);
+        await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[supportBox,platformWs,platform,oh]);
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'address','forever')",[supportBox,platformWs,supportAddress]);
+        await db.query("UPDATE builtin_replies SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1",[wid]); // A new day for this workspace's count.
+        // Nine other workspaces answered support today; this one, the tenth, still may.
+        for (let n=0;n<9;n++) await db.query('INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES($1,$2,$3)',[unique('ws-other'),unique('msg'),supportAddress]);
+        const fromSupport=await fresh({from:supportAddress,address:true});
+        ok(await answer(fromSupport),202);
+        assert.deepEqual((await db.query('SELECT recipient FROM builtin_replies WHERE workspace_id=$1 AND message_id=$2',[wid,fromSupport.id])).rows,[{recipient:supportAddress}]);
+        assert.deepEqual((await db.query("SELECT to_addresses,cc_addresses,bcc_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{to_addresses:[supportAddress],cc_addresses:[],bcc_addresses:[]}]);
+        await nextDay();
+        assert.match(await refusedFor(answer(fromSupport),'already_answered'),/already answered once/);
+        // No other own address, even when the caller asks to answer automated mail anyway: a no-reply notice, another mailbox
+        // at our domain, an address at another workspace's built-in domain.
+        for (const sender of [`no-reply@${platform}`,`billing@${platform}`,`hello@other-k7.${parent}`])
+          assert.match(await refusedFor(answer(await fresh({from:sender,address:true}),{allowAutomated:true}),'own_address'),/one of Nightmail’s own addresses/,sender);
+        // A message that only claims to be from support (it failed authentication).
+        assert.match(await refusedFor(answer(await fresh({from:supportAddress,verified:false,address:true})),'unverified'),/didn’t pass authentication/);
+        // Support alone: another recipient, a cc or a bcc.
+        for (const extra of [{to:[supportAddress,'someone@sender.example']},{cc:['copy@sender.example']},{bcc:['hidden@sender.example']}])
+          assert.match(await refusedFor(answer(await fresh({from:supportAddress,address:true}),extra),'extra_recipient'),/alone: no other recipients/,JSON.stringify(extra));
+        // The workspace's own daily count still holds: three more replies to support use it (past the per-recipient count), the next is refused.
+        for (let n=0;n<3;n++) {ok(await answer(await fresh({from:supportAddress,address:true})),202);await nextDay();}
+        assert.match(await refusedFor(answer(await fresh({from:supportAddress,address:true})),'daily_cap'),/daily allowance/);
+        runtime.config.previousOrigins=undefined;runtime.config.support=savedSupport;
+        await db.query("UPDATE builtin_replies SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1",[wid]);
         // A verified sender gets one reply, sent to them alone, transactional; a second reply to the same message is refused.
         const first=await fresh();
         ok(await answer(first),202);
         assert.deepEqual((await db.query("SELECT to_addresses,cc_addresses,bcc_addresses,snapshot->>'kind' AS kind FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{to_addresses:['someone@sender.example'],cc_addresses:[],bcc_addresses:[],kind:'transactional'}]);
         await nextDay();
-        assert.match(await refusedFor(answer(first)),/already answered once/);
+        assert.match(await refusedFor(answer(first),'already_answered'),/already answered once/);
         // A sender that didn't pass authentication: an agent inbox already refuses it; an address now refuses it too (a
         // forged From must not make the built-in domain mail a victim).
         error(await answer(await fresh({verified:false})),403,'RECIPIENT_NOT_ALLOWED');
-        assert.match(await refusedFor(answer(await fresh({verified:false,address:true}))),/didn’t pass authentication/);
+        assert.match(await refusedFor(answer(await fresh({verified:false,address:true})),'unverified'),/didn’t pass authentication/);
         // Only the sender: another recipient, a cc, or a Reply-To at another domain is refused.
-        assert.match(await refusedFor(answer(await fresh({address:true}),{to:['someone-else@sender.example']})),/only to the address that sent/);
-        assert.match(await refusedFor(answer(await fresh({address:true}),{cc:['copy@sender.example']})),/alone: no other recipients/);
-        assert.match(await refusedFor(answer(await fresh({replyTo:['help@elsewhere.example'],address:true}),{to:['someone@sender.example']})),/Reply-To/);
+        assert.match(await refusedFor(answer(await fresh({address:true}),{to:['someone-else@sender.example']}),'not_sender'),/only to the address that sent/);
+        assert.match(await refusedFor(answer(await fresh({address:true}),{cc:['copy@sender.example']}),'extra_recipient'),/alone: no other recipients/);
+        assert.match(await refusedFor(answer(await fresh({replyTo:['help@elsewhere.example'],address:true}),{to:['someone@sender.example']}),'reply_to_elsewhere'),/Reply-To/);
         // Automated mail: refused even when the caller asks to answer automated mail anyway.
-        assert.match(await refusedFor(answer(await fresh({automated:true,address:true}),{allowAutomated:true})),/automated/);
+        assert.match(await refusedFor(answer(await fresh({automated:true,address:true}),{allowAutomated:true}),'automated'),/automated/);
         // A signed message the sender wrote to someone else, replayed here (this domain isn't in its To or Cc): never answered.
-        assert.match(await refusedFor(answer(await fresh({from:'replayed@sender.example',to:['friend@elsewhere.example'],address:true}))),/wasn’t sent to this domain/);
+        assert.match(await refusedFor(answer(await fresh({from:'replayed@sender.example',to:['friend@elsewhere.example'],address:true})),'not_addressed'),/wasn’t sent to this domain/);
         // Per recipient across every workspace: two replies to this person from other built-in workspaces today use theirs.
         for (const other of ['ws_other_a','ws_other_b']) await db.query("INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES($1,$2,'shared@sender.example')",[other,unique('msg')]);
-        assert.match(await refusedFor(answer(await fresh({from:'shared@sender.example',address:true}))),/daily allowance/);
+        assert.match(await refusedFor(answer(await fresh({from:'shared@sender.example',address:true})),'recipient_cap'),/daily allowance/);
         // A suppressed address is never mailed.
         await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason) VALUES($1,$2,'blocked@sender.example',true,'bounce')",[unique('con'),wid]);
-        assert.match(await refusedFor(answer(await fresh({from:'blocked@sender.example',address:true}))),/suppressed/);
+        assert.match(await refusedFor(answer(await fresh({from:'blocked@sender.example',address:true})),'suppressed'),/suppressed/);
         // The daily caps: per recipient (a second message from the same sender is the last one today), then per workspace.
         ok(await answer(await fresh()),202);await nextDay();
-        assert.match(await refusedFor(answer(await fresh())),/daily allowance/);
+        assert.match(await refusedFor(answer(await fresh()),'recipient_cap'),/daily allowance/);
         ok(await answer(await fresh({from:'two@sender.example'})),202);await nextDay();
         ok(await answer(await fresh({from:'three@sender.example'})),202);await nextDay();
-        const capped=await refusedFor(answer(await fresh({from:'four@sender.example'})));
+        const capped=await refusedFor(answer(await fresh({from:'four@sender.example'})),'daily_cap');
         assert.match(capped,/daily allowance/);assert.doesNotMatch(capped,/\d/,'The detail never states the numbers.');
         // Ordinary sends from the built-in domain are still members only, and carry no reply detail.
-        const plain=error(await local('POST','/v1/emails/send',{from,to:'someone@sender.example',subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
-        assert.equal(plain.details[0].reply,undefined);
-        runtime.config.builtinScope='anyone';runtime.config.builtinReplies=null;
+        const sentPlain=await local('POST','/v1/emails/send',{from,to:'someone@sender.example',subject:'No',text:'No.'}),plain=error(sentPlain,422,'BUILTIN_DOMAIN_RECIPIENT');
+        assert.deepEqual([plain.details[0].reply,logged(sentPlain)?.code,logged(sentPlain)?.reason],[undefined,'BUILTIN_DOMAIN_RECIPIENT',undefined]);
+        // Switched off, a thread reply's refusal says so in the log.
+        runtime.config.builtinReplies=null;
+        const off=await answer(await fresh({address:true}));error(off,422,'BUILTIN_DOMAIN_RECIPIENT');assert.equal(logged(off)?.reason,'replies_off');
+        for (const mocked of consoles) mocked.mock.restore();
+        runtime.config.builtinScope='anyone';
       }
       // Forwarding's confirmation is an email from the built-in domain too (its links on the link domain): to anyone but a
       // member, refused the same way while it sends to members only; to a member's own address, sent.

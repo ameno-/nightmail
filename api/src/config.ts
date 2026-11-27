@@ -83,7 +83,8 @@ const values = z.object({
   NIGHTMAIL_BUILTIN_SEND_SCOPE: z.enum(['anyone', 'members']).default('anyone'),
   // Hosted only, off unless set: while built-in domains send to members only, a reply (replyToInboundThread) may go once
   // to the sender of the message it answers, when that sender passed authentication (src/builtin-domain.ts
-  // builtinReplyException). "<per workspace a day>,<per recipient a day>". Unset or not two numbers: off, as before.
+  // builtinReplyException). "<per workspace a day>,<per recipient a day>" (the second not for support's address, which every
+  // workspace may answer). Unset or not two numbers: off, as before.
   NIGHTMAIL_BUILTIN_REPLIES: z.string().regex(/^\d{1,5},\d{1,4}$/).optional(),
   // Hosted only: a list (lst_…) of the platform workspace above that everyone who joins the waitlist or signs up is
   // kept in as a contact, with properties to segment by (src/signups.ts). Unset, or not a list ID: nothing is written.
