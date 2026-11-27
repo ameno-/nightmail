@@ -70,7 +70,7 @@ function Crumbs({ doc }: { doc: PageDoc }) {
 /** A table: figures right-aligned in the page's mono, a row marked under the screen's blue bar (the size the verdict
  *  quotes), a row with a Nightmail figure in periwinkle. A last column of words (a plan's name) folds under the figures
  *  on a phone. */
-function TableBlock({ table }: { table: Table }) {
+function TableBlock({ table, sources = [] }: { table: Table; sources?: Source[] }) {
   const last = table.head.length - 1, fold = table.head.length > 3 && !table.numeric.includes(last), ours = table.head.indexOf('Nightmail')
   const align = (i: number) => table.numeric.includes(i) ? 'end' : undefined
   return <><table className="pp-table" data-fold={fold ? '' : undefined}>
@@ -82,13 +82,13 @@ function TableBlock({ table }: { table: Table }) {
   </table>
   {/* The whole note, closed: everything that makes the figures honest, in the page's HTML, out of a reader's way. */}
   {table.method && <details className="pp-qa pp-method"><summary><span className="pp-qa-q">How we compared</span></summary>
-    <p><Run text={table.method} /></p><p>{TRADEMARKS}</p>
+    <p><Run text={table.method} /></p>{sources.length > 0 && <Checked sources={sources} />}<p>{TRADEMARKS}</p>
   </details>}</>
 }
-function BlockView({ block }: { block: Block }) {
+function BlockView({ block, sources }: { block: Block; sources?: Source[] }) {
   if (block.kind === 'p') return <p className="pp-p"><Run text={block.text} /></p>
   if (block.kind === 'list') return <ul className="pp-list">{block.items.map((item, i) => <li key={i}><Run text={item} /></li>)}</ul>
-  return <TableBlock table={block} />
+  return <TableBlock table={block} sources={sources} />
 }
 
 /** The pages read, by day: "Checked 25 Nov 2026 on resend.com/pricing." */
@@ -100,12 +100,13 @@ function Checked({ sources }: { sources: Source[] }) {
   return <p>{days.map((day, d) => { const on = pages.filter(source => source.checked === day); return <Fragment key={day}>{`${d === 0 ? 'Checked ' : '; '}${dayOf(day)} on `}{on.map((source, i) => <Fragment key={source.url}>{join(i, on.length)}<a href={source.url} target="_blank" rel="noopener noreferrer">{pageName(source.url)}</a></Fragment>)}</Fragment> })}.</p>
 }
 
-// (Home is the wordmark at the top.)
-const SITE_LINKS = [{ title: 'Pricing', path: '/pricing' }, { title: 'Compare', path: '/compare' }, { title: 'API docs', path: '/docs' }, { title: 'Terms', path: '/legal/terms' }, { title: 'Privacy', path: '/legal/privacy' }]
+// (Home is the wordmark at the top; API docs last, the first to go when a row would pass six.)
+const SITE_LINKS = [{ title: 'Pricing', path: '/pricing' }, { title: 'Compare', path: '/compare' }, { title: 'Terms', path: '/legal/terms' }, { title: 'Privacy', path: '/legal/privacy' }, { title: 'API docs', path: '/docs' }]
 
 export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNode; start?: Start }) {
-  const folded = doc.sections.some(section => section.blocks.some(block => block.kind === 'table' && block.method))
-  const links = [...doc.related, ...SITE_LINKS].filter((link, i, all) => link.path !== doc.path && all.findIndex(other => other.path === link.path) === i)
+  const method = doc.sections.flatMap(section => section.blocks).find(block => block.kind === 'table' && block.method), folded = method !== undefined
+  // At most six, the page's own related pages first; /compare keeps all of its own (the index of the vendor and use pages).
+  const links = [...doc.related, ...SITE_LINKS].filter((link, i, all) => link.path !== doc.path && all.findIndex(other => other.path === link.path) === i).slice(0, doc.path === '/compare' ? undefined : 6)
   return <div className="pp" data-set={set ? '' : undefined}>
     <Crumbs doc={doc} />
     {set}
@@ -118,7 +119,8 @@ export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNo
       {doc.sections.map((section, i) => <section key={section.id} id={section.id} className="pp-section" aria-labelledby={`${section.id}-title`}>
         {/* Quiet, or a page's only section and a table (a vendor's price page): its title for screen readers only. */}
         <h2 id={`${section.id}-title`} className={section.quiet || (doc.sections.length === 1 && section.blocks[0]?.kind === 'table') ? 'sr-only' : 'pp-h2'}>{section.title}</h2>
-        {section.blocks.map((block, j) => <BlockView key={j} block={block} />)}
+        {/* The pages read go in the first table's How we compared, where it has one. */}
+        {section.blocks.map((block, j) => <BlockView key={j} block={block} sources={block === method ? doc.sources : undefined} />)}
       </section>)}
       {doc.questions.length > 0 && <section id="questions" className="pp-section" aria-labelledby="questions-title">
         <h2 id="questions-title" className="pp-h2">Questions</h2>
@@ -126,9 +128,9 @@ export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNo
             word), out of a visitor's way. */}
         {doc.questions.map(item => <details key={item.id} className="pp-qa"><summary><h3>{item.question}</h3></summary><p><Answer item={item} /></p></details>)}
       </section>}
-      {(doc.sources.length > 0 || !folded) && <footer className="pp-print">
+      {!folded && <footer className="pp-print">
         {doc.sources.length > 0 && <Checked sources={doc.sources} />}
-        {!folded && <p>{TRADEMARKS}</p>}
+        <p>{TRADEMARKS}</p>
       </footer>}
     </main>
     {/* One quiet row: the page's related pages, then the site's, each once. */}

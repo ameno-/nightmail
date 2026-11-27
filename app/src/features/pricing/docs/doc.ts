@@ -42,9 +42,7 @@ const host = (page: string) => new URL(page).hostname.replace(/^www\./, '')
 export const pageName = (page: string) => host(page) + new URL(page).pathname.replace(/\/$/, '')
 /** A site path's Markdown twin, the way the twins link one another. */
 const twin = (path: string) => url(path === '/' ? '/index.md' : `${path.replace(/[?#].*$/, '')}.md`)
-/** A table as a page shows it: one short line under it, its whole note folded into "How we compared" (page.tsx); the
- *  Markdown twin keeps the note where the line is (block, below). */
-export const folded = ({ caption, ...table }: Table, line: string): Table => ({ caption: [line], method: caption, ...table })
+export { folded } from '../page/shape.ts'
 const inline = (text: Text) => text.map(part => typeof part === 'string' ? part : 'href' in part ? `[${part.text}](${part.href.startsWith('/') ? twin(part.href) : part.href})` : part.ours).join('')
 const cell = (text: string) => text.replaceAll('|', '\\|').replaceAll('\n', ' ')
 export const trademarks = `Product names belong to their owners and only identify their products. ${productName} isn’t affiliated with them.`

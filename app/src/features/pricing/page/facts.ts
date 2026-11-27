@@ -28,8 +28,8 @@ export const rowLines = (rows: Row[]): Line[] => rows.flatMap(row => row.line ??
 export function factsFor(own: Line[]): string[] {
   const said = new Set<SharedFact>(), mine: string[] = []
   for (const line of own) {
-    if (typeof line !== 'string') said.add(line.shared)
-    const text = typeof line === 'string' ? line.trim().replace(/\.$/, '') : SHARED_FACTS[line.shared].text
+    if (typeof line !== 'string' && 'shared' in line) said.add(line.shared)
+    const text = typeof line === 'string' ? line.trim().replace(/\.$/, '') : 'shared' in line ? SHARED_FACTS[line.shared].text : line.text
     if (!mine.includes(text)) mine.push(text)
   }
   const rest = (Object.keys(SHARED_FACTS) as SharedFact[]).filter(id => !said.has(id) && !mine.some(text => SHARED_FACTS[id].covers?.test(text)))
@@ -48,8 +48,8 @@ export const wordCount = (text: string) => text.split(/\s+/).filter(word => /[\p
 export function briefFacts(own: Line[] = [], { free = true } = {}): string[] {
   const said = new Set<SharedFact>(), list: string[] = []
   for (const line of own) {
-    if (typeof line !== 'string') said.add(line.shared)
-    const text = typeof line === 'string' ? line.trim().replace(/\.$/, '') : SHARED_FACTS[line.shared].brief
+    if (typeof line !== 'string' && 'shared' in line) said.add(line.shared)
+    const text = typeof line === 'string' ? line.trim().replace(/\.$/, '') : 'shared' in line ? SHARED_FACTS[line.shared].brief : line.brief
     if (wordCount(text) <= BRIEF.words && !list.includes(text)) list.push(text)
   }
   for (const id of ['free', 'contacts', 'teammates', 'campaigns', 'domains', 'agents'] as SharedFact[]) if ((free || id !== 'free') && !said.has(id) && !list.some(text => SHARED_FACTS[id].covers?.test(text))) list.push(SHARED_FACTS[id].brief)

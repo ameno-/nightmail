@@ -28,6 +28,9 @@ export type Table = {
   numeric: number[]
 }
 /** A list's full: the longer list the Markdown twin keeps where the page shows a short one (facts.ts, briefFactsSection). */
+/** A table as a page shows it: one short line under it, its whole note folded into "How we compared" (page.tsx); the
+ *  Markdown twin keeps the note where the line is (docs/doc.ts). */
+export const folded = ({ caption, ...table }: Table, line: string): Table => ({ caption: [line], method: caption, ...table })
 export type Block = { kind: 'p'; text: Text } | { kind: 'list'; items: Text[]; full?: Text[] } | Table
 /** quiet: its title is for screen readers only (the price table straight under the verdict: page.tsx); a page whose
  *  only section is a table has it so without saying. */
