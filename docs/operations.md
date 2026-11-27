@@ -330,6 +330,13 @@ A sign-in, payment, pending link or cluster due for scoring has waited over two 
 2. Compare its `ABUSE_STAGE` duration, `ABUSE_STEP_CUT` reason and (for sign-ins) `ABUSE_SIGNIN_BATCH` time per item. A cut after progress requeues immediately. A sign-in job can advance discovery before folding a row: `signin_scan_block` in `abuse_state` is the next block of this pass; −1 means the indexed queue is draining. A full successful batch doubles its size back toward 16. With no progress the stage waits 30 s, 1, 2, 4, 8, then 15 minutes between tries (`ABUSE_STAGE_BACKOFF`).
 3. A database timeout, lost connection or serialization failure backs off the stage; it never marks the source version as failed.
 
+### abuse-sample-held
+Three sample runs in a row set no new marks because a database session whose start the app role can't see (another role) held the write lock on `sending_email_events`, or the check of open writers failed. While that lasts, workspaces with nothing to sample are read again every run (the cost #1007 removed). No mail is skipped. It clears by itself on the next run that sets marks.
+
+**An agent checks first**
+1. Workers Logs: `ABUSE_SAMPLE_MARKS_HELD` gives `reason` (`hidden`: a hidden session holds the lock; `unreadable`: the check failed; `missing`: no table), `writers` and `hidden`.
+2. As a role that can see every session: `SELECT a.usename,a.backend_type,a.xact_start,a.state FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE l.relation='sending_email_events'::regclass AND l.mode='RowExclusiveLock';` Expected: none from another role. Autovacuum takes a weaker lock and never holds marks.
+
 ### abuse-item-failing
 An item could not be folded, grouped or scored because of its data. Health shows the current count and age since the first failure separately for each kind, even before the stage-lag threshold. If scoring or grouping fails, no new alert can be raised for that work until it succeeds.
 

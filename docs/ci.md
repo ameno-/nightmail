@@ -130,9 +130,11 @@ An operation's `summary` is its name: the docs page's title in the browser tab a
 
 ### Accepted mail stamp
 
-Every statement that inserts into `sending_email_events` either stamps `created_at` with `clock_timestamp()` (for accepted mail, not simulated, at least) or carries `/* premerge-accepted: never (why) */` inside the statement. The abuse sample records how far it has read each workspace and relies on accepted mail being stamped with the database's clock inside the statement that writes it (`api/src/abuse.ts` `settledThrough`). Mail stamped with another clock, or with its transaction's start, can become visible behind that mark and never be read.
+Every statement that inserts into `sending_email_events` gives `created_at`, in its own projection, exactly `clock_timestamp()` or `CASE WHEN <type>='accepted' AND NOT <simulated> THEN clock_timestamp() ELSE … END`, or carries `/* premerge-accepted: never (why) */` right after its column list.
 
-**Fails when** an insert into `sending_email_events` has neither: no `created_at` stamped with `clock_timestamp()` and no marker. **Fix:** stamp accepted mail with `clock_timestamp()` in the insert, or add the marker if the statement can never write type `accepted`. The check is textual: it makes each writer say which.
+The abuse sample records how far it has read each workspace (`api/src/abuse.ts` `sampleBound`). It relies on this: an insert takes its write lock on the table when the statement starts, before any row is stamped, so a `clock_timestamp()` stamp is never earlier than the lock. A stamp from `now()`, `transaction_timestamp()` or `current_timestamp` (the transaction's start), from `statement_timestamp()` (just before the lock), from the column default or from another clock can become visible behind the mark and never be read. The check parses the value in `created_at`'s position, so a `clock_timestamp()` elsewhere in the statement doesn't count.
+
+**Fails when** an insert gives `created_at` anything else for accepted mail, leaves it to the default, or can't be read as `INSERT … (columns) SELECT/VALUES …`. **Fix:** stamp accepted mail with `clock_timestamp()` in the insert, or add the marker if the statement never writes type `accepted`.
 
 ### BYO role templates
 

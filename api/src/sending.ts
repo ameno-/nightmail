@@ -3448,7 +3448,7 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
     SELECT ${rowId('event')}, ${input.workspaceId}, mail.id, ${input.type}, ${input.providerId ?? null},
       ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, mail.simulated,
       -- Accepted mail (not simulated) is stamped with the database's clock inside this statement, never another clock: the
-      -- abuse sample's mark relies on it (abuse.ts settledThrough; check-premerge.ts holds every writer to it).
+      -- abuse sample's mark relies on it (abuse.ts sampleBound; check-premerge.ts holds every writer to it).
       CASE WHEN ${input.type}::text='accepted' AND NOT mail.simulated THEN clock_timestamp() ELSE ${input.createdAt ?? now()}::timestamptz END, ${sql.param(input.recipientHashes ?? null)}::text[]
     FROM mail ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (

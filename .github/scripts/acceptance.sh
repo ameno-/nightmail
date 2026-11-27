@@ -12,6 +12,8 @@ ALTER SYSTEM SET deadlock_timeout = '50ms';
 ALTER SYSTEM SET log_lock_waits = on;
 SELECT pg_reload_conf();
 CREATE ROLE fixture LOGIN NOSUPERUSER PASSWORD 'fixture';
+-- Another login role, so a test can hold a session whose start the fixture role can't see (as autovacuum's is).
+CREATE ROLE fixture_peer LOGIN NOSUPERUSER PASSWORD 'fixture-peer';
 CREATE DATABASE fixture OWNER fixture;
 -- These are small OLTP fixtures: don't spend the job compiling one-off plans.
 ALTER ROLE fixture SET jit = off;

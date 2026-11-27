@@ -34735,7 +34735,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       admission.mock.restore();
     });
   });
-  test('abuse monitoring: the sample remembers how far it read a workspace even when none of its mail was eligible, so a workspace whose mail is all its own costs nothing the next run, while one that then mails others is sampled at the next run; the mark never passes a transaction still open, nor comes within 15 minutes of the run, so mail that becomes visible late is still read', async t => {
+  test('abuse monitoring: the sample remembers how far it read a workspace even when none of its mail was eligible, so a workspace whose mail is all its own costs nothing the next run, while one that then mails others is sampled at the next run; the mark never passes the start of a session holding a write lock on sent-mail events (one whose start is hidden holds every new mark, and Health says so after three runs), nor comes within 15 minutes of the run, so mail that becomes visible late is still read, and nothing else (autovacuum, an idle transaction) holds it back', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const h = await abuseHarness(runtime, db), { abuse } = h;
       await h.hourly();
@@ -34751,7 +34751,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const own = [await workspace('own-mail-1'), await workspace('own-mail-2'), await workspace('own-mail-3')];
       for (const id of own) await h.mail({ workspace: id, snapshot: { testCampaignId: 'cmp_fixture' }, accepted: `now()-interval '30 minutes'` });
       const first = await sample();
-      assert.deepEqual([first.checked, first.items, (await marks(own)).length], [3, 0, 3], 'Read once, nothing to fingerprint, and how far it read is recorded.');
+      // On failure: which limit held the marks, and the sessions holding a write lock on sent-mail events.
+      const why = async () => `which limit held: ${JSON.stringify(await abuse.sampleBound(runtime))}`;
+      assert.deepEqual([first.checked, first.items, (await marks(own)).length], [3, 0, 3], `Read once, nothing to fingerprint, and how far it read is recorded. ${await why()}`);
       assert.deepEqual([(await sample()).checked, (await marks(own)).map(m => m.through)], [0, (await marks(own)).map(m => m.through)], 'The next run reads none of them.');
       // One of them mails someone outside it: sampled at the next run, and only it is read.
       await h.mail({ workspace: own[0]!, html: h.offer(1), accepted: `now()-interval '20 minutes'` });
@@ -34760,8 +34762,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
       // Mail that becomes visible only after a run read the workspace, stamped before the newest mail that run read:
       // never skipped while the stamp is within 15 minutes of the run (SAMPLE_SETTLE), the mark stopping that far back.
-      // 1. A writer whose transaction began 5 minutes before the run, held no transaction ID when the run looked (so the
-      //    oldest-open-writer bound cannot see it), and stamps its row with its own start.
+      // 1. A writer whose transaction began 5 minutes before the run, held no write lock on sent-mail events when the run
+      //    looked (so the open-writer bound cannot see it), and stamps its row with its own start (check-premerge refuses
+      //    that stamp in our writers; the margin still covers one).
       const late = await workspace('late-writer');
       await h.mail({ workspace: late, snapshot: { testCampaignId: 'cmp_fixture' }, accepted: `clock_timestamp()-interval '1 minute'` });
       assert.equal((await sample()).checked, 1);
@@ -34774,26 +34777,65 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await h.mail({ workspace: own[2]!, html: h.offer(3), accepted: `clock_timestamp()-interval '90 seconds'` }); // Committed after the run.
       assert.deepEqual([(await sample()).items, await sampledOf(own[2]!)], [1, true], 'Stamped before the last read: still read.');
 
-      // The other bound on its own (no margin): a transaction still open (it may hold an accepted event stamped now,
-      // visible only when it commits, however long that takes) stops the mark before its start, though this
-      // workspace's newest mail is later, so its mail is read again until it is gone.
-      const margin = abuse.SAMPLE_SETTLE.marginMs, open = new pg.Client({ connectionString: process.env.DATABASE_URL });
-      abuse.SAMPLE_SETTLE.marginMs = 0; await open.connect();
+      // The other bound on its own (no margin): only a session holding a write lock on sent-mail events (as every
+      // statement writing accepted mail does from its start) can still make mail visible stamped before now. Its start
+      // caps the mark; a session that holds none (autovacuum, a long read, an idle transaction) holds nothing back; one
+      // whose start this role can't see (another role, as autovacuum's) fails the run closed only if it holds the lock.
+      const margin = abuse.SAMPLE_SETTLE.marginMs, sessions: pg.Client[] = [];
+      const session = async (user?: { name: string; password: string }) => {
+        const url = new URL(process.env.DATABASE_URL!); if (user) { url.username = user.name; url.password = user.password; }
+        const client = new pg.Client({ connectionString: url.href }); await client.connect(); sessions.push(client); return client;
+      };
+      const peer = { name: 'fixture_peer', password: 'fixture-peer' }; // .github/scripts/acceptance.sh
+      const caughtUp = async (id: string) => (await db.query('SELECT s.sampled_through=(SELECT max(created_at) FROM sending_email_events WHERE workspace_id=$1) AS up FROM abuse_sampling s WHERE s.workspace_id=$1', [id])).rows[0]?.up;
+      const pidOf = async (client: pg.Client) => (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      const heldRuns = async () => (await db.query(`SELECT sample_held FROM abuse_state WHERE id='monitor'`)).rows[0].sample_held as number;
+      const ownMail = (id: string) => h.mail({ workspace: id, snapshot: { testCampaignId: 'cmp_fixture' } });
+      const grants = await fixtureDatabase(t); // Committed, so another session can use it.
+      await grants.query('GRANT INSERT ON sending_email_events TO fixture_peer');
+      cleanup(t, async () => { await grants.query('REVOKE INSERT ON sending_email_events FROM fixture_peer'); });
+      abuse.SAMPLE_SETTLE.marginMs = 0;
       try {
-        await open.query('BEGIN'); await open.query('SELECT txid_current()');
-        const started = (await open.query('SELECT xact_start::text AS at FROM pg_stat_activity WHERE pid=pg_backend_pid()')).rows[0].at as string;
-        await h.mail({ workspace: own[1]!, snapshot: { testCampaignId: 'cmp_fixture' } });
-        await sample(); const firstRead = await readAt(own[1]!);
+        // A visible transaction that holds no such lock: nothing held back.
+        const idle = await session(); await idle.query('BEGIN'); await idle.query('SELECT txid_current()');
+        const quiet = await workspace('lock-none'); await ownMail(quiet); await sample();
+        assert.equal(await caughtUp(quiet), true, `An open transaction without the lock holds nothing back. ${await why()}`);
+        await idle.query('ROLLBACK');
+        // A visible holder of the lock: the mark stops before its start, though the newest mail is later; read again while
+        // it is open; caught up once it is gone.
+        const writer = await session(); await writer.query('BEGIN'); await writer.query('LOCK TABLE sending_email_events IN ROW EXCLUSIVE MODE');
+        const started = (await writer.query('SELECT xact_start::text AS at FROM pg_stat_activity WHERE pid=pg_backend_pid()')).rows[0].at as string;
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM pg_locks WHERE pid=$1 AND relation='sending_email_events'::regclass AND mode='RowExclusiveLock'`, [await pidOf(writer)])).rows[0].n, 1, 'Its lock is in pg_locks.');
+        const capped = await workspace('lock-visible'); await ownMail(capped);
+        await sample(); const firstRead = await readAt(capped);
         const [held] = (await db.query(`SELECT s.sampled_through<$2::timestamptz AS before_open,(SELECT max(created_at) FROM sending_email_events WHERE workspace_id=$1)>$2::timestamptz AS newest_after
-          FROM abuse_sampling s WHERE s.workspace_id=$1`, [own[1], started])).rows;
-        assert.deepEqual(held, { before_open: true, newest_after: true }, 'Never past the start of a transaction still open.');
-        await sample(); assert.notEqual(await readAt(own[1]!), firstRead, 'Read again while it is open: nothing it might commit is skipped.');
-        await open.query('ROLLBACK');
-        // Once it is gone, one more read moves the mark up to the newest mail, and the run after does not read it.
-        await sample(); const caughtUp = await readAt(own[1]!);
+          FROM abuse_sampling s WHERE s.workspace_id=$1`, [capped, started])).rows;
+        assert.deepEqual([held, (await abuse.sampleBound(runtime)).rule], [{ before_open: true, newest_after: true }, 'writer'], `Never past the start of an open writer. ${await why()}`);
+        await sample(); assert.notEqual(await readAt(capped), firstRead, 'Read again while it is open: nothing it might commit is skipped.');
+        await writer.query('ROLLBACK');
+        await sample(); assert.equal(await caughtUp(capped), true, `Caught up once it is gone. ${await why()}`);
+        // A hidden transaction (another role: this role sees its transaction ID, not its start, as autovacuum's) that
+        // holds no such lock: nothing held back, no run held.
+        const vacuum = await session(peer); await vacuum.query('BEGIN'); await vacuum.query('SELECT txid_current()');
+        await db.query('SELECT pg_stat_clear_snapshot()');
+        assert.deepEqual((await db.query('SELECT backend_xid IS NOT NULL AS xid,xact_start IS NULL AS hidden FROM pg_stat_activity WHERE pid=$1', [await pidOf(vacuum)])).rows[0], { xid: true, hidden: true });
+        const unseen = await workspace('hidden-none'); await ownMail(unseen); await sample();
+        assert.deepEqual([await caughtUp(unseen), await heldRuns()], [true, 0], `A hidden session without the lock holds nothing. ${await why()}`);
+        await vacuum.query('ROLLBACK');
+        // A hidden holder of the lock: no new marks (the run is held, and says so); three runs in a row and Health warns;
+        // the next run after it ends sets them again.
+        const other = await session(peer); await other.query('BEGIN'); await other.query('LOCK TABLE sending_email_events IN ROW EXCLUSIVE MODE');
+        const stopped = await workspace('hidden-lock'); await ownMail(stopped);
+        for (let n = 0; n < 3; n++) await sample();
+        assert.deepEqual([(await marks([stopped])).length, await heldRuns(), (await abuse.sampleBound(runtime)).rule], [0, 3, 'hidden'], `A hidden writer holds every new mark. ${await why()}`);
+        const { healthTick } = await import('./src/health.js');
+        await healthTick(runtime, {}, { force: true, post: async () => {} });
+        const [warning] = (await db.query(`SELECT severity,words FROM health_alerts WHERE key='abuse-sample-held'`)).rows as { severity: string; words: string }[];
+        assert.ok(warning?.severity === 'warning' && /set no new marks 3 runs in a row/.test(warning.words), JSON.stringify(warning));
+        await other.query('ROLLBACK');
         await sample();
-        assert.deepEqual([await readAt(own[1]!), (await db.query('SELECT s.sampled_through=(SELECT max(created_at) FROM sending_email_events WHERE workspace_id=$1) AS caught_up FROM abuse_sampling s WHERE s.workspace_id=$1', [own[1]])).rows[0].caught_up], [caughtUp, true]);
-      } finally { abuse.SAMPLE_SETTLE.marginMs = margin; await open.query('ROLLBACK').catch(() => {}); await open.end(); }
+        assert.deepEqual([await caughtUp(stopped), await heldRuns()], [true, 0], `Set again once it is gone. ${await why()}`);
+      } finally { abuse.SAMPLE_SETTLE.marginMs = margin; for (const client of sessions) { await client.query('ROLLBACK').catch(() => {}); await client.end(); } }
     });
   });
 
@@ -45822,6 +45864,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const abuseDelivery = (high: number, unconfirmed: number) => lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: { late: 1, failed: high, expired: high, high, unconfirmed } } });
     assert.deepEqual(abuseDelivery(0,1), ["abuse-alerts-undelivered warning 2: 2 not delivered: 1 unposted over 60 minutes, 1 posted but unconfirmed (Slack didn't answer; check the channel)."]);
     assert.deepEqual(abuseDelivery(1,0), ['abuse-alerts-undelivered critical 3: 3 not delivered (1 high, unposted): 1 unposted over 60 minutes, 1 failed, 1 expired unposted.']);
+    // Sample runs in a row that set no marks because a hidden session held the write lock: quiet until three, then a
+    // warning; gone as soon as a run sets them again (the count is back to 0).
+    const held = (runs: number | null) => lines({ ...quiet(), database: { ...quiet().database!, abuseSampleHeld: runs } });
+    assert.deepEqual([held(null), held(0), held(2)], [[], [], []]);
+    assert.deepEqual(held(3), ['abuse-sample-held warning 3: the sample set no new marks 3 runs in a row: a database session it can\'t see the start of is writing sent-mail events, or its check failed (ABUSE_SAMPLE_MARKS_HELD in Workers logs). Until a run sets them, workspaces with nothing to sample are read again every run. No mail is skipped.']);
   });
 
   test('MX health: warnings stay on Health; critical opens, reminders and long recoveries are single plain Slack lines; short flaps stay quiet across ticks; operator and self-hosted access', async t => {
