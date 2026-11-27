@@ -84,7 +84,7 @@ try {
   const app = createApp({ fallback: async (c, next) => {
     // API failures must remain JSON, never an apparently successful SPA response.
     if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|i|docs\/(?:operations|tags))(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
-    const old = oldDashboardReference(c.req.path);
+    const old = oldDashboardReference(c.req.path, c.req.method);
     if (old) return old;
     if (homepage && c.req.path === '/') { const response = await homepage(c, next); if (response) return response; }
     return assets(c, async () => {

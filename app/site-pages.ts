@@ -1,4 +1,5 @@
-import { dashboardReference } from '../api/src/dashboard-reference.ts'
+import { pruneCss, usedNames } from './critical-css.ts'
+import { dashboardNoticeHtml, dashboardNoticeStyles, dashboardReference } from '../api/src/dashboard-reference.ts'
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runnerImport, type Plugin } from 'vite'
@@ -155,6 +156,8 @@ export function sitePages({ address }: { address: string | null }): Plugin {
         if (asset?.type !== 'asset') this.error(`The docs' stylesheet ${file} isn't in the bundle.`)
         return String((asset as { source: string | Uint8Array }).source)
       }).join('') }
+      // The servers' 410 notice uses the same reference styles, including on builds without painted pages.
+      this.emitFile({ type: 'asset', fileName: dashboardNoticeStyles, source: pruneCss(docsPaint.css, usedNames(dashboardNoticeHtml)) })
       const sheet = reference.size ? `/${this.getFileName(this.emitFile({ type: 'asset', name: 'docs-painted.css', source: paintedCss(docsPaint, files.template + [...reference.values()].map(drawn => drawn.html).join('')) }))}` : undefined
       for (const page of pages) {
         const card = linkCard(page.card)

@@ -3811,6 +3811,7 @@ describe('Public contract and authentication', () => {
     const { dashboardReference } = await import('./src/dashboard-reference.js');
     const published = ok(await http('GET', '/openapi.json'));
     assert.deepEqual(published, JSON.parse(await readFile(new URL('./openapi.json', import.meta.url), 'utf8')));
+    const sentence = 'This operation is only used by the dashboard from a signed-in session, so it is not in the public API reference.';
     const ids = new Set<string>();
     for (const [path, item] of Object.entries<Json>(registeredDocument.paths)) for (const [method, operation] of Object.entries<Json>(item)) {
       if (!operation.operationId) continue;
@@ -3823,9 +3824,25 @@ describe('Public contract and authentication', () => {
     assert.deepEqual(ids, new Set(dashboardReference.keys()));
     for (const [id, destination] of dashboardReference) {
       for (const path of [`/docs/api/${id}`, `/docs/api/${id}/`, `/docs/api/${id}.html`, `/docs/operations/${id}.md`]) {
+        let representationBytes: number | undefined;
         for (const agent of ['Mozilla/5.0', 'Googlebot', 'GPTBot']) for (const method of ['GET', 'HEAD']) {
           const response = await fetch(BASE + path, { method, headers: { 'user-agent': agent }, redirect: 'manual' });
-          assert.deepEqual([response.status, response.headers.get('location'), await response.text()], [destination ? 301 : 410, destination, ''], `${agent} ${method} ${path}`);
+          const body = await response.text(), markdown = path.endsWith('.md');
+          assert.deepEqual([response.status, response.headers.get('location')], [destination ? 301 : 410, destination], `${agent} ${method} ${path}`);
+          if (!destination) {
+            if (method === 'GET') representationBytes = Buffer.byteLength(body);
+            assert.equal(response.headers.get('content-length'), String(representationBytes));
+            assert.equal(response.headers.get('x-robots-tag'), 'noindex');
+            assert.equal(response.headers.get('content-type'), markdown ? 'text/markdown; charset=utf-8' : 'text/html; charset=utf-8');
+          }
+          if (destination || method === 'HEAD') assert.equal(body, '');
+          else if (markdown) assert.equal(body, `${sentence}\n\n[API docs](/docs)\n\n[the dashboard](/)\n`);
+          else {
+            assert.ok(body.includes(sentence));
+            assert.match(body, /<meta name="robots" content="noindex">/);
+            assert.deepEqual([...body.matchAll(/<a href="([^"]+)">([^<]+)<\/a>/g)].map(m => m.slice(1)), [['/docs', 'API docs'], ['/', 'the dashboard']]);
+            assert.doesNotMatch(body, /<script\b|<style\b| style=/i);
+          }
         }
       }
     }
@@ -50292,7 +50309,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             for (const path of ['/docs/api/'+id, '/docs/api/'+id+'/', '/docs/api/'+id+'.html', '/docs/operations/'+id+'.md']) {
               for (const agent of ['Mozilla/5.0','Googlebot','GPTBot']) for (const method of ['GET','HEAD']) {
                 const res = await worker.fetch(new Request('https://dev.bane.mx'+path, {method, headers:{'user-agent':agent}}), env);
-                assert.deepEqual([res.status,res.headers.get('location'),await res.text()], [destination ? 301 : 410,destination,''], path);
+                const body = await res.text();
+                assert.deepEqual([res.status,res.headers.get('location')], [destination ? 301 : 410,destination], path);
+                if (!destination) assert.equal(res.headers.get('x-robots-tag'), 'noindex');
+                if (destination || method === 'HEAD') assert.equal(body, '');
+                else {
+                  assert.ok(body.includes('This operation is only used by the dashboard from a signed-in session, so it is not in the public API reference.'));
+                  const links = path.endsWith('.md') ? ['[API docs](/docs)', '[the dashboard](/)'] : ['<a href="/docs">API docs</a>', '<a href="/">the dashboard</a>'];
+                  for (const link of links) assert.ok(body.includes(link), path);
+                }
               }
             }
           }

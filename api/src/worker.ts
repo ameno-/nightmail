@@ -361,7 +361,7 @@ export default {
       return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:healthService,multiTenant,...(origin ? { origin } : {}),analytics}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
     if (!linkHost && pathname.startsWith('/docs/') && (request.method === 'GET' || request.method === 'HEAD')) {
-      const old = oldDashboardReference(pathname);
+      const old = oldDashboardReference(pathname, request.method);
       if (old) return fastSecure(old);
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));

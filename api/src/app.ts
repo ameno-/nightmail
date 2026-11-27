@@ -502,7 +502,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.get('/llms.txt', async c => { const { doc, createLlmsText } = await loadDocs(); return markdown(c, createLlmsText(doc)); });
   app.get('/docs.md', async c => { const { doc, createMarkdownDocs } = await loadDocs(); return markdown(c, createMarkdownDocs(doc)!); });
   app.get('/docs/operations/*', async c => {
-    const old = oldDashboardReference(c.req.path);
+    const old = oldDashboardReference(c.req.path, c.req.method);
     if (old) return old;
     const { doc, createMarkdownDocs } = await loadDocs(); const file = c.req.path.slice('/docs/operations/'.length); const operation = /^[A-Za-z][A-Za-z0-9_]{0,63}\.md$/.test(file) ? file.slice(0, -3) : ''; const value = operation ? createMarkdownDocs(doc, operation) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented operation not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   app.get('/docs/tags/*', async c => { const { doc, createTagMarkdownDocs } = await loadDocs(); const file = c.req.path.slice('/docs/tags/'.length); const value = /^[a-z0-9-]{1,64}\.md$/.test(file) ? createTagMarkdownDocs(doc, file.slice(0, -3)) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented tag not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
