@@ -22,7 +22,8 @@ import { docsTitle, operationDescription, operationEntries, operationTitle } fro
 //   operations share the docs' card.
 // - The legal pages (features/legal): legal.html for /legal and legal/<slug>.html for each document in
 //   features/legal/content, named and described by its front matter, its card dated by its `updated`. Each document's
-//   Markdown is its twin (legal/<slug>.md), and the index's is legal.md. Their body isn't the dashboard's: the page
+//   Markdown, as this build says its announced changes (legal-markdown.ts), is its twin (legal/<slug>.md), and the index's
+//   is legal.md. Their body isn't the dashboard's: the page
 //   itself is painted in it for a visitor (features/legal/prerender.tsx, painted-page.ts), so a reader, a search engine
 //   or an agent gets the document's words in the first response. It is drawn by the app's own page from the same
 //   compiled Markdown the app shows (legal-markdown.ts), and the build stops if a document's HTML isn't in it byte for
@@ -112,8 +113,8 @@ export function sitePages({ address }: { address: string | null }): Plugin {
       const operations = operationEntries(document)
       const docsCard: CardWords = { name: 'docs', lines: ['API documentation.', `${operations.length} operations.`], caption: `The ${productName} API reference and ${GUIDE_NAMES.length} guides.` }
       const legal = readdirSync(legalContent).filter(file => file.endsWith('.md')).sort().map(file => {
-        const text = readFileSync(legalContent + file, 'utf8').replace(/\r\n/g, '\n'), doc = renderLegal(text, file)
-        return { slug: file.slice(0, -3), ...doc, body: text.replace(/^---\n[\s\S]*?\n---\n/, '').trim() }
+        const { markdown, ...doc } = renderLegal(readFileSync(legalContent + file, 'utf8'), file)
+        return { slug: file.slice(0, -3), ...doc, body: markdown.trim() }
       })
       const legalTitle = (title: string) => `${title} · ${productName.toLowerCase()}`
       const latest = legal.map(doc => doc.updated).sort((a, b) => Date.parse(b) - Date.parse(a))[0]!
