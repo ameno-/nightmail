@@ -606,10 +606,11 @@ export type SampleBound = {
  * every role, unlike pg_stat_activity, which hides another role's start. The instant is the earlier of:
  * - the start of the oldest session holding that lock (its rows are stamped at or after it): a writer that takes the
  *   lock after this check stamps after it;
- * - SAMPLE_SETTLE.marginMs before now: a stamp a little older than its statement, and the moment between a statement's
- *   start and its lock.
- * A session holding the lock whose start is hidden (another role), or a prepared transaction holding it (no session),
- * makes it unknown: null, never ignored. Sessions that hold no such lock (autovacuum, a long read, an idle transaction)
+ * - SAMPLE_SETTLE.marginMs before now: a stamp that is not this clock's inside its statement (a writer check-premerge
+ *   doesn't see, a clock step), for as long as the margin.
+ * A session holding the lock whose activity is hidden from this role (another role: its state and start read null), or
+ * a prepared transaction holding it (no session), makes it unknown: null, never ignored. One of ours shown idle has
+ * ended the transaction that held it since pg_locks was read (or begins one after the snapshot): nothing. Sessions that hold no such lock (autovacuum, a long read, an idle transaction)
  * hold nothing back. Waiting lock requests count too. The margin is measured from this statement's start, before it
  * reads pg_locks or pg_stat_activity (a snapshot taken at its first read in a transaction, so cleared first): a
  * lock-holder with no activity row has ended (its rows are visible to the reads, which all start after this check) or
@@ -625,15 +626,15 @@ export async function sampleBound(runtime: Hosted): Promise<SampleBound> {
         holders AS (SELECT DISTINCT l.pid FROM pg_locks l WHERE l.locktype='relation' AND l.mode='RowExclusiveLock'
           AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND l.relation IN (SELECT oid FROM target WHERE oid IS NOT NULL)
           AND l.pid IS DISTINCT FROM pg_backend_pid()),
-        seen AS (SELECT h.pid,a.pid IS NOT NULL AS active,a.xact_start FROM holders h LEFT JOIN pg_stat_activity a ON a.pid=h.pid),
+        seen AS (SELECT h.pid,a.pid IS NOT NULL AS listed,a.state IS NULL AS hidden,a.xact_start FROM holders h LEFT JOIN pg_stat_activity a ON a.pid=h.pid),
         margin AS (SELECT statement_timestamp()-make_interval(secs=>${SAMPLE_SETTLE.marginMs / 1000}) AS at)
         SELECT (SELECT bool_or(oid IS NOT NULL) FROM target) AS found,
           ${utc(sql`(least((SELECT at FROM margin),min(s.xact_start))-interval '1 microsecond')`)} AS at,
           coalesce(min(s.xact_start)<(SELECT at FROM margin),false) AS writer,
-          count(*) FILTER (WHERE s.pid IS NULL OR s.active)::int AS writers,
-          count(*) FILTER (WHERE s.pid IS NULL OR (s.active AND s.xact_start IS NULL))::int AS hidden,
+          count(*) FILTER (WHERE s.pid IS NULL OR (s.listed AND (s.hidden OR s.xact_start IS NOT NULL)))::int AS writers,
+          count(*) FILTER (WHERE s.pid IS NULL OR (s.listed AND s.hidden))::int AS hidden,
           extract(epoch FROM clock_timestamp()-min(s.xact_start))::float8 AS oldest,
-          array_agg(s.pid) FILTER (WHERE s.active) AS pids
+          array_agg(s.pid) FILTER (WHERE s.listed AND (s.hidden OR s.xact_start IS NOT NULL)) AS pids
         FROM seen s`);
     });
     if (!view?.found) return { at: null, rule: 'missing', ...none };
