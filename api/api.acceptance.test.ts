@@ -45987,6 +45987,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(await words('ses-signup-places:'+ohio),'3,000 sign-up places are open but Ohio has room for 2,800 more SES tenants. Raise the SES tenant count before these places fill, or lower the sign-up limit.');
       assert.equal(await words('ses-unread:'+virginia+':ses-tenants'),undefined,'fresh AWS zero is readable');
 
+      await db.query('UPDATE nightmail_signup_limit SET places=2801+(SELECT count(*) FROM nightmail_signups)');
+      await db.query("INSERT INTO nightmail_waitlist(email,let_in_at) VALUES('held-capacity@example.test',now())");
+      await tick();
+      assert.match(await words('ses-signup-places:'+ohio) ?? '', /2,800 sign-up places are open and 1 is held/);
+      const { sesHealth } = await import('./src/ses-quota-health.js');
+      const reminders = (await sesHealth(runtime)).findings.filter(f=>['ses-signup-places','ses-tenants','ses-identities','ses-configuration-sets'].includes(f.kind));
+      assert.equal(reminders.length,4); assert.ok(reminders.every(f=>f.remindMinutes===1440));
       used=9000; await elect(); await sampleSesCounts(runtime, normal);
       await db.query('UPDATE provider_account_limits SET sent_last_24_hours=90000 WHERE region=$1',[ohio]);
       await db.query('UPDATE nightmail_signup_limit SET places=500'); await ageAlerts();
@@ -46006,24 +46013,50 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const state=(await db.query('SELECT generated_at FROM health_state')).rows[0];
         assert.ok(Date.now()-new Date(state.generated_at).getTime()<120000);
       };
-      for (const mode of ['hanging','denied','empty','partial','stale'] as const) {
+      const warnings = t.mock.method(console,'warn',()=>{});
+      for (const mode of ['hanging','denied','throttled','empty','partial','stale'] as const) {
         stamp = new Date(stamp.getTime()+1000);
         await elect();
         let aborted = false;
+        const batches: number[] = [], before = warnings.mock.calls.length;
         await sampleSesCounts(runtime, async (pool, query, signal) => {
           if (pool.region!==ohio) return normal(pool,query,signal);
+          batches.push(query.MetricDataQueries!.length);
           if (mode==='hanging') { signal.addEventListener('abort',()=>{aborted=true;}); return new Promise(()=>{}); }
-          if (mode==='denied') throw new Error('AccessDenied');
+          if (mode==='denied' || mode==='throttled') throw Object.assign(new Error('private response text'), {
+            name: mode==='denied' ? 'AccessDeniedException' : 'ThrottlingException', $metadata:{httpStatusCode:mode==='denied' ? 403 : 429} });
           if (mode==='empty') return [];
           const bad = mode==='stale' ? series('tenant',0,new Date(Date.now()-2*3600000)) : { ...series('tenant',0), StatusCode: 'PartialData' as const };
           return [bad,series('emailidentity',7200)];
         },100);
+        const lines=warnings.mock.calls.slice(before).map(c=>JSON.parse(String(c.arguments[0]))).filter(l=>l.code==='SES_QUOTA_READ_FAILED');
+        assert.equal(lines.length,batches.length); assert.ok(lines.every(l=>l.region===ohio && !JSON.stringify(l).includes('private response text')));
+        if (['denied','throttled','hanging'].includes(mode)) {
+          assert.deepEqual(batches,[6,3]); assert.deepEqual(lines.map(l=>l.batch),['usage+quota','usage']);
+          assert.ok(lines.every(l=>l.cause===({denied:'AccessDeniedException',throttled:'ThrottlingException',hanging:'Timeout'})[mode as 'denied'|'throttled'|'hanging']
+            && l.httpStatus===(mode==='denied'?403:mode==='throttled'?429:null)));
+        } else {
+          assert.deepEqual(batches,[6]); assert.equal(lines[0].series.tenant,mode==='empty'?'Missing':mode==='partial'?'PartialData':'Complete:no-usable-point');
+        }
         if (mode==='hanging') assert.ok(aborted,'the SDK receives the deadline even when the stub never settles');
         await isolated();
         assert.deepEqual((await db.query('SELECT last_good FROM ses_quota_samples WHERE region=$1',[ohio])).rows[0].last_good.Tenant,snapshot.Tenant);
         if (mode==='partial') assert.match(await words('ses-identities:'+ohio) ?? '', /72%.*limit is from the repository/);
         assert.equal(await words('ses-unread:'+virginia+':ses-tenants'),undefined);
       }
+      // A rejected quota expression cannot hide usable counts; the three-query fallback has no expressions.
+      await elect();
+      const requests:number[] = [];
+      await sampleSesCounts(runtime,async(pool,query,signal)=>{
+        if (pool.region!==ohio) return normal(pool,query,signal);
+        requests.push(query.MetricDataQueries!.length);
+        if (query.MetricDataQueries!.some(q=>q.Expression)) throw Object.assign(new Error(),{name:'ValidationError',$metadata:{httpStatusCode:400}});
+        return [series('tenant',9000,new Date(snapshot.Tenant.at)),series('emailidentity',7200),series('configurationset',0)];
+      });
+      assert.deepEqual(requests,[6,3]); await tick();
+      assert.match(await words('ses-tenants:'+ohio) ?? '', /90%.*limit is from the repository/);
+      await elect(); await sampleSesCounts(runtime,async()=>[]); await isolated();
+
       // Health can finish WHILE the elected request is outstanding, without needing its timeout to fire.
       await elect();
       let entered!: () => void, release!: () => void;
@@ -46079,17 +46112,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const event = (type:string,code:string, simulated=false) => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,data,simulated,created_at)
         VALUES ($1,$2,$3,$4,$1,jsonb_build_object('code',$5::text),$6,$7::timestamptz)`,[unique('cap-event'),wid,mail,type,code,simulated,new Date(minute+1000)]);
       await event('accepted',''); await event('accepted',''); await event('accepted','',true);
-      const prior = (n:number) => ({[key]:{good:{},minutes:Array.from({length:n},(_,i)=>({at:minute-(i+1)*60000,recipients:60,limit:1,throttled:0,waiting:0}))}});
-      const find = async (kind:string,n=9) => (await sesHealth(runtime,prior(n))).findings.find(f=>f.kind===kind);
-      assert.equal(await find('ses-rate',8),undefined);
+      const prior = (n:number, impacted:number) => ({[key]:{good:{},minutes:Array.from({length:n},(_,i)=>({
+        at:minute-(i+1)*60000,recipients:63,limit:1,throttled:i<impacted?1:0,waiting:3 // Old shape: these waits had no duration.
+      }))}});
+      const find = async (kind:string,n=9,impacted=0) => (await sesHealth(runtime,prior(n,impacted))).findings.find(f=>f.kind===kind);
+      assert.equal(await find('ses-rate',8,5),undefined);
       assert.equal((await find('ses-rate'))?.severity,'warning','running at the intended pace is never a page');
       await event('provider_throttled','SES_DAILY_QUOTA_EXHAUSTED');
-      assert.equal((await find('ses-rate'))?.severity,'warning','a daily cap is not a send-rate throttle');
-      await event('provider_throttled','SES_THROTTLED');
-      assert.equal((await find('ses-rate'))?.severity,'critical');
+      assert.equal((await find('ses-rate',9,4))?.severity,'warning','a daily cap is not a send-rate throttle');
+      for (let i=0;i<6;i++) await event('provider_throttled','SES_THROTTLED');
+      assert.equal((await find('ses-rate'))?.severity,'warning','many throttles in one minute are still one impacted minute');
+      assert.equal((await find('ses-rate',9,3))?.severity,'warning');
+      assert.equal((await find('ses-rate',9,4))?.severity,'critical');
       await db.query("DELETE FROM sending_email_events WHERE email_id=$1 AND type='provider_throttled'",[mail]);
       await event('dispatch_deferred','PACING_WAIT');
-      assert.match((await find('ses-rate'))?.words ?? '', /Eligible transactional mail waited/);
+      await event('dispatch_attempt','');
+      await db.query(`UPDATE sending_email_events SET external_id=(CASE WHEN type='dispatch_attempt' THEN 'attempt-start:' ELSE 'attempt-result:' END)||email_id||':1',
+        created_at=CASE WHEN type='dispatch_attempt' THEN $2::timestamptz-interval '5 seconds' ELSE $2::timestamptz END
+        WHERE email_id=$1 AND type IN ('dispatch_attempt','dispatch_deferred')`,[mail,new Date(minute+1000)]);
+      assert.equal((await find('ses-rate',9,4))?.severity,'warning','a normal five-second slot wait does not count');
+      await db.query("UPDATE sending_email_events SET created_at=created_at-interval '1 millisecond' WHERE email_id=$1 AND type='dispatch_attempt'",[mail]);
+      assert.equal((await find('ses-rate'))?.severity,'warning','one long eligible wait cannot page');
+      assert.match((await find('ses-rate',9,4))?.words ?? '', /In 5 of 10 minutes/);
       await db.query("UPDATE sending_emails SET feedback_topic_arn='arn:aws:sns:us-east-2:999999999999:byo' WHERE id=$1",[mail]);
       assert.equal(await find('ses-rate'),undefined,'mail sent by another account is not regional hosted usage');
 
@@ -46105,21 +46149,60 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('SES capacity: incompatible stored observations and rollup memory cannot stop the same Health tick', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { healthTick } = await import('./src/health.js');
+      runtime.config.multiTenant=runtime.config.liveEnabled=true;
+      const region='us-east-2', account='111122223333', high={at:Date.now()-60000,used:9000,limit:10000,source:'AWS'};
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES($1,$2,'ready')",[region,account]);
+      await db.query(`INSERT INTO ses_quota_samples(region,account,attempted_at,finished_at,latest,last_good) VALUES($1,$2,now(),now(),$3,$3)`,
+        [region,account,JSON.stringify({Tenant:high})]);
+      const tick=()=>healthTick(runtime,{queues:[{name:'feedback-dlq',depth:1,oldestMs:3000}]},{force:true,post:async()=>{}});
+      await tick();
+      const memory=async()=>(await db.query("SELECT rollup->'memory'->'ses' AS ses FROM health_state")).rows[0].ses;
+      const healthy=await memory();
+      const logs=t.mock.method(console,'warn',()=>{});
+      for (const [label,latest,good,remembered] of [
+        ['bad timestamp',{}, {Tenant:{...high,at:'yesterday'}}, healthy],
+        ['null latest',null,{Tenant:high},healthy],
+        ['other row shape',{resources:[high]}, {},healthy],
+        ['other memory shape',{Tenant:high},{Tenant:high},{[account+':'+region]:{minutes:42}}],
+      ] as const) {
+        await db.query('UPDATE ses_quota_samples SET latest=$1::jsonb,last_good=$2::jsonb',[JSON.stringify(latest),JSON.stringify(good)]);
+        await db.query("UPDATE health_state SET generated_at='2001-01-01',rollup=jsonb_set(rollup,'{memory,ses}',$1::jsonb)",[JSON.stringify(remembered)]);
+        await db.query("DELETE FROM health_alerts WHERE key='dead-letters:feedback-dlq'; UPDATE health_alerts SET seen_at=now()-interval '5 minutes'");
+        const started=performance.now(); await tick(); const ms=Math.round(performance.now()-started);
+        t.diagnostic(`SES capacity: ${label}: full Health tick ${ms} ms`); assert.ok(ms<1000);
+        assert.equal((await db.query("SELECT generated_at>now()-interval '1 minute' AS wrote FROM health_state")).rows[0].wrote,true);
+        assert.deepEqual(await memory(),remembered);
+        const rows=(await db.query("SELECT key,severity,words FROM health_alerts")).rows;
+        assert.ok(rows.some(r=>r.key==='ses-tenants:'+region && r.severity==='critical'));
+        assert.ok(rows.some(r=>r.key==='dead-letters:feedback-dlq'));
+        assert.ok(rows.some(r=>r.key==='ses-unread:section' && /could not be read/.test(r.words)));
+      }
+      assert.equal(logs.mock.calls.filter(c=>String(c.arguments[0]).includes('SES_HEALTH_UNREADABLE')).length,1);
+    });
+  });
+
   test('SES capacity: locked sampler storage costs its own reading; unrelated Health writes still commit', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { sampleSesCounts }=await import('./src/ses-quota-health.js'), { healthTick }=await import('./src/health.js');
       runtime.config.multiTenant=runtime.config.liveEnabled=true;
-      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES('us-east-2','111122223333','ready')");
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES('us-east-2','111122223333','ready'),('us-east-1','111122223333','ready')");
       const locker=new pg.Client({connectionString:FIXTURE_DATABASE_URL}); await locker.connect();
       try {
-        await locker.query('BEGIN'); await locker.query('LOCK TABLE ses_quota_samples IN ACCESS EXCLUSIVE MODE');
+        await locker.query('BEGIN'); await locker.query("SET LOCAL lock_timeout='2s'");
+        await locker.query('LOCK TABLE ses_quota_samples,hosted_tenant_ownership,hosted_adoptions,nightmail_waitlist,nightmail_signup_limit IN ACCESS EXCLUSIVE MODE');
         let calls=0;
         await sampleSesCounts(runtime,async()=>{calls++;return [];});
         assert.equal(calls,0);
         await db.query("UPDATE health_state SET generated_at='2001-01-01'");
+        await db.query("DELETE FROM health_alerts WHERE key='dead-letters:feedback-dlq'");
+        const started=performance.now();
         await healthTick(runtime,{queues:[{name:'feedback-dlq',depth:1,oldestMs:3000}]},{force:true,post:async()=>{}});
+        const ms=Math.round(performance.now()-started); t.diagnostic(`SES capacity: five locked tables, two regions: full Health tick ${ms} ms`); assert.ok(ms<1000);
         assert.equal((await db.query("SELECT generated_at>now()-interval '1 minute' AS wrote FROM health_state")).rows[0].wrote,true);
-        assert.equal((await db.query("SELECT count(*)::int AS n FROM health_alerts WHERE key IN ('dead-letters:feedback-dlq','ses-unread:us-east-2:ses-tenants')")).rows[0].n,2);
+        assert.equal((await db.query("SELECT count(*)::int AS n FROM health_alerts WHERE key IN ('dead-letters:feedback-dlq','ses-unread:section')")).rows[0].n,2);
       } finally { await locker.query('ROLLBACK'); await locker.end(); }
     });
   });
