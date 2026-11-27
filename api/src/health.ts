@@ -513,6 +513,7 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
     statements += PROBES * 4; // Each probe: BEGIN, the limits, the read, COMMIT.
     const sample = await measure(runtime, input.queues ?? []);
     const ses = await sesHealth(runtime, memory.ses);
+    statements += ses.statements;
     const { rollup, findings, blind } = evaluate(sample, memory, Math.floor(Date.now() / 1000), config.databaseDiskBytes ?? null);
     findings.push(...ses.findings);
     if (ses.registryUnknown) blind.add('ses');
@@ -562,7 +563,7 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
     const spend = findings.find(f => f.kind === 'support-ai-cost');
     if (spend && url) await run(1, tx => supportCostAlert(tx, spend.value, SUPPORT_AI.dailyLineUsd));
     const known = new Map(held.map(a => [a.key, a]));
-    if (ses.failure && !known.has('ses-unread:section')) log('warn', { code: 'SES_HEALTH_UNREADABLE', cause: ses.failure });
+    if (ses.failure && !known.has('ses-unread:section')) log('warn', { code: 'SES_HEALTH_UNREADABLE', cause: ses.failure, ms: ses.ms, statements: ses.statements });
     const critical = findings.filter(f => f.severity === 'critical');
     const canClear = (a: Held) => wasPaged(a) && a.age - a.unseen >= TICK.longMinutes * 60;
     // As before, an overflow card stands for all its keys and only counts as sent if Slack accepted it.

@@ -1,11 +1,13 @@
 import type { GetMetricDataCommandInput, MetricDataResult } from '@aws-sdk/client-cloudwatch';
 import { z } from 'zod';
-import { sql, type SQL } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import type { Pool as PgPool, PoolClient, QueryResultRow } from 'pg';
+import { sql, type SQL, type Assume } from 'drizzle-orm';
 import { assertSharedAccount, databaseCodeOf, log, type Runtime, type Database, type DbExecutor } from './core.js';
 import { WRITE_LIMITS } from './health-counters.js';
 import type { Finding } from './health.js';
 import { regionLabels } from './region-labels.js';
-import { readPlaces } from './signups.js';
+import { placesRow, withOpen, type Places } from './signups.js';
 
 const counts = {
   Tenant: { kind: 'ses-tenants', label: 'tenants', ask: 'SES tenant count', warn: .70, critical: .85 },
@@ -37,37 +39,19 @@ function superseded(at: number, used: number, last: z.infer<typeof point> | unde
 type Reader = (pool: Pool, query: GetMetricDataCommandInput, signal: AbortSignal) => Promise<MetricDataResult[]>;
 type HealthRuntime = Pick<Runtime, 'config' | 'db'>;
 const pools = sql`SELECT region,aws_account_id AS account FROM provider_pool_regions WHERE sending_state='ready' ORDER BY region`;
-const healthBudgetMs = 500;
+const healthBudgetMs = 1500;
 class HealthDeadline extends Error {}
 function remaining(deadline: number) {
   const ms = Math.floor(deadline - performance.now());
   if (ms < 1) throw new HealthDeadline();
   return ms;
 }
-// The sampler uses ordinary write limits. Inside Health every acquisition and query spends
-// the SAME budget. A late pool checkout rolls back before issuing a probe.
-function probes(db: Database, deadline?: number) {
+// The sampler elects, releases the transaction for the network call, then persists its result.
+function probes(db: Database) {
   async function run<T>(work: (tx: DbExecutor) => Promise<T>): Promise<T | null> {
-    if (deadline !== undefined) remaining(deadline);
     try {
-      return await db.transaction(async tx => {
-        if (deadline === undefined) await tx.execute(WRITE_LIMITS);
-        else {
-          const ms = String(Math.max(1, remaining(deadline) - 20)); // Leave room for rollback.
-          await tx.execute(sql`SELECT set_config('lock_timeout',${ms},true),set_config('statement_timeout',${ms},true)`);
-          remaining(deadline);
-        }
-        return work(tx);
-      });
-    } catch (error) {
-      if (deadline !== undefined) {
-        const code = databaseCodeOf(error);
-        if (error instanceof HealthDeadline || code==='55P03' || code==='57014') throw new HealthDeadline();
-        // Missing source storage is already reported per finding and must not hide independent sources.
-        if (code!=='42P01') throw error;
-      }
-      return null;
-    }
+      return await db.transaction(async tx => { await tx.execute(WRITE_LIMITS); return work(tx); });
+    } catch { return null; }
   }
   return { run, first: <T extends Record<string, unknown>>(query: SQL) => run(async tx => (await tx.execute<T>(query)).rows[0] ?? null) };
 }
@@ -209,37 +193,129 @@ function setup(pool: Pool) {
     bool_or(last_error ~* 'throttl|too.?many.?requests') AS throttled FROM due`;
 }
 
-export async function sesHealth(rt: HealthRuntime, previous: SesMemory = {}): Promise<Result> {
+// Resolve optional relations before composing the batched SELECT. A missing table must cost only
+// the sources that need it; referring to it even in an untaken CASE would abort the transaction.
+const tables = {
+  stored: ['ses_quota_samples'], cache: ['provider_account_limits'],
+  traffic: ['sending_email_events','sending_emails','provider_feedback_history'],
+  jobs: ['jobs','provider_connections','builtin_domains','domain_claims'],
+  places: ['nightmail_signup_limit','nightmail_signups','nightmail_waitlist'],
+  Tenant: ['hosted_tenant_ownership'], EmailIdentity: ['domain_claims','domain_sending_bindings','provider_connections','builtin_parent','hosted_adoptions'],
+  ConfigurationSet: ['provider_pool_regions'],
+};
+type Query = <T extends Record<string, unknown>>(statement: SQL) => Promise<Assume<T, QueryResultRow>[]>;
+type Readings = Pool & {
+  stored: { fresh: boolean; logDue: boolean; latest: Points; last_good: Points } | null;
+  cache: Quota | null; traffic: Pick<Minute,'recipients'|'throttled'|'longWaits'> | null;
+  jobs: Setup | null; places: Omit<Places,'open'> | null;
+};
+type SourceLog = Pool & { sources: Record<string,string> };
+
+export async function sesHealth(rt: HealthRuntime, previous: SesMemory = {}): Promise<Result & { ms: number; statements: number }> {
   const empty: Result = { findings: [], blind: new Set(), memory: {}, registryUnknown: false };
-  if (!enabled(rt)) return empty;
+  if (!enabled(rt)) return { ...empty, ms: 0, statements: 0 };
   previous = { ...previous }; // Keep any regional resets even if a later probe exhausts the deadline.
-  const deadline = performance.now()+healthBudgetMs;
+  const start = performance.now(), deadline = start + healthBudgetMs;
+  const elapsed = () => Math.round(performance.now() - start);
+  const pool = (rt.db as Database & { $client?: PgPool }).$client;
+  let client: PoolClient | undefined, expired = false, statements = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const expired = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new HealthDeadline()), healthBudgetMs); });
-    const result = await Promise.race([expired, collect(probes(rt.db, deadline), previous)]);
-    remaining(deadline);
+  const logs: SourceLog[] = [];
+  const checkTime = () => {
+    if (expired) throw new HealthDeadline();
+    return remaining(deadline);
+  };
+  const executor = (tx: DbExecutor): Query => async <T extends Record<string, unknown>>(statement: SQL) => {
+    checkTime();
+    statements++;
+    const { rows } = await tx.execute<T>(statement);
+    checkTime();
+    return rows;
+  };
+  const work = async (query: Query) => {
+    const ms = String(Math.max(1, remaining(deadline) - 100));
+    await query(sql`SELECT set_config('lock_timeout','400',true),set_config('statement_timeout',${ms},true),
+      CASE WHEN ${!!client} AND current_setting('transaction_timeout',true) IS NOT NULL
+        THEN set_config('transaction_timeout',${ms},true) END`);
+    return collect(query, previous, logs);
+  };
+  // Health has a single pooled connection in the Worker. Bound checkout, SQL and COMMIT,
+  // and destroy a failed or overdue transaction instead of queuing a rollback on a stalled socket.
+  let committed = false;
+  let disconnected!: (error: Error) => void;
+  const transaction = async () => {
+    if (!pool || !('totalCount' in pool)) { // Caller already owns a connection/transaction.
+      statements += 2;
+      return rt.db.transaction(tx => work(executor(tx)));
+    }
+    const acquired = await pool.connect();
+    if (expired) { acquired.release(); throw new HealthDeadline(); }
+    client = acquired;
+    client.on('error', disconnected);
+    const query = executor(drizzle(client));
+    await query(sql`BEGIN`);
+    const result = await work(query);
+    await query(sql`COMMIT`);
+    committed = true;
     return result;
+  };
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      disconnected = reject;
+      timer = setTimeout(() => { expired = true; reject(new HealthDeadline()); }, healthBudgetMs);
+    });
+    const result = await Promise.race([transaction(), timeout]);
+    remaining(deadline);
+    const ms = elapsed();
+    for (const { region, sources } of logs) log('info', { code: 'SES_QUOTA_SOURCES', region, sources, ms, statements });
+    return { ...result, ms, statements };
   } catch (error) {
-    return { ...empty, memory: previous, registryUnknown: true,
-      failure: error instanceof HealthDeadline ? 'Deadline' : error instanceof z.ZodError ? 'InvalidData' : 'ReadError',
+    const code = databaseCodeOf(error);
+    const timedOut = error instanceof HealthDeadline || code==='55P03' || code==='57014' || code==='25P04';
+    return { ...empty, memory: previous, registryUnknown: true, ms: elapsed(), statements,
+      failure: timedOut ? 'Deadline' : error instanceof z.ZodError ? 'InvalidData' : 'ReadError',
       findings: [{ key: 'ses-unread:section', kind: 'ses-unread', severity: 'warning', value: 1,
         words: 'SES capacity could not be read. Previous SES findings are being kept.', remindMinutes: 60 }] };
-  } finally { clearTimeout(timer); }
+  } finally {
+    expired = true;
+    clearTimeout(timer);
+    client?.removeListener('error', disconnected);
+    client?.release(!committed);
+  }
 }
-async function collect(db: ReturnType<typeof probes>, previous: SesMemory): Promise<Result> {
+async function collect(query: Query, previous: SesMemory, logs: SourceLog[]): Promise<Result> {
   const result: Result = { findings: [], blind: new Set(), memory: {}, registryUnknown: false };
-  const active = await db.run(async tx => (await tx.execute<Pool>(pools)).rows);
-  if (!active) throw new Error('Unreadable region registry');
-  for (const pool of active) {
-    const { region, account } = pool, place = regionLabels[region] ?? region, key = account + ':' + region;
+  const relations = [...new Set(Object.values(tables).flat())];
+  const active = await query<Pool & {missing: string[]}>(sql`SELECT p.*,
+    ARRAY(SELECT name FROM unnest(${sql.param(relations)}::text[]) name WHERE to_regclass(name) IS NULL) AS missing FROM (${pools}) p`);
+  if (!active.length) return result;
+  const missing = new Set(active[0]!.missing);
+  const available = (source: keyof typeof tables) => tables[source].every(table => !missing.has(table));
+  const row = (source: keyof typeof tables, statement: SQL) =>
+    available(source) ? sql`(SELECT row_to_json(r) FROM (${statement}) r)` : sql`NULL::json`;
+  const now = Date.now(), minute = Math.floor(now/MIN)*MIN-MIN;
+  const reads = active.map(pool => {
+    const { region, account } = pool, key = account + ':' + region;
     const parsed = regionMemory.optional().safeParse(previous[key]);
     if (!parsed.success) {
       delete previous[key];
       log('warn', { code: 'SES_HEALTH_MEMORY_RESET', region });
-    }
+    } else if (parsed.data) previous[key] = parsed.data;
+    return sql`SELECT ${region}::text AS region, ${account}::text AS account,
+      ${row('stored',sql`SELECT finished_at>=now()-interval '17 minutes' AND (finished_at=attempted_at OR attempted_at>now()-interval '8 seconds') AS fresh,
+        logged_day IS DISTINCT FROM (now() AT TIME ZONE 'UTC')::date AND finished_at=attempted_at AS "logDue", latest,last_good
+        FROM ses_quota_samples WHERE account=${account} AND region=${region}`)} AS stored,
+      ${row('cache',sql`SELECT extract(epoch FROM checked_at)::float8*1000 AS at,max_24_hour_send AS daily,sent_last_24_hours AS used,max_send_rate AS rate
+        FROM provider_account_limits WHERE aws_account_id=${account} AND region=${region} AND isfinite(checked_at)`)} AS cache,
+      ${row('traffic',throughput(pool,minute))} AS traffic, ${row('jobs',setup(pool))} AS jobs,
+      ${region==='us-east-2' ? row('places',placesRow) : sql`NULL::json`} AS places`;
+  });
+  const readings = await query<Readings>(sql.join(reads,sql` UNION ALL `));
+  const due: SourceLog[] = [];
+  for (const pool of readings) {
+    const { region, account, stored, cache, traffic, jobs } = pool, place = regionLabels[region] ?? region, key = account + ':' + region;
     // Empty memory is not recovery: a blind resource keeps its open critical; a fresh high AWS point reports it again.
-    const prior = parsed.data, now = Date.now(), minute = Math.floor(now/MIN)*MIN-MIN;
+    const prior = previous[key], places = pool.places && withOpen(pool.places);
     const add = (kind: Finding['kind'], severity: Finding['severity'], value: number, words: string, subject = region) =>
       result.findings.push({ key: kind + ':' + subject, kind, severity, value, words,
         remindMinutes: kind==='ses-signup-places' || resources.some(r=>counts[r].kind===kind) ? 1440 : 60 });
@@ -247,16 +323,14 @@ async function collect(db: ReturnType<typeof probes>, previous: SesMemory): Prom
       result.blind.add(kind + ':' + region);
       add('ses-unread', 'warning', 1, words, region + ':' + kind);
     };
-    const stored = await db.first<{ fresh: boolean; logDue: boolean; latest: Points; last_good: Points }>(sql`SELECT
-      finished_at>=now()-interval '17 minutes' AND (finished_at=attempted_at OR attempted_at>now()-interval '8 seconds') AS fresh,
-      logged_day IS DISTINCT FROM (now() AT TIME ZONE 'UTC')::date AND finished_at=attempted_at AS "logDue", latest,last_good
-      FROM ses_quota_samples WHERE account=${account} AND region=${region}`);
     const latest = readPoints(stored?.latest), good = readPoints(stored?.last_good, prior?.good);
-    const cache = await db.first<Quota>(sql`SELECT extract(epoch FROM checked_at)::float8*1000 AS at,max_24_hour_send AS daily,sent_last_24_hours AS used,max_send_rate AS rate
-      FROM provider_account_limits WHERE aws_account_id=${account} AND region=${region} AND isfinite(checked_at)`);
-    const traffic = await db.first<Pick<Minute,'recipients'|'throttled'|'longWaits'>>(throughput(pool, minute));
-    const jobs = await db.first<Setup>(setup(pool));
-    const places = region === 'us-east-2' ? await db.run(readPlaces) : null;
+    const unread = resources.filter(resource => {
+      const point = latest[resource];
+      return !stored?.fresh || !point || point.at>now || now-point.at > metricAge || superseded(point.at, point.used, good[resource]);
+    });
+    // No inventory-table scans on the normal AWS path. Batch only the estimates actually needed.
+    const estimates = unread.filter(available).map(resource => sql`SELECT ${resource}::text AS resource, n FROM (${dbCount(pool,resource)}) e`);
+    const estimated = new Map(estimates.length ? (await query<{resource: Resource; n: number}>(sql.join(estimates,sql` UNION ALL `))).map(e => [e.resource,e.n]) : []);
     if (cache) quotaSchema.parse(cache);
     const mem: RegionMemory = { good, cache: cache ?? prior?.cache,
       lastRate: prior?.lastRate, setup: jobs ? { at: now, reading: jobs } : prior?.setup,
@@ -266,14 +340,14 @@ async function collect(db: ReturnType<typeof probes>, previous: SesMemory): Prom
     let tenantsLeft: number | undefined;
     for (const resource of resources) {
       const { kind, label, ask, warn, critical } = counts[resource], point = latest[resource];
-      if (!stored?.fresh || !point || point.at>now || now-point.at > metricAge || superseded(point.at, point.used, good[resource])) {
-        const last = mem.good[resource], estimate = await db.first<{ n: number }>(dbCount(pool,resource));
+      if (!point || unread.includes(resource)) {
+        const last = mem.good[resource], estimate = estimated.get(resource);
         const limit = last?.limit ?? repoLimit;
-        unknown(kind, `${place}'s SES ${label} could not be read.${last ? ` Last AWS count: ${fmt(last.used)} at ${when(last.at)}.` : ''} ${estimate ? `Nightmail's own count: ${fmt(estimate.n)}${resource === 'ConfigurationSet' ? ' (sets expected or journaled for the pool)' : ''}.` : "Nightmail's own count could not be read."}`);
-        if (!estimate) result.blind.add(kind + ':' + region + ':estimate');
-        else if (estimate.n/limit >= warn) add(kind, 'warning', estimate.n/limit,
-          `Nightmail's own count in ${place} is ${fmt(estimate.n)} SES ${label} (${fmt(100*estimate.n/limit)}% of the ${fmt(limit)} ${last?.source === 'AWS' ? 'last AWS' : 'repository'} limit); an estimated ${fmt(Math.max(0,limit-estimate.n))} remain. AWS usage could not be read. Check the regional ${ask} before raising it.`, region + ':estimate');
-        sources[resource] = estimate ? 'database estimate; AWS unreadable' : 'unreadable';
+        unknown(kind, `${place}'s SES ${label} could not be read.${last ? ` Last AWS count: ${fmt(last.used)} at ${when(last.at)}.` : ''} ${estimate !== undefined ? `Nightmail's own count: ${fmt(estimate)}${resource === 'ConfigurationSet' ? ' (sets expected or journaled for the pool)' : ''}.` : "Nightmail's own count could not be read."}`);
+        if (estimate === undefined) result.blind.add(kind + ':' + region + ':estimate');
+        else if (estimate/limit >= warn) add(kind, 'warning', estimate/limit,
+          `Nightmail's own count in ${place} is ${fmt(estimate)} SES ${label} (${fmt(100*estimate/limit)}% of the ${fmt(limit)} ${last?.source === 'AWS' ? 'last AWS' : 'repository'} limit); an estimated ${fmt(Math.max(0,limit-estimate))} remain. AWS usage could not be read. Check the regional ${ask} before raising it.`, region + ':estimate');
+        sources[resource] = estimate !== undefined ? 'database estimate; AWS unreadable' : 'unreadable';
         continue;
       }
       good[resource] = point;
@@ -320,12 +394,14 @@ async function collect(db: ReturnType<typeof probes>, previous: SesMemory): Prom
     else if (jobs.age !== null && jobs.age>=120 && (jobs.n>1 || jobs.throttled)) add('ses-setup', jobs.age>=300 ? 'critical' : 'warning',jobs.age,
       `A workspace has waited ${fmt(Math.floor(jobs.age/60))} minutes for SES setup in ${place}; ${fmt(jobs.n)} ${jobs.n===1?'workspace is':'workspaces are'} waiting. Check setup retries and slow the sign-up release if the queue keeps growing.`);
     if (region === 'us-east-2') sources.signup = places && tenantsLeft !== undefined ? 'sign-up gate and tenant reading' : 'unreadable';
-    // Persist the daily log election across isolates. A missing sampler table must not suppress other findings.
-    if (stored?.logDue) {
-      const logClaim = await db.first(sql`UPDATE ses_quota_samples SET logged_day=(now() AT TIME ZONE 'UTC')::date
-        WHERE account=${account} AND region=${region} AND logged_day IS DISTINCT FROM (now() AT TIME ZONE 'UTC')::date AND finished_at=attempted_at RETURNING region`);
-      if (logClaim) log('info', { code: 'SES_QUOTA_SOURCES', region, sources });
-    }
+    if (stored?.logDue) due.push({ region, account, sources });
+  }
+  // Claim all due regions in one write. Emit their lines only after the whole transaction commits.
+  if (due.length) {
+    const claimed = await query<Pool>(sql`UPDATE ses_quota_samples SET logged_day=(now() AT TIME ZONE 'UTC')::date
+      WHERE (account,region) IN (${sql.join(due.map(p => sql`(${p.account},${p.region})`),sql`,`)})
+      AND logged_day IS DISTINCT FROM (now() AT TIME ZONE 'UTC')::date AND finished_at=attempted_at RETURNING account,region`);
+    logs.push(...due.filter(p => claimed.some(c => c.region===p.region && c.account===p.account)));
   }
   return result;
 }

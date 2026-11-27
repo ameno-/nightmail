@@ -46615,7 +46615,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await sampleSesCounts(runtime, async () => [series('tenant',0,new Date(snapshot.Tenant.at-60000))]);
       await isolated();
 
-      // Daily and setup still have independent transactions when the sampler's whole relation is missing.
+      // A missing sampler relation leaves the independent daily and setup sources readable.
       await db.query('ALTER TABLE ses_quota_samples RENAME TO fixture_unavailable_ses_samples');
       await sampleSesCounts(runtime, normal); await isolated();
       await db.query('ALTER TABLE fixture_unavailable_ses_samples RENAME TO ses_quota_samples');
@@ -46755,6 +46755,89 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const alert=await tenant(); assert.equal(alert.severity,'critical'); assert.equal(alert.seen,true);
         assert.match(alert.words,/9,600 of 10,000/);
       });
+    });
+  });
+
+  test('SES capacity: two regions under per-statement database latency', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { healthTick } = await import('./src/health.js');
+      runtime.config.liveEnabled=runtime.config.multiTenant=true;
+      // Health writes live in the fixture's rollback transaction. Give SES the same one-client
+      // pool as the production Worker, with private temporary copies of the registry and samples.
+      const name=unique('ses-latency'), pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL, max:1, application_name:name});
+      Object.assign(runtime.db,{$client:pool});
+      const info=t.mock.method(console,'info',()=>{}), warn=t.mock.method(console,'warn',()=>{});
+      const regions=['us-east-1','us-east-2'];
+      const tick=()=>healthTick(runtime,{queues:[{name:'feedback-dlq',depth:1,oldestMs:3000}]},{force:true,post:async()=>{}});
+      const assertSummary=async()=>{
+        assert.equal((await db.query("SELECT generated_at>now()-interval '1 minute' AS wrote FROM health_state")).rows[0].wrote,true);
+        assert.equal((await db.query("SELECT FROM health_alerts WHERE key='dead-letters:feedback-dlq'")).rowCount,1);
+      };
+      const resetSummary=()=>db.query("UPDATE health_state SET generated_at='2001-01-01'; DELETE FROM health_alerts WHERE key='dead-letters:feedback-dlq'");
+      const assertStopped=async()=>{
+        assert.equal(pool.totalCount,0,'overdue connection removed');
+        await db.query('SELECT pg_stat_clear_snapshot()');
+        assert.equal((await db.query("SELECT FROM pg_stat_activity WHERE application_name=$1 AND xact_start IS NOT NULL",[name])).rowCount,0);
+      };
+      try {
+        for (const delay of [30,60,300,300]) {
+          const client=await pool.connect();
+          await client.query(`CREATE TEMP TABLE IF NOT EXISTS provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
+            CREATE TEMP TABLE IF NOT EXISTS ses_quota_samples (LIKE public.ses_quota_samples INCLUDING ALL);
+            TRUNCATE pg_temp.provider_pool_regions,pg_temp.ses_quota_samples`);
+          const point={at:Date.now()-60000,used:9000,limit:10000,source:'AWS'};
+          for (const region of regions) {
+            await client.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES($1,'111122223333','ready')",[region]);
+            await client.query("INSERT INTO ses_quota_samples(account,region,attempted_at,finished_at,latest,last_good) VALUES('111122223333',$1,now(),now(),$2,$2)",
+              [region,JSON.stringify({Tenant:point,EmailIdentity:point,ConfigurationSet:point})]);
+          }
+          // Delay every real response, including BEGIN, the timeout setup and COMMIT, not just selected probes.
+          const send=client.query.bind(client) as (...args:unknown[])=>Promise<pg.QueryResult>;
+          const wire=t.mock.method(client,'query',async (...args:unknown[])=>{
+            const reply=await send(...args);
+            await new Promise(resolve=>setTimeout(resolve,delay)); return reply;
+          });
+          client.release();
+          await resetSummary();
+          if (delay<300) await db.query("DELETE FROM health_alerts WHERE kind='ses-tenants'");
+          const before=info.mock.calls.length, done=await tick(), statements=wire.mock.calls.length;
+          assert.ok(done.ran);
+          await assertSummary();
+          assert.deepEqual((await db.query("SELECT key FROM health_alerts WHERE kind='ses-tenants' AND severity='critical' ORDER BY key")).rows.map(r=>r.key),regions.map(r=>'ses-tenants:'+r));
+          const sources=info.mock.calls.slice(before).map(c=>JSON.parse(String(c.arguments[0]))).filter(l=>l.code==='SES_QUOTA_SOURCES');
+          if (delay<300) {
+            assert.deepEqual(sources.map(l=>l.region).sort(),regions);
+            assert.ok(sources.every(l=>l.ms>=delay*statements-5 && l.ms<750 && l.statements===statements));
+            const next=info.mock.calls.length;
+            await tick();
+            const steady=wire.mock.calls.length-statements;
+            assert.equal(steady,statements-1,'ordinary ticks skip the shared daily claim');
+            assert.ok(!info.mock.calls.slice(next).some(c=>JSON.parse(String(c.arguments[0])).code==='SES_QUOTA_SOURCES'));
+            t.diagnostic(`SES capacity: ${delay} ms/statement, two regions: ${sources[0].ms} ms, ${statements} statements (ordinary tick: ${steady})`);
+          } else {
+            assert.equal(sources.length,0);
+            assert.equal((await db.query("SELECT FROM health_alerts WHERE key='ses-unread:section'")).rowCount,1);
+            const failures=warn.mock.calls.map(c=>JSON.parse(String(c.arguments[0]))).filter(l=>l.code==='SES_HEALTH_UNREADABLE');
+            assert.equal(failures.length,1,'one unreadable line across consecutive deadline ticks');
+            assert.equal(failures[0].cause,'Deadline'); assert.ok(failures[0].ms>=1350 && failures[0].ms<1650);
+            await assertStopped();
+            t.diagnostic(`SES capacity: ${delay} ms/statement: Deadline; full tick ${done.ms} ms; opening log ${failures[0].ms} ms`);
+          }
+          wire.mock.restore();
+        }
+        // A query still executing on the server must stop too, not just lose its Promise.race.
+        const client=await pool.connect();
+        await client.query(`CREATE TEMP VIEW provider_pool_regions AS SELECT 'us-east-2'::text AS region,
+          '111122223333'::text AS aws_account_id,'ready'::text AS sending_state FROM pg_sleep(10)`);
+        client.release();
+        await resetSummary();
+        await db.query("DELETE FROM health_alerts WHERE key='ses-unread:section'");
+        const done=await tick();
+        await assertSummary(); await assertStopped();
+        const last=warn.mock.calls.map(c=>JSON.parse(String(c.arguments[0]))).filter(l=>l.code==='SES_HEALTH_UNREADABLE').at(-1);
+        assert.equal(last?.cause,'Deadline'); assert.ok(done.ms<1800);
+        t.diagnostic(`SES capacity: ten-second SQL probe stopped, full tick ${done.ms} ms`);
+      } finally { await pool.end(); }
     });
   });
 
