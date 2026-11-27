@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, budgetedRead, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, restrictedArea, fullAccessRefusal, unrestrictedRequired, receivedMailRead, receivedMailRefusal, RECEIVING_HOST_CHANGE, admits, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, budgetedRead, filteredInboxPasswords, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, restrictedArea, fullAccessRefusal, unrestrictedRequired, receivedMailRead, receivedMailRefusal, RECEIVING_HOST_CHANGE, admits, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
 import { hostInDomains } from './domain-mail.js';
 import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpired, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
@@ -633,8 +633,9 @@ export function registerMailbox(app: App) {
   registerRituals(app);
   // Agent inboxes use the same credentials and body bound as /v1/inbound; downloads are token-signed.
   // mailboxRoute and receivingConsentRoute (core.ts) are the rules the MCP listing applies too.
-  app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) ? mailboxAuth(c, next) : next());
-  app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) && receivingConsentRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
+  const usesMailboxAuth = (c: Ctx) => mailboxRoute(c.req.path) || filteredInboxPasswords(c);
+  app.use('/v1/*', (c, next) => usesMailboxAuth(c) ? mailboxAuth(c, next) : next());
+  app.use('/v1/*', (c, next) => usesMailboxAuth(c) && receivingConsentRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
   app.use('/v1/inbound/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inboxes/*', async (c, next) => { await boundRequestBody(c); await next(); });
   app.use('/v1/inbound/*', mailboxCreates);

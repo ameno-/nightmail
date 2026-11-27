@@ -21079,7 +21079,9 @@ export type CreateInboxAppPasswordResponse = CreateInboxAppPasswordResponses[key
 export type ListAppPasswordsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        inboxId?: string;
+    };
     url: '/v1/app-passwords';
 };
 
