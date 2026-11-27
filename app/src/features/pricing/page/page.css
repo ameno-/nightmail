@@ -115,6 +115,8 @@
 .pp-qa summary::after { content: '+'; content: '+' / ''; flex: none; color: var(--faint); font: 700 15px / 1 var(--font-mono); }
 .pp-qa[open] summary::after { content: '−'; content: '−' / ''; }
 .pp-qa h3 { margin: 0; color: var(--soft); font-size: 14px; font-weight: 500; line-height: 1.4; }
+/* An answer's links name the vendor's page by its address, which can be longer than a phone is wide. */
+.pp-qa p a { overflow-wrap: anywhere; }
 @media (hover: hover) { .pp-qa summary:hover h3 { color: var(--ink); } }
 .pp-qa summary:focus-visible h3, .pp-qa[open] h3 { color: var(--ink); }
 .pp-qa p { margin: 0 0 14px; color: var(--soft); font-size: 14px; line-height: 1.55; text-wrap: pretty; }

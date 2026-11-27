@@ -4,7 +4,7 @@ import { NightmailWordmark } from '../../../components/NightmailLogo'
 import { WaitlistLine } from '../../home/get-started'
 import type { Start } from '../board'
 import { dayOf, type Source } from '../prices'
-import { linesOf, plain, type Block, type Inline, type PageDoc, type Table, type Text } from './shape'
+import { answerRuns, linesOf, plain, type Block, type Inline, type PageDoc, type Question, type Table, type Text } from './shape'
 
 // A public price page, drawn from its data (shape.ts): a comparison (comparison.ts), the comparisons' index (hub.ts), or
 // any page made in that shape. The verdict first, in the homepage television's type and colours on its room's dark: the
@@ -27,6 +27,11 @@ function Run({ text }: { text: Text }) {
 /** A caption in parts ("Per 100,000 emails a month · checked 25 Nov 2026"): on one line the parts are set apart by a
  *  dot; where they wrap, each wrapped part starts its own line, with no dot (page.css, .pp-parts). The dot and its spaces
  *  are the text's own, so the words read the same to anything that reads them. */
+/** A question's answer, its linked words as links (the vendor's pages a line was read on). */
+function Answer({ item }: { item: Question }) {
+  return <>{answerRuns(item).map((run, i) => typeof run === 'string' ? run : <a key={i} href={run.href}>{run.text}</a>)}</>
+}
+
 function Caption({ text }: { text: Text }) {
   const parts = text.length === 1 && typeof text[0] === 'string' ? text[0].split(' · ') : []
   return parts.length < 2 ? <Run text={text} /> : <span className="pp-parts">{parts.map((part, i) => <span key={i}>{i > 0 && <span className="pp-dot">{' · '}</span>}{part}</span>)}</span>
@@ -108,7 +113,7 @@ export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNo
         <h2 id="questions-title" className="pp-h2">Questions</h2>
         {/* Each a closed row that opens on a tap or a key: the answers stay in the HTML (the FAQPage carries them word for
             word), out of a visitor's way. */}
-        {doc.questions.map(item => <details key={item.id} className="pp-qa"><summary><h3>{item.question}</h3></summary><p>{item.answer}</p></details>)}
+        {doc.questions.map(item => <details key={item.id} className="pp-qa"><summary><h3>{item.question}</h3></summary><p><Answer item={item} /></p></details>)}
       </section>}
       {doc.related.length > 0 && <nav className="pp-section" aria-labelledby="related-title">
         <h2 id="related-title" className="pp-h2">More</h2>

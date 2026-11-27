@@ -89,6 +89,7 @@
 .cb-faq { width: min(100% - 2 * var(--cb-gutter), 640px); margin: 96px auto 0; }
 .cb-faq-title { color: var(--cb-paper); font-family: var(--font-body); font-size: 28px; font-weight: 600; letter-spacing: -.02em; }
 .cb-faq dl { display: grid; row-gap: 32px; margin: 24px 0 0; }
+.cb-faq dd a { overflow-wrap: anywhere; }
 .cb-faq dt { color: var(--cb-paper); font-size: 17px; font-weight: 600; line-height: 1.35; }
 .cb-faq dd { margin: 8px 0 0; color: var(--cb-text-2); font-size: 16px; line-height: 1.55; text-wrap: pretty; }
 .cb-foot .price-checked { color: var(--cb-caption); font-size: inherit; white-space: normal; }

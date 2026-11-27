@@ -17,6 +17,7 @@ import { play, wake } from './sound'
 import { OFFERS } from './compare'
 import { ownPages } from './docs/registry'
 import { comparisonQuestions } from './questions'
+import { answerRuns } from './page/shape'
 import { claim, formatCount, listOf, money, nightmail, nightmailBill, offerSize, shownSources, sourcesOf, theirPrice, ucOf, UNITS, usageLines, type Comparison, type Usage } from './prices'
 
 // The price pages' hall (Hall): a dark wall under one pendant lamp, with the board and its console hung in it, the same
@@ -199,7 +200,7 @@ export function ComparisonBelow({ comparison: c, start }: { comparison: Comparis
     <Features comparison={c} />
     <section className="cb-faq" id="questions" aria-labelledby="cb-faq-title">
       <h2 id="cb-faq-title" className="cb-faq-title">Questions</h2>
-      <dl>{comparisonQuestions(c).map(item => <div key={item.id}><dt>{item.question}</dt><dd>{item.answer}</dd></div>)}</dl>
+      <dl>{comparisonQuestions(c).map(item => <div key={item.id}><dt>{item.question}</dt><dd>{answerRuns(item).map((run, i) => typeof run === 'string' ? run : <a key={i} href={run.href}>{run.text}</a>)}</dd></div>)}</dl>
     </section>
     <section className="cb-close" aria-labelledby="cb-close" {...keys}>
       <h2 id="cb-close" className="cb-bill"><span><b>{nightmail.perThousand}</b> per 1,000 emails, sent or received.</span> <span>Contacts and teammates are free.</span></h2>

@@ -1,9 +1,11 @@
-import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { AUTOMATION, fact, formatCount, gap, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Mailchimp (/compare/mailchimp): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailchimp's own pages on CHECKED.
 const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
+const GAPS_READ = readOn('2026-11-26')
+const FEATURES = 'https://mailchimp.com/features/'
 
 const MAILCHIMP = 'https://mailchimp.com/pricing/marketing/'
 const mailchimpTier = (size: number, cents: number, sends: number, quote: string): Tier => ({ size, cents, sends, source: read(MAILCHIMP, quote) })
@@ -79,4 +81,12 @@ export const mailchimp: Entry = {
   ],
   // Mailchimp's readers first see the list, the contacts and the team.
   panels: ['campaign', 'contacts', 'team', 'receive', 'free', 'agent', 'route'],
+  // What it offers that Nightmail doesn't, read on its own pages on 26 Nov 2026 (prices.ts, Gap).
+  gaps: [
+    gap('automation flows', 'Mailchimp has marketing automation flows that automate campaigns.', AUTOMATION, GAPS_READ(FEATURES, 'Marketing Automation Flows Automate your campaigns')),
+    gap('A/B testing', 'Mailchimp tests versions of an email against each other (A/B testing).', /\bA\/B\b|\bsplit[- ]test|\bmultivariate\b/i, GAPS_READ(FEATURES, 'A/B Testing Test and optimize your emails')),
+    gap('landing pages', 'Mailchimp has a landing page and website builder.', /\blanding pages?\b|\bwebsite builder\b/i, GAPS_READ(FEATURES, 'Landing pages and website builder: Build pages for campaigns or your business without a separate hosting service.')),
+    gap('sign-up forms', 'Mailchimp has sign-up forms that collect email addresses from your website or social profiles.', /\bforms?\b/i, GAPS_READ(FEATURES, 'Signup forms: Collect email addresses from your website or social profiles.')),
+    gap('SMS marketing', 'Mailchimp sells SMS marketing as an add-on to paid plans, in select countries.', /\bSMS\b|\btext messages?\b/i, GAPS_READ(MAILCHIMP, 'SMS Marketing : SMS is available as an add-on to paid plans in select countries.')),
+  ],
 }
