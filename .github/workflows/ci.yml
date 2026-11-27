@@ -218,6 +218,7 @@ jobs:
       slot6: ${{ steps.report.outputs.slot6 }}
       slot7: ${{ steps.report.outputs.slot7 }}
       slot8: ${{ steps.report.outputs.slot8 }}
+      slot9: ${{ steps.report.outputs.slot9 }}
     needs: changes
     if: needs.changes.outputs.acceptance == 'true'
     strategy:
@@ -260,7 +261,7 @@ jobs:
         env:
           SLOT: ${{ strategy.job-index }}
         run: |
-          (( SLOT < 9 )) || { echo "::error::Unexpected matrix slot $SLOT"; exit 1; }
+          (( SLOT < 10 )) || { echo "::error::Unexpected matrix slot $SLOT"; exit 1; }
           rows=$(jq -ces 'select(length > 0)' "$RUNNER_TEMP/shard-report.jsonl")
           echo "slot$SLOT=$rows" | tee -a "$GITHUB_OUTPUT"
 
@@ -313,7 +314,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, alone]
+        # docs: the painted docs pages against the app's (below), on a runner of its own so the slowest shard waits for nothing more.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, alone, docs]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
@@ -341,19 +343,21 @@ jobs:
       # Builds the dashboard (build already type-checked it), then measures it with Chrome against Postgres.
       - uses: ./.github/actions/cls-build
       - name: Measure layout shift on every page
+        if: matrix.shard != 'docs'
         working-directory: app
         env:
           SHARD_REPORT: *shard-report
           CLS_SHARD_INDEX: ${{ matrix.shard }}
-          CLS_SHARD_COUNT: ${{ strategy.job-total }}
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
-        run: node scripts/cls.mjs
+        # Every entry but docs measures layout shift.
+        run: CLS_SHARD_COUNT=$(( ${{ strategy.job-total }} - 1 )) node scripts/cls.mjs
       # Every painted docs page (the overview, the guides, every operation's reference) says word for word what the app's
-      # says once it takes over, and keeps the reader's place (scripts/docs-sweep.mjs), in one shard.
+      # says once it takes over, and keeps the reader's place (scripts/docs-sweep.mjs), in a shard of its own.
       - name: Compare every painted docs page with the app's
-        if: matrix.shard == 'alone'
+        if: matrix.shard == 'docs'
         working-directory: app
         env:
+          SHARD_REPORT: *shard-report
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
         run: node scripts/docs-sweep.mjs
       # The television homepage, the dev stage's "/" (VITE_HOME=tv: deploy.yml), built beside the production one and
@@ -460,7 +464,7 @@ jobs:
           inventories = {
               'acceptance': [['integration-contract', 'integration-rest', 'simulated-a-h', 'simulated-rest']],
               'support': [['chat', 'queues']],
-              'cls': [[*map(str, range(8)), 'alone'], ['tv']],
+              'cls': [[*map(str, range(8)), 'alone'], ['tv'], ['docs']],
           }[suite]
           expected = {shard for group in inventories for shard in group}
           seen, errors = {}, []

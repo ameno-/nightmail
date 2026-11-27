@@ -7,7 +7,7 @@
 //   node scripts/docs-sweep.mjs                    every page at 1440 × 900, light; the overview and guides also dark and at 390 × 844
 //   DOCS_SWEEP_ALL=1 node scripts/docs-sweep.mjs   every page in all four
 //   CLS_CHROME=<path>  Chrome executable; otherwise the installed Google Chrome. CLS_PG_URL as for scripts/cls.mjs.
-import { readFileSync, readdirSync } from 'node:fs'
+import { appendFileSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
@@ -21,6 +21,7 @@ const guides = ['/docs', ...pages('docs')], reference = pages('docs/api')
 const views = [[1440, 'light'], [1440, 'dark'], [390, 'light'], [390, 'dark']]
 const all = process.env.DOCS_SWEEP_ALL === '1'
 const lanes = 6
+const planned = views.reduce((sum, _, n) => sum + (all || n === 0 ? guides.length + reference.length : guides.length), 0)
 
 const started = Date.now()
 const browser = await chromium.launch({ ...process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' }, args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] })
@@ -85,4 +86,6 @@ try {
 }
 console.log(`${done} docs pages read, painted and in the app (${guides.length} guides and overview, ${reference.length} reference pages${all ? ', each in four views' : ''}); slowest takeover ${slowest} ms; ${waited} read again after the server's limit of a minute; ${((Date.now() - started) / 1000).toFixed(0)} s`)
 for (const problem of problems) console.log(`  ${problem}`)
+// CI's shard coverage (ci.yml, required-cls): this runner's report, the pages read of the pages to read.
+if (process.env.SHARD_REPORT) appendFileSync(process.env.SHARD_REPORT, JSON.stringify({ id: 'docs', ran: done, total: planned }) + '\n')
 if (problems.length) process.exitCode = 1
