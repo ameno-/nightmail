@@ -123,6 +123,7 @@ These are the current limits and thresholds for Hosted sending. We may change th
 - A new workspace's first 500 real recipients are its evaluation, transactional or marketing. It can send no more until their delivery results are in, about an hour after the 500th. Its score is then the quality of those 500: good mail has no daily limit from then on.
 - For 24 clean hours after the evaluation, sending grows: up to 1,000 recipients an hour across your workspaces at first, then up to twice the distinct recipients of the last hour whose results are in and clean. A good sender doubles every hour; mail over it waits in the queue.
 - The score is recomputed hourly from your mail of the last 30 days, recent days counting most. A limit appears only when the score falls under 73, and lifts again at 75.
+- A workspace is a **new sender** during its evaluation and the growth after it. After that, it's in **good standing** while it has no daily limit and isn't at the Warn, Restrict or Pause step ([section 9](#how-we-enforce-this-policy)).
 - The per-minute pace protects the shared infrastructure, so one sender can't crowd out the others.
 - After the evaluation, under a daily limit, marketing can use it except a reserve for transactional mail: the larger of 100 or 10% of the limit. During the evaluation all of it may be marketing.
 

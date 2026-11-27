@@ -25,7 +25,7 @@ export function PolicyBanner() {
   return <div className="standing-banner policy-banner ui-tone--neutral" role="status" data-policy="abuseHolds">
     <Scale className="standing-banner__icon" size={16} aria-hidden="true" />
     <div className="standing-banner__text">
-      <p className="standing-banner__what">From {policyDay(from)}, some sending may be held automatically for review. <Link to="/legal/privacy#changes">See what changes</Link></p>
+      <p className="standing-banner__what">From {policyDay(from)}, a workspace's sending may be paused automatically until a person reviews it. <Link to="/legal/privacy#changes">See what changes</Link></p>
     </div>
     <IconButton className="policy-banner__dismiss" size="sm" label="Dismiss" onClick={dismiss}><Icon icon={X} size="md" /></IconButton>
   </div>
