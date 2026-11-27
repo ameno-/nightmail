@@ -3,6 +3,7 @@
 api/*
 !api/package.json
 !api/bun.lock
+!api/openapi.json
 !api/tsconfig*.json
 !api/worker-configuration.d.ts
 !api/src/
@@ -14,7 +15,7 @@ app/*
 !app/package.json
 !app/bun.lock
 !app/tsconfig*.json
-!app/vite.config.ts
+!app/*.ts
 !app/public-beacon.js
 !app/index.html
 !app/src/
