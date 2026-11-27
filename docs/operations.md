@@ -393,10 +393,11 @@ Tenants and configuration sets warn at 70% and become critical at 85%; identitie
 critical at 80%. CloudWatch is sampled every 15 minutes. If it supplies usage but not a quota, the finding
 labels the repository limit (10,000 per resource per region). “Could not be read” retains the last AWS
 observation and shows Nightmail’s own count separately; it does not resolve an AWS capacity finding.
-Check the daily `SES_QUOTA_SOURCES` log for the source actually available to the runtime. Each failed
+Each region’s daily `SES_QUOTA_SOURCES` line reports its sources and the **whole section’s** elapsed
+milliseconds (`ms`) and SQL statement count, including transaction control. Each failed
 CloudWatch attempt logs `SES_QUOTA_READ_FAILED` with the region, batch and cause. A failed batch is tried
-once without quota expressions. The whole SES section of a Health tick has a 500 ms budget; if it expires
-or stored readings are malformed, Health keeps the previous SES state and logs `SES_HEALTH_UNREADABLE` on opening.
+once without quota expressions. The whole SES section of a Health tick has a 1,500 ms budget. If the section cannot finish, Health keeps
+the previous findings and logs `SES_HEALTH_UNREADABLE` with the cause and elapsed time on opening.
 
 Daily recipients warn at 70% and become critical at 85% of the rolling 24-hour limit. Check the dispatcher’s
 quota sample (at most ten minutes old). Sending rate warns after ten completed minutes at 80%; at 95% it
