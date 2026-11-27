@@ -41546,7 +41546,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       runtime.config.aws={accessKeyId:'synthetic',secretAccessKey:'synthetic'};
       await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[wid,REGION,bucket,topic]);
       await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'receive.example',$3,'active','store')",[domain,wid,REGION]);
-      const submit=(mid:string,recipients:string[],subject='Subject',scans:Json=cleanScans)=>acceptInboundNotification(runtime,{region:REGION,topicArn:topic,message:{notificationType:'Received',mail:{messageId:mid,commonHeaders:{subject}},receipt:{...scans,timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}}});
+      const submit=(mid:string,recipients:string[],subject='Subject',scans:Json=cleanScans,at=new Date().toISOString())=>acceptInboundNotification(runtime,{region:REGION,topicArn:topic,message:{notificationType:'Received',mail:{messageId:mid,commonHeaders:{subject}},receipt:{...scans,timestamp:at,recipients,action:{type:'S3',bucketName:bucket,topicArn:topic,objectKey:'staging/'+mid}}}});
       // An ingest run claims the receipt's job while the handler runs (only that claim may fail the receipt, 164),
       // then leaves it pending as before.
       const run=async(type:string,p:Json,attempts=1)=>{
@@ -42773,8 +42773,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await rawFetch(new Request(`${PUBLIC_ORIGIN}/v1/forwarding/confirm/${token}`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=allow'}))).status,200);
         return (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2 AND type='forward' AND verified",[wid,name])).rows[0].id as string;
       };
-      const receive=async(mid:string,to:string[],mime:string|Buffer)=>{
-        raw.set(mid,Buffer.from(mime));await submit(mid,to,'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
+      const receive=async(mid:string,to:string[],mime:string|Buffer,at?:string)=>{
+        raw.set(mid,Buffer.from(mime));await submit(mid,to,'Mail',cleanScans,at);await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
         return (await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
       };
       const forwardDelivery=async(hookId:string,messageId:string)=>{
@@ -42840,7 +42840,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           return /forwarding\/confirm\/(fwd_[0-9a-f]{64})/.exec(request.text)![1]!;
         };
         const choose=(token:string,choice:'allow'|'decline')=>rawFetch(new Request(`${PUBLIC_ORIGIN}/v1/forwarding/confirm/${token}`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice='+choice}));
-        const mail=(mid:string,to:string)=>receive(mid,[to],`From: Ana <ana@example.org>\r\nSubject: ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`);
+        const mail=(mid:string,to:string,at?:string)=>receive(mid,[to],`From: Ana <ana@example.org>\r\nSubject: ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`,at);
+        // A receipt time 1 ms after the forward's Allow, at the receipt's own precision (the provider's milliseconds). Taken
+        // from the clock the moment Allow came from a different clock, and in the same millisecond, it would read as earlier,
+        // and the message would rightly not be forwarded: a test that means "after Allow" says so.
+        const afterAllow=async(hook:string)=>(await db.query(`SELECT to_char((confirmed_at+interval '1 millisecond') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at FROM mailbox_webhooks WHERE id=$1`,[hook])).rows[0].at as string;
+        // A delivery held at its own attachment read, with this test's call the only one sending it: nothing has claimed it
+        // before, only the read of this message's attachment waits, and a delivery that ends without that read fails with
+        // its state and the jobs that touched it.
+        const heldAtAttachment=async(t:TestContext,hook:string,messageId:string)=>{
+          const delivery=(await db.query("SELECT id,status,attempt_count,last_error FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hook,messageId])).rows[0];
+          const jobsOf=async()=>(await db.query("SELECT id,type,status,attempts FROM jobs WHERE workspace_id=$1 AND payload->>'deliveryId'=$2",[wid,delivery.id])).rows;
+          assert.deepEqual([delivery.status,delivery.attempt_count,delivery.last_error,(await jobsOf()).filter((j:Json)=>j.status!=='pending')],['pending',0,null,[]],'Nothing has claimed the delivery yet.');
+          const file=(await db.query('SELECT id FROM mail_attachments WHERE workspace_id=$1 AND message_id=$2',[wid,messageId])).rows[0].id as string;
+          let reached!:()=>void,release!:()=>void;
+          const atRead=new Promise<void>(r=>{reached=r}),gate=new Promise<void>(r=>{release=r}),send=S3Client.prototype.send;
+          t.mock.method(S3Client.prototype,'send',async function(this:unknown,cmd:any){if(cmd.constructor.name==='GetObjectCommand'&&String(cmd.input.Key).includes(file)){reached();await gate;}return (send as any).call(this,cmd);});
+          const sending=forwardDelivery(hook,messageId);
+          const ended=sending.then(async end=>{throw new Error(`The delivery ended without reading its attachment: ${JSON.stringify({end,jobs:await jobsOf()})}`);});
+          ended.catch(()=>{});
+          await Promise.race([atRead,ended]);
+          return {sending,release:()=>release()};
+        };
         const deliveries=async(hookId:string,messageId:string)=>(await db.query("SELECT status,last_error FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,messageId])).rows;
         const forwardedTo=async(address:string)=>(await db.query(`SELECT subject FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject LIKE 'Fwd:%' AND "to" @> $2::jsonb ORDER BY created_at`,[wid,JSON.stringify([{address}])])).rows.map((r:Json)=>r.subject);
         const status=async(name:string)=>(await call('GET',`/v1/endpoints/${name}`)).status;
@@ -42865,7 +42886,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const token=await tokenFor('later@example.net');
         assert.equal((await choose(token,'allow')).status,200);
         assert.equal(await status('later'),'ready');
-        const late=await mail('fwd-after-allow','later@receive.example');
+        const late=await mail('fwd-after-allow','later@receive.example',await afterAllow(hookId));
         assert.deepEqual(await forwardDelivery(hookId,late.id),{status:'delivered',last_error:null,routed:true});
         const seq=(await db.query("SELECT seq FROM mailbox_events WHERE workspace_id=$1 AND message_id=$2 AND type='message.received' ORDER BY seq LIMIT 1",[wid,early.id])).rows[0].seq;
         await mailboxEventJobs['mailbox.fanout']!(runtime,{[String(seq)]:[{id:hookId,recipient:'later@receive.example',junk:false}]},{id:unique('job'),workspaceId:wid,attempts:1});
@@ -42930,16 +42951,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const heldHook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='inflight'",[wid])).rows[0].id;
         const pdf=Buffer.from('%PDF-1.4\n% in-flight fixture\n%%EOF\n');
         const attached=await receive('fwd-inflight',['inflight@receive.example'],['From: Ana <ana@example.org>','To: inflight@receive.example','Subject: fwd-inflight','Message-ID: <fwd-inflight@example.org>','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="m"','',
-          '--m','Content-Type: text/plain; charset=utf-8','','Report attached.','--m','Content-Type: application/pdf','Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="report.pdf"','',pdf.toString('base64'),'--m--',''].join('\r\n'));
+          '--m','Content-Type: text/plain; charset=utf-8','','Report attached.','--m','Content-Type: application/pdf','Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="report.pdf"','',pdf.toString('base64'),'--m--',''].join('\r\n'),await afterAllow(heldHook));
         assert.equal(attached.attachment_count,1);
-        let reached!:()=>void,release!:()=>void;
-        const atFetch=new Promise<void>(r=>{reached=r}),gate=new Promise<void>(r=>{release=r}),send=S3Client.prototype.send;
-        it.mock.method(S3Client.prototype,'send',async function(this:unknown,cmd:any){if(cmd.constructor.name==='GetObjectCommand'){reached();await gate;}return (send as any).call(this,cmd);});
-        const heldDelivery=forwardDelivery(heldHook,attached.id);
-        await Promise.race([atFetch,new Promise((_,fail)=>setTimeout(()=>fail(new Error('The delivery never fetched its attachment.')),10_000))]);
+        const held=await heldAtAttachment(it,heldHook,attached.id);
         assert.equal((await rawFetch(new Request(await forwardStopUrl(runtime,heldHook,PUBLIC_ORIGIN),{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=decline'}))).status,200);
-        release();
-        assert.deepEqual(await heldDelivery,{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
+        held.release();
+        assert.deepEqual(await held.sending,{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
         assert.deepEqual(await forwardedTo('inflight@example.net'),[]);
         it.mock.restoreAll();
         const queued=await mail('fwd-stopped-queued','later@receive.example');
