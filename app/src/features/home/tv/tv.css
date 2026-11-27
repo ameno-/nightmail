@@ -37,9 +37,11 @@
    room dims when the set is switched off and flares with a burst of static. */
 /* It is the picture that is centred on the page, not the cabinet: the controls are all on the right of the tube, so
    the set stands .057 of its width to the right (and may be no wider than leaves that much room). */
-/* A press on the set (its glass or its cabinet) changes the channel: it takes a tap without a phone's double-tap zoom
-   or grey flash, and a quick run of presses selects nothing. */
-.chy-set { --light: 0; position: relative; left: calc(var(--h) * .0774); flex: none; width: calc(var(--h) * 1.3587); height: var(--h); margin: 0; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
+.chy-set { --light: 0; position: relative; left: calc(var(--h) * .0774); flex: none; width: calc(var(--h) * 1.3587); height: var(--h); margin: 0; }
+/* A press on the homepage's set (its glass or its cabinet) changes the channel: it takes a tap without a phone's
+   double-tap zoom or grey flash, and a quick run of presses selects nothing. (Not /compare's still copy of the set,
+   pricing/page/set.tsx, which is a picture.) */
+main.chy .chy-set { cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
 .chy-set > span { position: absolute; pointer-events: none; }
 /* The wall is the page itself: plain, with the screen's light on it as one smooth pool behind the set. */
 .chy-glow { inset: -42% -52% -24%; background: radial-gradient(closest-side at 46% 50%, rgb(var(--tint, 96 124 190) / 26%), rgb(var(--tint, 96 124 190) / 13%) 36%, rgb(var(--tint, 96 124 190) / 4%) 68%, transparent); opacity: min(var(--light), 1.3); }
