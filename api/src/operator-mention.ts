@@ -77,7 +77,7 @@ type Message = Record<string, unknown> & { text: string; blocks?: { type: string
  */
 export function withMention<T extends Message>(message: T, mention: Mention): T {
   const lead = `<@${mention.user}>`, note = mention.skipped > 0 ? skippedWords(mention.skipped) : '';
-  const after = (words: string) => note ? `${words}${words.includes('\n') ? '\n' : ' '}${note}` : words;
+  const after = (words: string) => note ? `${words}${words.includes('\n') ? '\n' : /[.!?]$/.test(words) ? ' ' : '. '}${note}` : words;
   const [first, ...rest] = message.blocks ?? [];
   const section = first?.type === 'section' && first.text
     ? { ...first, text: first.text.type === 'mrkdwn' ? { ...first.text, text: after(`${lead} ${first.text.text}`) } : { type: 'mrkdwn', text: after(`${lead} ${asMrkdwn(first.text.text)}`), verbatim: true } }
