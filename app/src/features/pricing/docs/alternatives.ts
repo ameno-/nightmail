@@ -82,7 +82,7 @@ export function vendorAlternatives(c: Comparison): Doc {
   const dash = (rows: (typeof group)[number][]) => rows.some(r => r.bills.some(b => b.theirsCents === null)) ? DASH : ''
   const visible: Section = {
     id: 'alternatives', title: `${vendor} alternatives, a month at three sizes`, quiet: true,
-    blocks: [folded(table([self, ...shown], [`${claim} ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month.${perColumn} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash([self, ...shown])}`]), m.per === 'contact' ? `${m.sendsPerContact} emails to each contact a month; list prices before tax.` : 'List prices before tax, each one’s least expensive plan.')],
+    blocks: [folded(table([self, ...shown], [`${claim} ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month.${perColumn} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash([self, ...shown])}`]))],
   }
   const sections: Section[] = [visible, briefFactsSection(rowLines(c.rows))]
 

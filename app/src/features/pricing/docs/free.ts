@@ -129,8 +129,8 @@ export function freeEmailApi(): Doc {
   const what = `free ${unit}${kinds.has('trial') && unit === 'plans' ? ' and trials' : ''}`
   const caption = `${productName}, beside ${spelled(apis.rows.length)} email APIs’ ${what} · checked ${when.replaceAll(' ', '\u00a0')}`
   const sections: Section[] = [
-    // Under the table, what its rows are in one line (the scope sentence and the rest fold into How we compared).
-    { id: 'free', title: 'Free email API plans', quiet: true, blocks: [folded(table(apis.rows, note), `${capital(listOf(['smaller allowances', ...kinds.has('trial') ? ['trials'] : [], ...kinds.has('once') ? ['one-offs'] : []]))}; not every API.`)] },
+    // Under the table, only How we compared, which holds the scope sentence and the rest.
+    { id: 'free', title: 'Free email API plans', quiet: true, blocks: [folded(table(apis.rows, note))] },
     // (Its headline and first row are the free allowance: the list says the rest.)
     briefFactsSection([], [], { free: false }),
   ]

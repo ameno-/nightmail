@@ -145,7 +145,7 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
   const sizesTable: Section = {
     id: 'sizes', title: `What ${vendor} costs at each size`, quiet: true,
     blocks: [
-      folded(priceTable(c, [`${c.assume} Monthly billing, no promotions. ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${productName} costs less than ${vendor} at every size in this table. `, ...readAt(tableRead)], verdictAt.n), m.per === 'contact' ? `${m.sendsPerContact} emails to each contact a month; lowest list prices.` : `${vendor}’s lowest list price for each size, before tax.`),
+      folded(priceTable(c, [`${c.assume} Monthly billing, no promotions. ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${productName} costs less than ${vendor} at every size in this table. `, ...readAt(tableRead)], verdictAt.n)),
     ],
   }
   // Then what Nightmail has that the vendor charges for or lacks, and the facts every price page says (page/facts.ts).

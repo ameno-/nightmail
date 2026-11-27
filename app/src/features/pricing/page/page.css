@@ -118,8 +118,8 @@
 .pp-qa p a { overflow-wrap: anywhere; }
 @media (hover: hover) { .pp-qa summary:hover :is(h3, .pp-qa-q) { color: var(--ink); } }
 .pp-qa summary:focus-visible :is(h3, .pp-qa-q), .pp-qa[open] :is(h3, .pp-qa-q) { color: var(--ink); }
-/* How a page compared, under its table: the note's whole text, closed. */
-.pp-method { margin-top: 16px; }
+/* How a page compared, closed, straight under its table: one more row, the table's last rule its top edge. */
+.pp-qa.pp-method { margin-top: 0; border-top: 0; }
 .pp-method p { overflow-wrap: anywhere; }
 .pp-qa p { margin: 0 0 14px; color: var(--soft); font-size: 14px; line-height: 1.55; text-wrap: pretty; }
 /* The facts under the table: one line each. */

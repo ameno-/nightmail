@@ -53,7 +53,7 @@ export function cheapestEmailApi(): Doc {
   const rule = `the ${spelled(Math.min(SHOWN_CHEAPEST, priced.length))} lowest, and any priced the same as the last of them`
   const visibleNote: Text = [`${scope} The table shows the ${shown.length} lowest of those with a price read at ${at} emails a month (${rule}); `, { text: 'the comparisons page', href: '/compare' }, ` has every one. ${claim} ${terms} ${basis}, checked ${when}; each name links to its comparison and the page it was read on.${dash(shown)}`]
   const sections: Section[] = [
-    { id: 'apis', title: `Email APIs: a month at ${CHEAPEST_SIZES.map(formatCount).join(', ')} emails`, quiet: true, blocks: [folded(table(shown, visibleNote), `List prices before tax. ${n} APIs compared, not every one.`)] },
+    { id: 'apis', title: `Email APIs: a month at ${CHEAPEST_SIZES.map(formatCount).join(', ')} emails`, quiet: true, blocks: [folded(table(shown, visibleNote))] },
     briefFactsSection(),
   ]
   const read = (rows: (typeof group)[number][]) => rows.flatMap(({ c, bills }) => shownSources(bills.flatMap(b => { const q = quote(c.offer, b.u); return q.kind === 'price' ? [q.tier.source, ...q.payg?.tier.overageSource ? [q.payg.tier.overageSource] : []] : [] }), c.offer))

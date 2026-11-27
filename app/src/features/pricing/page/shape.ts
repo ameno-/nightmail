@@ -16,8 +16,8 @@ export type Inline = string | { text: string; href: string } | { ours: string; s
 export type Text = Inline[]
 export type Table = {
   kind: 'table'
-  /** What the figures assume and where they were read: said with the table. With a method, one short line (at most 12
-   *  words: docs/index.ts checks it). */
+  /** What the figures assume and where they were read: said with the table. With a method, empty: the note is all in
+   *  How we compared (docs/index.ts checks it). */
   caption: Text
   /** The full note on how the figures were read (which services, the basis, the rates, the day, the pages): in a closed
    *  "How we compared" under the table (page.tsx), and in place of the caption in the Markdown twin (docs/doc.ts). */
@@ -28,9 +28,10 @@ export type Table = {
   numeric: number[]
 }
 /** A list's full: the longer list the Markdown twin keeps where the page shows a short one (facts.ts, briefFactsSection). */
-/** A table as a page shows it: one short line under it, its whole note folded into "How we compared" (page.tsx); the
- *  Markdown twin keeps the note where the line is (docs/doc.ts). */
-export const folded = ({ caption, ...table }: Table, line: string): Table => ({ caption: [line], method: caption, ...table })
+/** A table as a page shows it: nothing under it but its whole note, folded into "How we compared" (page.tsx; the owner:
+ *  "i don't think we need the thing that says list prices before tax"), led by a sentence of its own where the page needs
+ *  one; the Markdown twin keeps the note where the caption was (docs/doc.ts). */
+export const folded = ({ caption, ...table }: Table, lead?: string): Table => ({ caption: [], method: lead ? [`${lead} `, ...caption] : caption, ...table })
 export type Block = { kind: 'p'; text: Text } | { kind: 'list'; items: Text[]; full?: Text[] } | Table
 /** quiet: its title is for screen readers only (the price table straight under the verdict: page.tsx); a page whose
  *  only section is a table has it so without saying. */

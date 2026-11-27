@@ -72,10 +72,10 @@ export function comparisonDoc(c: Comparison): PageDoc {
     // The line under the heading at most 10 words: by contacts or inboxes, the count alone (the line under the table says
     // the mail).
     ...m.per === 'contact' || m.per === 'inbox' ? { caption: [`Per ${formatCount(opening)} ${m.per === 'contact' ? 'contacts' : 'agent inboxes'} · checked ${dayOf(c.offer.checked).replaceAll(' ', '\u00a0')}`] } : {},
-    // The table, one line under it and the whole note folded into How we compared (with the pages read: page.tsx).
-    sections: [{ id: 'sizes', title: `A month at each size ${vendor} prices`, quiet: true, blocks: [folded(priceTable(c, terms, opening), m.per === 'contact' ? `${m.sendsPerContact} emails to each contact a month; lowest list prices.`
-      // (By inboxes, the mail the verdict's figure prices, beside it: the pre-merge check reads it there.)
-      : m.per === 'inbox' ? `At ${formatCount(opening)} inboxes, ${formatCount(v.u.received)} received and ${formatCount(v.u.sent)} sent a month; list prices.` : `${vendor}’s lowest list price for each size, before tax.`)] },
+    // The table, and under it only How we compared, closed, with the whole note and the pages read (page.tsx).
+    sections: [{ id: 'sizes', title: `A month at each size ${vendor} prices`, quiet: true, blocks: [folded(priceTable(c, terms, opening),
+      // (By inboxes, the mail the verdict's figure prices, said first: the pre-merge check reads it on the page.)
+      m.per === 'inbox' ? `At ${formatCount(opening)} inboxes, ${formatCount(v.u.received)} received and ${formatCount(v.u.sent)} sent a month.` : undefined)] },
     // What Nightmail has that the vendor charges for or lacks, in four short lines (facts.ts, briefFacts).
     briefFactsSection(rowLines(c.rows))],
     questions: comparisonQuestions(c),

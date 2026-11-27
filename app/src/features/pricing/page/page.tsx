@@ -74,7 +74,7 @@ function TableBlock({ table, sources = [] }: { table: Table; sources?: Source[] 
   const last = table.head.length - 1, fold = table.head.length > 3 && !table.numeric.includes(last), ours = table.head.indexOf('Nightmail')
   const align = (i: number) => table.numeric.includes(i) ? 'end' : undefined
   return <><table className="pp-table" data-fold={fold ? '' : undefined}>
-    <caption><Run text={table.caption} /></caption>
+    {table.caption.length > 0 && <caption><Run text={table.caption} /></caption>}
     <thead><tr>{table.head.map((head, i) => <th key={i} scope="col" data-align={align(i)} data-ours={i === ours ? '' : undefined} data-last={fold && i === last ? '' : undefined}>{head}</th>)}</tr></thead>
     <tbody>{table.rows.map((row, r) => <tr key={r} data-mark={row.mark ? '' : undefined}>{row.cells.map((cell, i) => i === 0
       ? <th key={i} scope="row"><Run text={cell} /></th>
