@@ -143,8 +143,21 @@ export const ALERTS_AN_HOUR = { review: 3, high: 10 } as const;
 const POST_TIMEOUT_MS = 10_000;
 /** After an unanswered post, the one more try waits this long (Slack is slow now). There is never a third. */
 const AFTER_TIMEOUT_MS = 5 * 60_000;
-/** The longest a 429's Retry-After is followed for one wait. */
-const RETRY_AFTER_MOST_S = 3600;
+/**
+ * A 429 (Slack, or anything in front of it, limiting us) spends none of the alert's tries: it is not refused, only told
+ * to wait. The wait is never under RATE_LIMIT_FLOOR_S, doubles with each 429 in a row up to RATE_LIMIT_CAP_S, is longer
+ * when Retry-After asks for more, and never runs past the alert's day (FRESH), when it would be stale anyway. Slack's
+ * incoming webhooks take about a message a second with short bursts, so a 429 that 30 seconds doesn't clear is the
+ * webhook or something in front of it in trouble, not our pace; and a job told "now" (Retry-After: 0, or none) starts at
+ * most twice a minute, then less often, down to four times an hour at the cap. From ABUSE.rateLimitedMost 429s in a row
+ * (about half an hour) the alert keeps waiting at the cap but counts as not delivered in Health (health.ts). It never
+ * turns into tries: a webhook that limits us is alive, so the alert can still go out while it matters, and spending
+ * tries would fail it within the hour for good. A 429 posts nothing, so the at-most-two-posts rule is untouched.
+ */
+const RATE_LIMIT_FLOOR_S = 30, RATE_LIMIT_CAP_S = 15 * 60;
+/** How long a 429 makes an alert wait: limited is its 429s in a row (this one included), left the seconds to its day's end. */
+export const rateLimitWait = (retryAfter: number | undefined, limited: number, left: number) =>
+  Math.max(1, Math.min(Math.max(retryAfter ?? 0, Math.min(RATE_LIMIT_FLOOR_S * 2 ** Math.max(0, limited - 1), RATE_LIMIT_CAP_S)), left));
 /**
  * How many times the sweep gives an alert a new job after its job failed for good (a run of database failures before
  * the post, or a lease exhausted). At most once an hour, inside the alert's day: then it is failed, never forgotten.
@@ -205,7 +218,7 @@ export async function sweepAlerts(runtime: Hosted) {
  *   and which wait is the same however their jobs are ordered: the oldest first, the ID breaking a tie.
  * - Accepted (2xx): marked sent. Refused (Slack answered 4xx or 5xx) or unreachable (no connection): its place is given
  *   back and the job retries (jobs.ts: 15 s, 1, 4, 16 minutes, then hourly), MAX_ATTEMPTS tries in all, the last
- *   marking it failed; a 429 with Retry-After waits exactly that long instead, holding no worker and spending no try.
+ *   marking it failed; a 429 waits instead (RATE_LIMIT_*), holding no worker and spending no try.
  * - Unanswered (no answer in POST_TIMEOUT_MS): Slack may have taken it, so it is never treated as refused. It keeps its
  *   place and is tried once more after AFTER_TIMEOUT_MS; a second unanswered post marks it unconfirmed (posted, perhaps
  *   twice, never again; Health counts it so someone looks at the channel). A missed alert is worse than a doubled one.
@@ -256,21 +269,29 @@ const deliver: JobHandler = async (runtime, payload, job) => {
   catch (error) {
     if (!(error instanceof ApiError) && error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
       // Unanswered: it keeps its place, and gets one more try after a pause; the second unanswered post is the last.
-      const { rows: [after] } = await runtime.db.execute<{ status: string }>(sql`UPDATE abuse_alerts SET timeouts=timeouts+1,attempts=attempts+1,error='TIMEOUT',posting=false,
+      const { rows: [after] } = await runtime.db.execute<{ status: string }>(sql`UPDATE abuse_alerts SET timeouts=timeouts+1,attempts=attempts+1,error='TIMEOUT',posting=false,limited=0,
         status=CASE WHEN timeouts+1>=2 THEN 'unconfirmed' ELSE status END,sent_at=CASE WHEN timeouts+1>=2 THEN now() ELSE sent_at END
         WHERE id=${id} AND status='stored' RETURNING status`);
       log('warn', { code: after?.status === 'unconfirmed' ? 'ABUSE_ALERT_UNCONFIRMED' : 'ABUSE_ALERT_TIMEOUT' });
       if (after?.status === 'stored') throw new JobDeferred(new Date(Date.now() + AFTER_TIMEOUT_MS).toISOString(), undefined, true);
       return;
     }
-    // Refused or unreachable: the place goes back; the last try marks the alert failed (its job fails too). A 429 that
-    // says when to come back is followed exactly, without spending a try.
     const refused = error instanceof SlackRefused ? error : null;
-    const pause = refused?.status === 429 && refused.retryAfterSeconds !== undefined ? Math.min(Math.max(refused.retryAfterSeconds, 1), RETRY_AFTER_MOST_S) : null;
-    const last = pause === null && job.attempts >= MAX_ATTEMPTS, code = refused ? `HTTP_${refused.status}` : error instanceof ApiError ? error.code : 'UNREACHABLE';
-    await runtime.db.execute(sql`UPDATE abuse_alerts SET claimed_at=NULL,posting=false,attempts=attempts+1,error=${code.slice(0, 40)},status=CASE WHEN ${last} THEN 'failed' ELSE status END WHERE id=${id} AND status='stored'`);
-    log('warn', { code: 'ABUSE_ALERT_FAILED', reason: code, last, ...(pause !== null && { retryAfter: pause }) });
-    if (pause !== null) throw new JobDeferred(new Date(Date.now() + pause * 1000).toISOString(), undefined, true);
+    if (refused?.status === 429) {
+      // Limited: the place goes back (a 429 posted nothing, so the hour's caps count it nowhere) and the job waits,
+      // holding no worker and spending no try (RATE_LIMIT_*). Missing, zero, negative, unreadable or past Retry-After
+      // all read as no ask (postSlack), so the floor and the doubling decide.
+      const { rows: [row] } = await runtime.db.execute<{ limited: number; left: number }>(sql`UPDATE abuse_alerts SET claimed_at=NULL,posting=false,attempts=attempts+1,error='HTTP_429',limited=limited+1
+        WHERE id=${id} AND status='stored' RETURNING limited,extract(epoch FROM created_at+${FRESH}-now())::float8 AS left`);
+      if (!row) return;
+      const wait = rateLimitWait(refused.retryAfterSeconds, row.limited, row.left);
+      log('warn', { code: 'ABUSE_ALERT_LIMITED', limited: row.limited, wait: Math.round(wait) });
+      throw new JobDeferred(new Date(Date.now() + wait * 1000).toISOString(), undefined, true);
+    }
+    // Refused or unreachable: the place goes back; the last try marks the alert failed (its job fails too).
+    const last = job.attempts >= MAX_ATTEMPTS, code = refused ? `HTTP_${refused.status}` : error instanceof ApiError ? error.code : 'UNREACHABLE';
+    await runtime.db.execute(sql`UPDATE abuse_alerts SET claimed_at=NULL,posting=false,limited=0,attempts=attempts+1,error=${code.slice(0, 40)},status=CASE WHEN ${last} THEN 'failed' ELSE status END WHERE id=${id} AND status='stored'`);
+    log('warn', { code: 'ABUSE_ALERT_FAILED', reason: code, last });
     throw error instanceof ApiError ? error : new ApiError(503, 'ABUSE_ALERT_FAILED', 'The alert could not be posted; it will be retried.', undefined, true);
   }
   await runtime.db.execute(sql`UPDATE abuse_alerts SET status='sent',sent_at=now(),posting=false,attempts=attempts+1,error=NULL WHERE id=${id} AND status='stored'`);

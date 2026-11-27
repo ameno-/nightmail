@@ -132,10 +132,10 @@ export class SlackRefused extends ApiError {
     if (retryAfter !== null) this.retryAfterSeconds = retryAfter;
   }
 }
-/** Retry-After as seconds from now: a number of seconds or an HTTP date; null when absent or unreadable. */
+/** Retry-After as seconds from now: a number of seconds or an HTTP date (IMF-fixdate); null when absent or anything else. */
 const retryAfter = (header: string | null) => {
-  if (!header) return null;
-  const seconds = /^\d+$/.test(header.trim()) ? Number(header.trim()) : (Date.parse(header) - Date.now()) / 1000;
+  const value = header?.trim() ?? '';
+  const seconds = /^\d+$/.test(value) ? Number(value) : /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value) ? (Date.parse(value) - Date.now()) / 1000 : NaN;
   return Number.isFinite(seconds) ? Math.max(0, Math.ceil(seconds)) : null;
 };
 /** Posts a message to a Slack webhook. No answer within timeoutMs rejects with fetch's TimeoutError: Slack may have taken it. */

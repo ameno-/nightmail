@@ -219,6 +219,8 @@ export const SUPPORT_AI = { dailyLineUsd: 50, remindMinutes: 24 * 60 } as const;
 /**
  * Abuse monitoring (src/abuse.ts, src/abuse-alerts.ts). An alert is late when it is still unposted an hour after it was
  * stored: its job posts it within minutes, or waits for its level's hourly limit (a burst), so an hour means the channel
- * is behind or refusing; a late high alert is critical. Stage lag opens at two hours, and clears below 90 minutes or when no work remains.
+ * is behind or refusing; a late high alert is critical. So is one Slack has answered with rateLimitedMost 429s in a row
+ * (about half an hour of waits, src/abuse-alerts.ts RATE_LIMIT_*): it keeps waiting, but counts as not delivered from
+ * then, however young it is. Stage lag opens at two hours, and clears below 90 minutes or when no work remains.
  */
-export const ABUSE = { lateMinutes: 60, lagSeconds: 2*3600, clearSeconds: 90*60, remindMinutes: 24 * 60 } as const;
+export const ABUSE = { lateMinutes: 60, lagSeconds: 2*3600, clearSeconds: 90*60, remindMinutes: 24 * 60, rateLimitedMost: 6 } as const;
