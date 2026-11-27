@@ -23601,6 +23601,9 @@ describe('Billing: API, MCP and notices', () => {
         assert.equal(fake.count(/^POST \/v1\/payment_methods\/[^/]+\/detach$/), 1);
         const setup = ok(await local('POST', '/v1/billing/payment-method'), 201);
         assert.match(setup.checkoutUrl, /^https:\/\/checkout\.stripe\.test\//);
+        const checkout = ok(await local('POST', '/v1/billing/top-ups', { amountCents: 2500, method: 'checkout' }), 201);
+        assert.equal(checkout.status, 'pending');
+        assert.match(checkout.checkoutUrl, /^https:\/\/checkout\.stripe\.test\//);
       });
     });
   });
@@ -26695,7 +26698,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(lines.find(l => l.event === 'request' && l.requestId === slash.headers.get('x-request-id'))!.path, '/v1/domains/');
       const method = await request('PUT', '/v1/domains', key.secret, {}), methodBody = method.body.error;
       assert.deepEqual([method.status, methodBody.details, method.headers.get('allow')], [404, [{ path: '/v1/domains', allowedMethods: ['GET', 'POST'] }], 'GET, POST']);
-      assert.match(methodBody.message, /^Route not found: no endpoint answers PUT on this path\. \/v1\/domains doesn’t take PUT; it takes GET, POST\. Every operation/);
+      assert.match(methodBody.message, /^Route not found: no endpoint answers PUT on this path\. \/v1\/domains doesn’t take PUT; it takes GET, POST\. Public operations/);
       const guess = await request('GET', '/v1/domains/dom_0123456789/dns-setup/mdom_0123456789', key.secret), guessBody = guess.body.error;
       assert.deepEqual([guess.status, guessBody.details], [404, [{ closest: { method: 'GET', path: '/v1/domains/{id}/dns-setup' } }]]);
       assert.ok(!JSON.stringify(guessBody).includes('0123456789'), 'The answer never echoes what the caller put in the path.');
