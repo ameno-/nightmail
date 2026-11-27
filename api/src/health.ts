@@ -62,6 +62,7 @@ const KINDS = {
   'abuse-alerts-undelivered': { emoji: ':mag:', label: 'Abuse alerts not delivered', severity: 'warning', unit: 'alerts', section: 'database' },
   'abuse-item-failing': { emoji: ':mag:', label: 'Abuse monitoring item failing', severity: 'warning', unit: 'items', section: 'database' },
   'abuse-monitor-behind': { emoji: ':mag:', label: 'Abuse monitoring behind', severity: 'warning', unit: 'seconds', section: 'database' },
+  'abuse-sample-held': { emoji: ':mag:', label: 'Abuse sample marks held', severity: 'warning', unit: 'runs', section: 'database' },
 } as const satisfies Record<string, { emoji: string; label: string; severity: Severity; unit: string; section: Section }>;
 type Kind = keyof typeof KINDS;
 const isKind = (kind: string): kind is Kind => Object.hasOwn(KINDS, kind);
@@ -96,6 +97,7 @@ type Database = { heldDomains?: string[]; /** What the support AI cost since UTC
   /** Abuse alerts that should have gone out and have not (late: unposted past ABUSE.lateMinutes; failed; expired unposted), of them the high ones, and those posted but unconfirmed. */
   abuseUndelivered?: { late: number; failed: number; expired: number; high: number; unconfirmed?: number; limited?: number };
   abuseFailures?: Record<string,{count:number;seconds:number}> | null;
+  /** Sample runs in a row that set no marks: a session it can't see the start of held the write lock on sent-mail events, or the check failed. */ abuseSampleHeld?: number | null;
   /** Seconds since the oldest outstanding observation or due time, by stage. */ abuseBehind?: Record<string, number | null> | null; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
 export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Failed[] | null; campaigns: CampaignRow[] | null; counters: CounterRow[] | null; database: Database | null };
@@ -299,7 +301,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
 
   let database: Rollup['database'] = null;
   if (sample.database) {
-    const { heldDomains, supportAiToday, abuseUndelivered, abuseBehind, abuseFailures, ...d } = sample.database;
+    const { heldDomains, supportAiToday, abuseUndelivered, abuseBehind, abuseFailures, abuseSampleHeld, ...d } = sample.database;
     for (const domain of heldDomains ?? []) find('link-domain-held', domain, 1, `Marketing releases using ${id(domain)} are paused after a confirmed DBL listing.`, DATABASE.remindMinutes);
     if (supportAiToday !== undefined && supportAiToday >= SUPPORT_AI.dailyLineUsd)
       find('support-ai-cost', null, supportAiToday, `${dollars(supportAiToday)} since midnight UTC, past the ${dollars(SUPPORT_AI.dailyLineUsd)} daily line.`, SUPPORT_AI.remindMinutes);
@@ -309,6 +311,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
       if (n > 0) find('abuse-alerts-undelivered', null, n, `${count(n)} not delivered${high ? ` (${count(high)} high, unposted)` : ''}: ${[late && `${count(late)} unposted over ${ABUSE.lateMinutes} minutes`, failed && `${count(failed)} failed`,
         expired && `${count(expired)} expired unposted`, limited && `${count(limited)} rate limited (Slack answers 429; still waiting)`, unconfirmed && `${count(unconfirmed)} posted but unconfirmed (Slack didn't answer; check the channel)`].filter(Boolean).join(', ')}.`, ABUSE.remindMinutes, high > 0 ? 'critical' : 'warning');
     }
+    if ((abuseSampleHeld ?? 0) >= ABUSE.sampleHeldRuns) find('abuse-sample-held', null, abuseSampleHeld!, `the sample set no new marks ${count(abuseSampleHeld!)} runs in a row: a database session it can't see the start of is writing sent-mail events, or its check failed (ABUSE_SAMPLE_MARKS_HELD in Workers logs). Until a run sets them, workspaces with nothing to sample are read again every run. No mail is skipped.`, ABUSE.remindMinutes);
     for (const [stage, failed] of Object.entries(abuseFailures ?? {})) {
       const affected = stage==='scores' ? 'clusters cannot be scored; no alert can be raised for them'
         : stage==='links' ? 'groups cannot be formed or scored; no alert can be raised for them'
@@ -398,7 +401,7 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
         'limited',count(*) FILTER (WHERE status='stored' AND limited>=${ABUSE.rateLimitedMost} AND created_at>=now()-make_interval(mins=>${ABUSE.lateMinutes})),
         'unconfirmed',count(*) FILTER (WHERE status='unconfirmed' AND sent_at>now()-interval '1 day'))
         FROM abuse_alerts WHERE created_at>now()-interval '2 days') AS "abuseUndelivered",
-      ${abuse?.abuseLag ?? sql`NULL`} AS "abuseBehind",${abuse?.abuseFailures ?? sql`NULL`} AS "abuseFailures",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
+      ${abuse?.abuseLag ?? sql`NULL`} AS "abuseBehind",${abuse?.abuseFailures ?? sql`NULL`} AS "abuseFailures",${abuse ? sql`(SELECT sample_held FROM abuse_state WHERE id='monitor')` : sql`NULL`} AS "abuseSampleHeld",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
       current_setting('max_connections')::int AS "maxConnections",(SELECT count(*) FROM ${activity} AND xact_start<now()-interval '1 minute')::int AS "longTransactions",
       coalesce((SELECT extract(epoch FROM now()-min(xact_start)) FROM ${activity}),0)::int AS "oldestTransactionSeconds",
       (SELECT count(*) FROM ${activity} AND state='active' AND query_start<now()-interval '30 seconds')::int AS "slowQueries",

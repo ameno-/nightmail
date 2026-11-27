@@ -584,37 +584,80 @@ const ownMail = (mail: SQL) => sql`(${mail}.snapshot @> '{"screenVerdict":{"stat
     SELECT FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=${mail}.workspace_id AND u.email_verified AND lower(u.email)=lower(r.address))))`;
 /** How long after its stamp an accepted event may become visible, as far as the sample's mark assumes (settledThrough). */
 export const SAMPLE_SETTLE = { marginMs: 15 * 60_000 };
+/** Which limit decided how far a sample run may record a read (sampleBound). */
+export type SampleBound = {
+  /** The instant, or null: no marks for a workspace with nothing eligible this run. */
+  at: string | null;
+  /** margin: SAMPLE_SETTLE alone. writer: an open writer of sent-mail events started earlier. hidden: one whose start
+   *  this role cannot see holds the write lock. unreadable: the check failed. missing: no sending_email_events table. */
+  rule: 'margin' | 'writer' | 'hidden' | 'unreadable' | 'missing';
+  /** Open writers of sent-mail events (sessions holding the write lock), how many of them hidden, the oldest's age in
+   *  seconds (visible ones), and their process IDs (for a test's failure message; never logged). */
+  writers: number; hidden: number; oldestSeconds: number | null; pids: number[];
+};
 /**
- * The latest instant a read can be recorded through without skipping mail that becomes visible after it, or null when
- * that cannot be known (then no mark is set for a workspace with nothing eligible, as before this existed). Accepted
- * mail is stamped with the database's clock inside the statement that writes it (dispatcher.ts recordOutcomes,
- * sending.ts persistEmailEvent and ingestRoutineSesEvents; check-premerge.ts holds every writer to it; simulated mail, stamped
- * with the Worker's clock, is never sampled: NOT v.simulated below), so the earlier of:
- * - the start of the oldest transaction open now that holds a transaction ID: mail still invisible was stamped by a
- *   transaction open now (at or after its start; one that locked or wrote anything has an ID) or one that begins
- *   later, however long it then takes to commit;
- * - SAMPLE_SETTLE.marginMs before now: covers a writer that stamps before it holds an ID, and a stamp a little older
- *   than its statement (another clock), for as long as the margin.
- * pg_stat_activity shows a session's start only to the same role: one holding an ID whose start is hidden (another
- * role) makes the result unknown, never ignored. It is a snapshot taken at its first read in a transaction, so it is
- * cleared first.
+ * The latest instant a read can be recorded through without skipping mail that becomes visible after it. Accepted mail
+ * is stamped with clock_timestamp() inside the statement that writes it (dispatcher.ts recordOutcomes, sending.ts
+ * persistEmailEvent and ingestRoutineSesEvents; check-premerge.ts "Accepted mail stamp" refuses any other stamp;
+ * simulated mail, stamped with the Worker's clock, is never sampled: NOT v.simulated below). Such a statement takes
+ * RowExclusiveLock on sending_email_events (or the partition it names) when it starts, before any row is stamped, and
+ * the transaction holds it to its end. So a row that can still become visible with a stamp earlier than now belongs to
+ * a transaction that holds that lock now, whoever owns it: pg_locks lists every session's locks (fast-path ones too) to
+ * every role, unlike pg_stat_activity, which hides another role's start. The instant is the earlier of:
+ * - the start of the oldest session holding that lock (its rows are stamped at or after it): a writer that takes the
+ *   lock after this check stamps after it;
+ * - SAMPLE_SETTLE.marginMs before now: a stamp a little older than its statement, and the moment between a statement's
+ *   start and its lock.
+ * A session holding the lock whose start is hidden (another role), or a prepared transaction holding it (no session),
+ * makes it unknown: null, never ignored. Sessions that hold no such lock (autovacuum, a long read, an idle transaction)
+ * hold nothing back. Waiting lock requests count too. The margin is measured from this statement's start, before it
+ * reads pg_locks or pg_stat_activity (a snapshot taken at its first read in a transaction, so cleared first): a
+ * lock-holder with no activity row has ended (its rows are visible to the reads, which all start after this check) or
+ * began after the snapshot, so after the statement started, and stamps later than the mark.
  */
-async function settledThrough(runtime: Hosted) {
+export async function sampleBound(runtime: Hosted): Promise<SampleBound> {
+  const none = { writers: 0, hidden: 0, oldestSeconds: null, pids: [] };
   try {
     const { rows: [view] } = await bounded(runtime, async tx => {
       await tx.execute(sql`SELECT pg_stat_clear_snapshot()`);
-      return tx.execute<{ at: string; hidden: number }>(sql`SELECT ${utc(sql`(least(clock_timestamp()-make_interval(secs=>${SAMPLE_SETTLE.marginMs / 1000}),
-          min(xact_start) FILTER (WHERE backend_xid IS NOT NULL))-interval '1 microsecond')`)} AS at,
-        count(*) FILTER (WHERE backend_xid IS NOT NULL AND xact_start IS NULL)::int AS hidden
-        FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()`);
+      return tx.execute<{ found: boolean; at: string; writer: boolean; writers: number; hidden: number; oldest: number | null; pids: number[] | null }>(sql`WITH RECURSIVE
+        target(oid) AS (SELECT to_regclass('sending_email_events')::oid UNION SELECT i.inhrelid FROM pg_inherits i JOIN target t ON i.inhparent=t.oid),
+        holders AS (SELECT DISTINCT l.pid FROM pg_locks l WHERE l.locktype='relation' AND l.mode='RowExclusiveLock'
+          AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND l.relation IN (SELECT oid FROM target WHERE oid IS NOT NULL)
+          AND l.pid IS DISTINCT FROM pg_backend_pid()),
+        seen AS (SELECT h.pid,a.pid IS NOT NULL AS active,a.xact_start FROM holders h LEFT JOIN pg_stat_activity a ON a.pid=h.pid),
+        margin AS (SELECT statement_timestamp()-make_interval(secs=>${SAMPLE_SETTLE.marginMs / 1000}) AS at)
+        SELECT (SELECT bool_or(oid IS NOT NULL) FROM target) AS found,
+          ${utc(sql`(least((SELECT at FROM margin),min(s.xact_start))-interval '1 microsecond')`)} AS at,
+          coalesce(min(s.xact_start)<(SELECT at FROM margin),false) AS writer,
+          count(*) FILTER (WHERE s.pid IS NULL OR s.active)::int AS writers,
+          count(*) FILTER (WHERE s.pid IS NULL OR (s.active AND s.xact_start IS NULL))::int AS hidden,
+          extract(epoch FROM clock_timestamp()-min(s.xact_start))::float8 AS oldest,
+          array_agg(s.pid) FILTER (WHERE s.active) AS pids
+        FROM seen s`);
     });
-    if (view && view.hidden === 0 && view.at) return view.at;
-    log('error', { code: 'ABUSE_SAMPLE_MARKS_HELD', reason: 'hidden_writer', writers: view?.hidden ?? 0 });
+    if (!view?.found) return { at: null, rule: 'missing', ...none };
+    const found = { writers: view.writers, hidden: view.hidden, oldestSeconds: view.oldest === null ? null : Math.round(view.oldest), pids: view.pids ?? [] };
+    if (view.hidden > 0) return { at: null, rule: 'hidden', ...found };
+    return { at: view.at, rule: view.writer ? 'writer' : 'margin', ...found };
   } catch (error) {
     if (timeError(error)) throw error;
-    log('error', { code: 'ABUSE_SAMPLE_MARKS_HELD', reason: 'unreadable' });
+    return { at: null, rule: 'unreadable', ...none };
   }
-  return null;
+}
+/**
+ * sampleBound for a run, said in the logs and counted: a run that may set no marks logs ABUSE_SAMPLE_MARKS_HELD with
+ * which rule held them, and abuse_state.sample_held counts such runs in a row (Health: abuse-sample-held); a run whose
+ * marks an open writer older than the margin capped logs ABUSE_SAMPLE_MARKS_CAPPED with its age. Never a query, a role
+ * or a process ID.
+ */
+async function settledThrough(runtime: Hosted) {
+  const bound = await sampleBound(runtime);
+  if (bound.at === null) log('error', { code: 'ABUSE_SAMPLE_MARKS_HELD', reason: bound.rule, writers: bound.writers, hidden: bound.hidden });
+  else if (bound.rule === 'writer') log('info', { code: 'ABUSE_SAMPLE_MARKS_CAPPED', writers: bound.writers, oldestSeconds: bound.oldestSeconds });
+  try { await bounded(runtime, tx => tx.execute(sql`UPDATE abuse_state SET sample_held=CASE WHEN ${bound.at === null} THEN least(sample_held+1,32767) ELSE 0 END WHERE id='monitor'`)); }
+  catch (error) { if (timeError(error)) throw error; log('warn', { code: 'ABUSE_STEP_FAILED', step: 'sampleHeld' }); }
+  return bound.at;
 }
 /**
  * Fingerprints a bounded sample of the mail each workspace had accepted since it was last sampled, its own mail

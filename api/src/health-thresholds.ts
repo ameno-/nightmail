@@ -222,5 +222,9 @@ export const SUPPORT_AI = { dailyLineUsd: 50, remindMinutes: 24 * 60 } as const;
  * is behind or refusing; a late high alert is critical. So is one Slack has answered with rateLimitedMost 429s in a row
  * (about half an hour of waits, src/abuse-alerts.ts RATE_LIMIT_*): it keeps waiting, but counts as not delivered from
  * then, however young it is. Stage lag opens at two hours, and clears below 90 minutes or when no work remains.
+ * The sample is held when sampleHeldRuns runs in a row (it runs about hourly) set no marks because a session it can't
+ * see the start of held the write lock on sent-mail events, or its check failed: a real writer's statement lasts well
+ * under a second, so one held run is a chance overlap and three in a row (about three hours) is something lasting
+ * (another role writing, a role change that hides our own writers, a broken check); until then each is a log line.
  */
-export const ABUSE = { lateMinutes: 60, lagSeconds: 2*3600, clearSeconds: 90*60, remindMinutes: 24 * 60, rateLimitedMost: 6 } as const;
+export const ABUSE = { lateMinutes: 60, lagSeconds: 2*3600, clearSeconds: 90*60, remindMinutes: 24 * 60, rateLimitedMost: 6, sampleHeldRuns: 3 } as const;

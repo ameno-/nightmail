@@ -507,29 +507,79 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`Operation summaries: all ${operations.length} operations are named in at most ${most} characters, so every docs title fits in 60.`);
 }
 
-// 13. Accepted mail is stamped with the database's clock inside the statement that writes it. The abuse sample records
-// how far it read a workspace (src/abuse.ts settledThrough) and relies on this: mail stamped with another clock (a
-// Worker's, SES's) or with its transaction's start can become visible behind that mark and is never read. So every
-// statement that inserts into sending_email_events either stamps created_at with clock_timestamp() (for accepted mail
-// at least) or says, in an SQL comment inside the statement, that it never writes type 'accepted':
-// /* premerge-accepted: never (why) */. The check is textual: it holds each writer to declaring one or the other.
+// 13. Accepted mail is stamped with clock_timestamp() inside the statement that writes it. The abuse sample records how
+// far it read a workspace (src/abuse.ts sampleBound) and relies on it: such a statement takes its write lock on
+// sending_email_events when it starts, before any row is stamped, so a stamp is never earlier than the lock. A stamp
+// from now(), transaction_timestamp() or current_timestamp (the transaction's start, maybe long before the lock), from
+// statement_timestamp() (the statement's start, just before its lock), from the column's default now() or from another
+// clock (a Worker's, SES's) can become visible behind that mark and is never read. So every statement that inserts into
+// sending_email_events either gives created_at, in its own projection, exactly clock_timestamp() or
+// CASE WHEN <type>='accepted' AND NOT <simulated> THEN clock_timestamp() ELSE <anything> END, or says inside the
+// statement that it never writes type 'accepted': /* premerge-accepted: never (why) */. The projection is parsed (the
+// value in created_at's position), not searched, so a clock_timestamp() elsewhere in the statement doesn't count.
 {
   const before = failed;
   const files = (dir: string, keep: (name: string) => boolean): string[] => readdirSync(new URL(dir, api), { withFileTypes: true })
     .flatMap(e => e.isDirectory() ? files(`${dir}${e.name}/`, keep) : keep(e.name) ? [`${dir}${e.name}`] : []);
   const scanned = [...files('src/', n => n.endsWith('.ts')), ...files('scripts/', n => n.endsWith('.ts') && n !== 'check-premerge.ts'), ...files('migrations/', n => Number(n.slice(0, 3)) >= 580)];
-  let writers = 0;
+  // The top-level items of the SELECT or VALUES list that starts at `from`, or null. Skips SQL strings and comments,
+  // nested parentheses and ${...} interpolations (JS, possibly with nested templates), and stops at the list's end.
+  const projection = (text: string, from: number): string[] | null => {
+    let at = from;
+    const skipSpace = () => { for (;;) { const rest = text.slice(at); const m = /^(\s+|--[^\n]*|\/\*[\s\S]*?\*\/)/.exec(rest); if (!m) return; at += m[0].length; } };
+    // Past a ${...} starting at `k` (pointing at '$'): JS code with braces, strings and nested templates.
+    const interpolation = (k: number): number => {
+      let depth = 0;
+      for (let c = k + 1; c < text.length; c++) {
+        const ch = text[c]!;
+        if (ch === '{') depth++;
+        else if (ch === '}') { if (--depth === 0) return c + 1; }
+        else if (ch === "'" || ch === '"') { c++; while (c < text.length && text[c] !== ch) { if (text[c] === '\\') c++; c++; } }
+        else if (ch === '`') { c++; while (c < text.length && text[c] !== '`') { if (text[c] === '\\') c++; else if (text[c] === '$' && text[c + 1] === '{') { c = interpolation(c) - 1; } c++; } }
+      }
+      return text.length;
+    };
+    skipSpace();
+    const values = /^VALUES\s*\(/i.exec(text.slice(at)), select = /^SELECT\b/i.exec(text.slice(at));
+    if (!values && !select) return null;
+    at += (values ?? select)![0].length;
+    const items: string[] = [];
+    let depth = 0, start = at;
+    for (; at < text.length; at++) {
+      const ch = text[at]!;
+      if (ch === '$' && text[at + 1] === '{') { at = interpolation(at) - 1; continue; }
+      if (ch === "'") { at++; while (at < text.length && !(text[at] === "'" && text[at + 1] !== "'")) { if (text[at] === "'") at++; at++; } continue; }
+      if (ch === '-' && text[at + 1] === '-') { at = text.indexOf('\n', at); if (at < 0) at = text.length; continue; }
+      if (ch === '/' && text[at + 1] === '*') { at = text.indexOf('*/', at) + 1; continue; }
+      if (ch === '`') break;
+      if (ch === '(') depth++;
+      else if (ch === ')') { if (depth === 0) break; depth--; }
+      else if (depth === 0 && ch === ',') { items.push(text.slice(start, at)); start = at + 1; }
+      else if (depth === 0 && select && /^FROM\b/i.test(text.slice(at)) && /\W/.test(text[at - 1] ?? ' ')) break;
+    }
+    items.push(text.slice(start, at));
+    return items.map(item => item.replace(/--[^\n]*/g, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\s+/g, ' ').trim());
+  };
+  const stampsAccepted = (value: string) => /^clock_timestamp\(\)$/i.test(value) || (() => {
+    const m = /^CASE WHEN (.+) THEN clock_timestamp\(\) ELSE (.+) END$/i.exec(value);
+    return !!m && /^(\$\{[\w.]+\}|[\w.]+)(::text)?\s*=\s*'accepted' AND NOT [\w.]*simulated$/i.test(m[1]!) && !/\bWHEN\b/i.test(m[2]!);
+  })();
+  let stamped = 0, never = 0;
   for (const path of scanned) {
     const text = readFileSync(new URL(path, api), 'utf8');
     for (const match of text.matchAll(/INSERT\s+INTO\s+sending_email_events\s*\(([^)]*)\)/gi)) {
-      writers++;
-      const rest = text.slice(match.index! + match[0].length), stop = rest.search(/\bRETURNING\b|\bON\s+CONFLICT\b|`/i), window = match[0] + rest.slice(0, stop < 0 ? 2000 : Math.min(stop, 2000));
-      const line = text.slice(0, match.index).split('\n').length;
-      if (/premerge-accepted: never/.test(window)) continue;
-      if (!/\bcreated_at\b/.test(match[1]!) || !/clock_timestamp\(\)/.test(window)) fail('Accepted mail stamp', `This insert into sending_email_events neither stamps created_at with clock_timestamp() nor says it never writes accepted mail. Stamp accepted mail (not simulated) with clock_timestamp() inside the statement, or add /* premerge-accepted: never (why) */ to it: the abuse sample's mark relies on it (src/abuse.ts settledThrough).`, `api/${path}`, line);
+      const line = text.slice(0, match.index).split('\n').length, where = `api/${path}`, end = match.index! + match[0].length;
+      const head = text.slice(end, end + 200);
+      if (/^\s*\/\*\s*premerge-accepted: never \([^)]+\)\s*\*\//.test(head)) { never++; continue; }
+      const columns = match[1]!.split(',').map(c => c.trim().toLowerCase()), k = columns.indexOf('created_at');
+      if (k < 0) { fail('Accepted mail stamp', 'This insert into sending_email_events leaves created_at to the column default now(), its transaction\'s start. Give it clock_timestamp() for accepted mail in the statement, or put /* premerge-accepted: never (why) */ right after its column list if it never writes accepted mail.', where, line); continue; }
+      const items = projection(text, end), value = items?.[k];
+      if (!items || items.length !== columns.length || value === undefined) { fail('Accepted mail stamp', `Can't read what this insert into sending_email_events puts in created_at (${items ? `${items.length} values for ${columns.length} columns` : 'no SELECT or VALUES list'}). Write it as INSERT ... (columns) SELECT/VALUES with created_at's value in its place.`, where, line); continue; }
+      if (!stampsAccepted(value)) { fail('Accepted mail stamp', `This insert into sending_email_events stamps created_at with ${value.slice(0, 120)}. Accepted mail (not simulated) must get clock_timestamp() there, in the statement that writes it (or CASE WHEN type='accepted' AND NOT simulated THEN clock_timestamp() ELSE ... END): the abuse sample's mark relies on it (src/abuse.ts sampleBound).`, where, line); continue; }
+      stamped++;
     }
   }
-  if (failed === before) console.log(`Accepted mail stamp: all ${writers} inserts into sending_email_events stamp accepted mail with the database's clock or never write it.`);
+  if (failed === before) console.log(`Accepted mail stamp: all ${stamped + never} inserts into sending_email_events: ${stamped} give created_at clock_timestamp() for accepted mail in their own projection, ${never} never write it.`);
 }
 
 if (failed) {
