@@ -2,9 +2,9 @@
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
 import { checkedOn, dayOf, fitWords, formatCount, listOf, money, nightmail, quote, shownSources, type Comparison, type Source } from '../prices.ts'
 import { billAt, groupOf, ORDERED, perSize } from '../page/comparison.ts'
-import { factsSection, rowLines } from '../page/facts.ts'
+import { briefFactsSection, rowLines } from '../page/facts.ts'
 import { comparisonQuestions } from '../questions.ts'
-import { pageName, plain, type Doc, type Section, type Table, type Text } from './doc.ts'
+import { folded, pageName, plain, type Doc, type Section, type Table, type Text } from './doc.ts'
 
 // A vendor's alternatives page (/alternatives/<slug>, "SendGrid alternatives"): Nightmail's price and the others' at the
 // vendor's own three sizes, Get started, and one table (Ryan: "headline, button, comparison underneath"): Nightmail's row
@@ -82,9 +82,9 @@ export function vendorAlternatives(c: Comparison): Doc {
   const dash = (rows: (typeof group)[number][]) => rows.some(r => r.bills.some(b => b.theirsCents === null)) ? DASH : ''
   const visible: Section = {
     id: 'alternatives', title: `${vendor} alternatives, a month at three sizes`, quiet: true,
-    blocks: [table([self, ...shown], [`${claim} ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month.${perColumn} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash([self, ...shown])}`])],
+    blocks: [folded(table([self, ...shown], [`${claim} ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month.${perColumn} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash([self, ...shown])}`]), m.per === 'contact' ? `${m.sendsPerContact} emails to each contact a month; list prices before tax.` : 'List prices before tax, each one’s least expensive plan.')],
   }
-  const sections: Section[] = [visible, factsSection(rowLines(c.rows))]
+  const sections: Section[] = [visible, briefFactsSection(rowLines(c.rows))]
 
   // ---------------------------------------------------------------- the Markdown copy: every service, the basis, the pages read
 
@@ -122,7 +122,7 @@ export function vendorAlternatives(c: Comparison): Doc {
   ]
   const cardWords: Doc['cardWords'] = { lines: [`${productName} ${middleBill.ours}.`, `${counted.length} others from ${money(lowest)}.`], caption: fitWords([`${vendor} and ${spelled(shown.length)} alternatives, ${size.replace(/^Per /, '')}, checked ${when}.`, `${vendor} and ${spelled(shown.length)} alternatives, checked ${when}.`, `${vendor} and ${shown.length} more, checked ${when}.`], 70) }
   return {
-    path, title: `${vendor} alternatives`, searchTitle, description, h1, answer: [[caption]], cardWords, sections, questions: [],
+    path, title: `${vendor} alternatives`, searchTitle, description, h1, answer: [[caption]], caption: [`${vendor} alternatives, per ${formatCount(sizes[1]!)} ${m.per === 'contact' ? 'contacts' : 'emails'} · checked ${when.replaceAll(' ', '\u00a0')}`], cardWords, sections, questions: [],
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] },
     related, focus: c.focus, modified: checked.at(-1)!,
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }, { name: `${vendor} alternatives`, path }],

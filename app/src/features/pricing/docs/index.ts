@@ -8,7 +8,8 @@ import { vendorAlternatives } from './alternatives.ts'
 import { ALTERNATIVES_VENDORS, PRICING_VENDORS } from './registry.ts'
 import { vendorPricing } from './vendor-pricing.ts'
 import { hubCard, hubDoc } from '../page/hub.ts'
-import { factsFor, rowLines, SHARED_FACTS } from '../page/facts.ts'
+import { BRIEF, factsFor, rowLines, SHARED_FACTS, wordCount } from '../page/facts.ts'
+import { plain } from '../page/shape.ts'
 import { PANELS } from '../panels.ts'
 
 // The pages that answer a question about email prices (docs/doc.ts), every one the registry names (registry.ts). pages.ts
@@ -68,6 +69,31 @@ export function docProblems(): string[] {
       ...c.rows.map(row => row.source ? row.text.replace(row.note ?? '', '') : row.text)]
     const says = ours.find(line => item.subject.test(line))
     if (says) problems.push(`/compare/${c.slug} lists "${item.what}" as something ${c.offer.vendor} has that Nightmail doesn't, and Nightmail's own facts say "${says}".`)
+  }
+  // What a page shows besides its table's cells, its headline, its button and its row of links, every disclosure closed
+  // (Ryan: "way too much text … nobody's reading that"): the line under the heading, with the day, at most 10 words; a
+  // table's line at most 12, its whole note folded into "How we compared"; the facts at most four of at most six words;
+  // in all at most 45 words on a ranking page and 80 on a vendor's. (The sign-in terms under the button are the shared
+  // component's, not counted here.)
+  for (const doc of DOCS) {
+    const caption = plain(doc.caption ?? doc.answer[0] ?? []), vendorPage = /^\/(?:pricing|alternatives)\//.test(doc.path)
+    if (wordCount(caption) > 10 || !/checked \d/.test(caption.replaceAll('\u00a0', ' '))) problems.push(`${doc.path}'s line under the heading should be at most 10 words with the day read: "${caption}"`)
+    let words = wordCount(caption)
+    for (const section of doc.sections) {
+      if (!section.quiet && !(doc.sections.length === 1 && section.blocks[0]?.kind === 'table')) words += wordCount(section.title)
+      for (const block of section.blocks) {
+        if (block.kind === 'table') {
+          if (!block.method) problems.push(`${doc.path}'s table shows its whole note: fold it into How we compared (docs/doc.ts, folded).`)
+          else if (wordCount(plain(block.caption)) > 12) problems.push(`${doc.path}'s line under its table is over 12 words: ${plain(block.caption)}`)
+          words += wordCount(plain(block.caption)) + (block.method ? wordCount('How we compared') : 0)
+        } else if (block.kind === 'list') {
+          if (section.id === 'facts' && (block.items.length > BRIEF.facts || block.items.some(item => wordCount(plain(item)) > BRIEF.words))) problems.push(`${doc.path} lists more than ${BRIEF.facts} facts or one over ${BRIEF.words} words.`)
+          words += block.items.reduce((n, item) => n + wordCount(plain(item)), 0)
+        } else words += wordCount(plain(block.text))
+      }
+    }
+    const most = vendorPage ? 80 : 45
+    if (words > most) problems.push(`${doc.path} shows ${words} words besides its table, headline, button and links: at most ${most}.`)
   }
   if (new Set(DOCS.map(doc => doc.path)).size !== DOCS.length) problems.push('Two pages have the same address (docs/registry.ts).')
   return problems
