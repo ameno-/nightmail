@@ -3172,6 +3172,53 @@ test('forwards: a recipient’s Stop or Decline is recorded on the forward’s r
   }
   t.diagnostic('Stop and Decline answered in (ms): '+JSON.stringify(measured));
 });
+test('built-in domain replies to support: two racing for the last place in support’s count across workspaces, on their own connections, grant exactly one',async t=>{
+  // Real connections, so the second reply waits for the first's lock and reads the count only once the first committed. The
+  // two answer different addresses of the support mailbox (its address and an alias), which share one lock and one count.
+  if(!fixtureWorker)return t.skip('requires the loopback worker and real database connections');
+  const {drizzle}=await import('drizzle-orm/node-postgres'),{builtinReplyException}=await import('./src/builtin-domain.js');
+  const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:4,connectionTimeoutMillis:2000});t.after(()=>pool.end());
+  const parent=`${unique('bip')}.invalid`,platform=`${unique('plat')}.invalid`,support=`support@${platform}`,alias=`help@${platform}`,supportBox='mbx_'+randomUUID().replaceAll('-',''),platformWs=unique('ws-platform');
+  const rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,multiTenant:true,builtinDomain:parent,builtinScope:'members' as const,previousOrigins:[`https://${platform}`],
+    support:{addressIds:[supportBox]},builtinReplies:{perDay:5,perRecipientPerDay:2,supportPerDay:3}}};
+  await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[platformWs]);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[supportBox,platformWs,platform,REGION]);
+  await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'address','forever')",[supportBox,platformWs,support]);
+  await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary'),($1,$4,$3,'alias')",[platformWs,support,supportBox,alias]);
+  // Two workspaces, each holding a message support sent its built-in address (authenticated, addressed to it).
+  const answering=await Promise.all([support,alias].map(async(sender,n)=>{
+    const wid=unique('ws-race'),host=`r${n}.${parent}`,box=unique('mbx'),id=unique('msg'),thread=unique('thr');
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[box,wid,host,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'address','forever')",[box,wid,`hello@${host}`]);
+    await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[thread,wid]);
+    await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,subject,from_address,"to",envelope_to,verdicts,text,received_at) VALUES($1,$2,'inbound',$3,$4,'Re: Help',$5,$6,'[]','{"dmarc":"PASS"}','Hello',now())`,
+      [id,wid,thread,REGION,sender,JSON.stringify([{address:`hello@${host}`}])]);
+    await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,received_at,reply_author_verified) VALUES($1,$2,$3,$4,'inbound',now(),true)",[box,id,wid,thread]);
+    return {wid,host,sender,reply:{messageId:id,mailboxId:box}};
+  }));
+  // Other workspaces used two of the three places today: one is left.
+  for (let n=0;n<2;n++) await db.query('INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES($1,$2,$3)',[unique('ws-other'),unique('msg'),support]);
+  const used=async()=>(await db.query("SELECT count(*)::int AS n FROM builtin_replies WHERE recipient=ANY($1::text[]) AND created_at>now()-interval '1 day'",[[support,alias]])).rows[0].n as number;
+  // The first is granted and keeps its transaction open (as a send does through screening and admission); the second starts then.
+  let decided!:(r:unknown)=>void,release!:()=>void;const firstDecided=new Promise(resolve=>{decided=resolve;}),held=new Promise<void>(resolve=>{release=resolve;});
+  const answer=(a:typeof answering[number],hold:boolean)=>rt.db.transaction(async tx=>{const r=await builtinReplyException(rt,tx,a.wid,[a.sender],a.reply,a.host);if(hold){decided(r);await held;}return r;});
+  const first=answer(answering[0]!,true);first.catch(decided);
+  let second:ReturnType<typeof answer>|undefined;
+  try {
+    assert.equal(await firstDecided,true);
+    second=answer(answering[1]!,false);
+    let waited=0;
+    for (let i=0;i<200&&!waited;i++) {
+      waited=(await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND wait_event='advisory' AND query LIKE '%builtin-replies:support%'")).rows[0].n;
+      if(!waited)await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    assert.equal(waited,1,'The second reply waits on the first’s lock.');
+  } finally { release(); }
+  const [granted,refused]=await Promise.all([first,second!]);
+  assert.deepEqual([granted,(refused as {reason?:string}).reason],[true,'support_cap']);
+  assert.equal(await used(),3,'Exactly one more: three replies to support today.');
+});
 test('mail gateway: SMTP queues dispatchable content with a single database connection',async t=>{
   if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
   const {drizzle}=await import('drizzle-orm/node-postgres'),{ensureRegionSettings}=await import('./src/ses-region-state.js');
@@ -27619,7 +27666,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // thread reply may go once to the sender of the message it answers when that sender passed authentication; every
       // other case is still refused, with which condition failed. The caps here are arbitrary.
       {
-        runtime.config.builtinScope='members';runtime.config.builtinReplies={perDay:4,perRecipientPerDay:2};
+        runtime.config.builtinScope='members';runtime.config.builtinReplies={perDay:4,perRecipientPerDay:2,supportPerDay:300};
         // To the default inbox (an agent inbox, which replies only to authenticated authors already), or to support@ (an address).
         const fresh=async(o:{from?:string;verified?:boolean;automated?:boolean;replyTo?:string[];address?:boolean;to?:string[]}={})=>{const {n,mid}=await receive([o.address?`support@${host}`:`order-${randomUUID().slice(0,6)}@${host}`]);assert.equal(n,1);
           const id=unique('msg'),sender=o.from??'someone@sender.example',input=(await runtime.db.execute<{i:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS i`)).rows[0]!.i;
@@ -27669,7 +27716,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           await nextDay();
         }
         // Nightmail's support (an address of NIGHTMAIL_SUPPORT_ADDRESS_IDS, at a platform domain) is the one own address it
-        // answers: once per message support sent, within the workspace's daily count but not the count per recipient.
+        // answers: once per message support sent, within the workspace's daily count, and instead of the count per recipient a
+        // count of support's own across every workspace (NIGHTMAIL_BUILTIN_SUPPORT_REPLIES, 300 here).
         const platform='platform.builtin-fixture.example',supportAddress=`support@${platform}`,supportBox=`mbx_${randomUUID().replaceAll('-','')}`,platformWs=unique('ws-platform'),savedSupport=runtime.config.support;
         runtime.config.previousOrigins=[`https://${platform}`];runtime.config.support={...savedSupport,addressIds:[supportBox]};
         await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[platformWs]);
@@ -27693,8 +27741,26 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         // Support alone: another recipient, a cc or a bcc.
         for (const extra of [{to:[supportAddress,'someone@sender.example']},{cc:['copy@sender.example']},{bcc:['hidden@sender.example']}])
           assert.match(await refusedFor(answer(await fresh({from:supportAddress,address:true}),extra),'extra_recipient'),/alone: no other recipients/,JSON.stringify(extra));
-        // The workspace's own daily count still holds: three more replies to support use it (past the per-recipient count), the next is refused.
-        for (let n=0;n<3;n++) {ok(await answer(await fresh({from:supportAddress,address:true})),202);await nextDay();}
+        // Without support's count (unset or zero, as on dev and self-hosted), support is one of our own addresses: refused, as before.
+        runtime.config.builtinReplies={...runtime.config.builtinReplies!,supportPerDay:0};
+        assert.match(await refusedFor(answer(await fresh({from:supportAddress,address:true})),'own_address'),/one of Nightmail’s own addresses/);
+        runtime.config.builtinReplies={...runtime.config.builtinReplies!,supportPerDay:300};
+        // Another address's count across workspaces being full leaves support's alone.
+        for (const other of ['ws_busy_a','ws_busy_b']) await db.query("INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES($1,$2,'busy@sender.example')",[other,unique('msg')]);
+        assert.match(await refusedFor(answer(await fresh({from:'busy@sender.example',address:true})),'recipient_cap'),/daily allowance/);
+        ok(await answer(await fresh({from:supportAddress,address:true})),202);await nextDay();
+        // Support's count across workspaces: 300 today from all of them together (289 more from others here), then the next is refused.
+        await db.query("INSERT INTO builtin_replies(workspace_id,message_id,recipient,created_at) SELECT 'ws-many-'||n,'msg-many-'||n,$1,now()-interval '1 hour' FROM generate_series(1,289) n",[supportAddress]);
+        assert.equal((await db.query("SELECT count(*)::int AS n FROM builtin_replies WHERE recipient=$1 AND created_at>now()-interval '1 day'",[supportAddress])).rows[0].n,300);
+        const overCap=await fresh({from:supportAddress,address:true});
+        assert.match(await refusedFor(answer(overCap),'support_cap'),/daily allowance/);
+        assert.equal((await db.query('SELECT count(*)::int AS n FROM builtin_replies WHERE workspace_id=$1 AND message_id=$2',[wid,overCap.id])).rows[0].n,0,'A refused reply records nothing.');
+        // A reply to an ordinary outside sender doesn't draw on it.
+        ok(await answer(await fresh({from:'while-full@sender.example'})),202);await nextDay();
+        // One of the 300 ageing past 24 hours frees one place.
+        await db.query("UPDATE builtin_replies SET created_at=now()-interval '24 hours 1 minute' WHERE workspace_id='ws-many-1' AND recipient=$1",[supportAddress]);
+        ok(await answer(overCap),202);await nextDay();
+        // The workspace's own daily count still holds (4 here, now used): the next reply to support is refused by it.
         assert.match(await refusedFor(answer(await fresh({from:supportAddress,address:true})),'daily_cap'),/daily allowance/);
         runtime.config.previousOrigins=undefined;runtime.config.support=savedSupport;
         await db.query("UPDATE builtin_replies SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1",[wid]);
