@@ -54,4 +54,10 @@ export function registerForwardedMail(app: App) {
     try { await wakeReceivedMail(c.env, queued); } catch { /* the job is committed: the runner takes it */ }
     return c.json({ accepted: true as const, duplicate: false, recipients }, 202);
   });
+  // An access proxy that can only bypass whole paths leaves every method here to this route (app.ts). Registered after POST.
+  app.all(FORWARDED_MAIL_PATH, (c, next) => {
+    if (!c.env.config.mailForwarderSecret) return next();
+    c.header('Allow', 'POST');
+    throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Forwarded mail takes POST only.');
+  });
 }

@@ -25724,6 +25724,65 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
 
+test('self-hosted forwarded mail answers every other method with 405 and leaves subpaths behind authentication', async t => {
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  await simulatedSesFixture(t, async ({ runtime, db, fetch }) => {
+    let stored = 0;
+    runtime.storage = { async put() { stored++; }, async get() { return null; }, async stream() { return null; }, async delete() {} };
+    const url = `${PUBLIC_ORIGIN}/v1/events/forwarded-mail`;
+    const send = async (method: string, target: string, authorization?: string, body?: string) => {
+      const response = await fetch(new Request(target, { method, ...(['GET', 'HEAD'].includes(method) ? {} : { body: body ?? 'Subject: x\r\n\r\nx\r\n' }), headers: { 'content-type': 'message/rfc822', ...(authorization && { authorization }),
+        'x-nightmail-message-id': 'method', 'x-nightmail-envelope-from': '', 'x-nightmail-envelope-to': 'me@example.com' } }));
+      const text = await response.text();
+      return { status: response.status, body: (text ? JSON.parse(text) : null) as Json, headers: response.headers };
+    };
+    // Off until the secret is configured: the path is like any other under /v1.
+    error(await send('GET', url), 401, 'AUTH_REQUIRED');
+    runtime.config.mailForwarderSecret = secret;
+    const count = async () => (await db.query('SELECT (SELECT count(*) FROM mail_receipts WHERE workspace_id=$1)::int AS receipts, (SELECT count(*) FROM jobs WHERE workspace_id=$1)::int AS jobs', [runtime.config.workspaceId])).rows[0];
+    const before = await count();
+    for (const authorization of [undefined, `Bearer ${secret}`, 'Bearer wrong']) for (const method of ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const refused = await send(method, url, authorization);
+      assert.deepEqual([refused.status, refused.headers.get('allow'), refused.body?.error.code], [405, 'POST', method === 'HEAD' ? undefined : 'METHOD_NOT_ALLOWED'], `${method} ${authorization ? 'with' : 'without'} Authorization`);
+    }
+    // Past the 64 KiB an anonymous body may be buffered to: the method is refused, the body never measured.
+    error(await send('PUT', url, undefined, 'x'.repeat(100_000)), 405, 'METHOD_NOT_ALLOWED');
+    for (const path of ['/', '/x']) for (const method of ['GET', 'POST', 'PUT', 'OPTIONS']) {
+      error(await send(method, url + path), 401, 'AUTH_REQUIRED');
+      error(await send(method, url + path, `Bearer ${secret}`), 401, 'AUTH_INVALID');
+    }
+    assert.deepEqual([await count(), stored], [before, 0]);
+  });
+});
+
+test('self-hosted forwarded mail refuses a missing or wrong secret before reading the body', async t => {
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  await simulatedSesFixture(t, async ({ runtime, local, fetch }) => {
+    runtime.storage = { async put() {}, async get() { return null; }, async stream() { return null; }, async delete() {} };
+    runtime.config.mailForwarderSecret = secret;
+    const domain = `${unique('unread')}.example.com`.replaceAll('_', '-');
+    const created = ok(await local('POST', '/v1/domains', { name: domain, region: REGION }), 201);
+    ok(await local('POST', `/v1/inbound/domains/${created.id}/enable`, {}), 202);
+    const post = async (authorization: string | undefined, length: number | undefined) => {
+      let read = false;
+      // No read-ahead (highWaterMark 0): pull runs only when something reads the body.
+      const body = new ReadableStream<Uint8Array>({ pull(controller) { read = true; controller.enqueue(new Uint8Array(1)); controller.close(); } }, { highWaterMark: 0 });
+      const response = await fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/forwarded-mail`, { method: 'POST', body, duplex: 'half', headers: { 'content-type': 'message/rfc822', ...(authorization !== undefined && { authorization }), ...(length && { 'content-length': String(length) }),
+        'x-nightmail-message-id': 'unread', 'x-nightmail-envelope-from': '', 'x-nightmail-envelope-to': `me@${domain}` } } as RequestInit));
+      return { read, reply: { status: response.status, body: await response.json() as Json, headers: response.headers } };
+    };
+    // Declared large (within and past the 40 MiB limit), and with no declared length, as a chunked upload arrives.
+    for (const length of [39 * 1024 * 1024, 100 * 1024 * 1024, undefined]) for (const authorization of [undefined, `Bearer ${'0'.repeat(secret.length)}`, `Bearer ${secret}x`, 'Bearer x']) {
+      const { read, reply } = await post(authorization, length);
+      error(reply, 401, 'FORWARD_UNAUTHORIZED');
+      assert.equal(read, false, `${authorization?.length ?? 'no'} Authorization characters, length ${length}`);
+    }
+    // The same request with the secret is read, so the probe above would have seen a read.
+    const accepted = await post(`Bearer ${secret}`, undefined);
+    assert.deepEqual([accepted.reply.status, accepted.read], [202, true], JSON.stringify(accepted.reply.body));
+  });
+});
+
 test('self-hosted forwarded mail reaches a mailbox without SES: attachment, repeat ID, wrong secret, unknown recipient', async t => {
   const { loadConfig } = await import('./src/config.js');
   const secret = Buffer.from(randomBytes(32)).toString('hex');
