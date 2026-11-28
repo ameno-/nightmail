@@ -13,13 +13,6 @@ const Accepted = z.object({ accepted: z.literal(true), duplicate: z.boolean().de
 const sha256 = (value: string) => createHash('sha256').update(value).digest();
 const invalid = (name: string, rule: string) => new ApiError(422, 'FORWARD_ENVELOPE_INVALID', `${headerPrefix}${name} ${rule}`);
 
-/** Queues the deletion of a staged copy unless an unsettled receipt, or a hold that will become one, reads it. */
-async function dropUnreadStaging(runtime: Runtime, wid: string, mid: string, key: string) {
-  await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mail.deleteObjects',${wid},jsonb_build_object('region',${runtime.config.regions[0]!}::text,'bucket',${FORWARD_BUCKET}::text,'keys',jsonb_build_array(${key}::text))
-    WHERE NOT EXISTS(SELECT FROM mail_receipts WHERE workspace_id=${wid} AND ses_message_id=${mid} AND status IN ('pending','held') AND notification->>'stagingKey'=${key})
-      AND NOT EXISTS(SELECT FROM mail_receipt_holds WHERE bucket=${FORWARD_BUCKET} AND ses_message_id=${mid} AND status='held' AND notification->>'stagingKey'=${key})`);
-}
-
 export function registerForwardedMail(app: App) {
   app.openapi(createRoute({
     method: 'post', path: FORWARDED_MAIL_PATH, operationId: 'receiveForwardedMail', tags: ['Events'], security: [], summary: 'Receive forwarded mail',
@@ -44,18 +37,20 @@ export function registerForwardedMail(app: App) {
     const mid = `fwd-${await digest(forwarderId)}`;
     const [receipt] = await c.env.db.select({ recipients: mailReceipts.recipients, notification: mailReceipts.notification }).from(mailReceipts).where(and(eq(mailReceipts.workspaceId, wid), eq(mailReceipts.sesMessageId, mid)));
     if (receipt && recipients.every(address => receipt.recipients.includes(address))) return c.json({ accepted: true as const, duplicate: true, recipients }, 202);
+    // With every recipient held there is no receipt yet: the hold alone knows which bytes this ID was accepted with.
+    const accepted = receipt?.notification ?? (await c.env.db.execute<{ notification: unknown }>(sql`SELECT notification FROM mail_receipt_holds WHERE bucket=${FORWARD_BUCKET} AND ses_message_id=${mid}`)).rows[0]?.notification;
     await boundRequestBody(c, MAX_RAW_BYTES);
     const raw = new Uint8Array(await c.req.arrayBuffer());
     if (!raw.length) throw new ApiError(422, 'FORWARD_MESSAGE_EMPTY', 'The body must be the raw message.');
     // The first bytes accepted under an ID are the message: new recipients are added only to those same bytes.
     const hash = createHash('sha256').update(raw).digest('hex');
-    if (receipt && (receipt.notification as { sha256?: string }).sha256 !== hash) throw new ApiError(409, 'FORWARD_MESSAGE_CHANGED', 'This ID was accepted with a different message. Send another message under its own ID.');
+    if (accepted && (accepted as { sha256?: string }).sha256 !== hash) throw new ApiError(409, 'FORWARD_MESSAGE_CHANGED', 'This ID was accepted with a different message. Send another message under its own ID.');
     const stagingKey = forwardedStagingKey(wid, mid);
     await mailObjectsFor(c.env, wid, FORWARD_BUCKET).put(stagingKey, raw, 'message/rfc822');
     let queued: number;
     try { queued = await acceptForwardedReceipt(c.env, { mid, sender, recipients, stagingKey, sha256: hash }); }
-    // A concurrent request for this ID, or a refusal, leaves a copy no receipt reads: it is deleted like a settled one (591).
-    finally { await dropUnreadStaging(c.env, wid, mid, stagingKey); }
+    // A concurrent request for this ID, or a refusal, leaves a copy nothing reads: it is deleted like a settled one (592).
+    finally { await c.env.db.execute(sql`SELECT public.mail_forwarded_staging_drop(${wid},${mid},${config.regions[0]!},${stagingKey})`); }
     try { await wakeReceivedMail(c.env, queued); } catch { /* the job is committed: the runner takes it */ }
     return c.json({ accepted: true as const, duplicate: false, recipients }, 202);
   });

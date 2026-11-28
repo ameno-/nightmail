@@ -80,7 +80,8 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
     WHERE h.bucket=s.bucket AND h.ses_message_id=s.mid RETURNING 1` : sql`INSERT INTO mail_receipt_holds AS h(bucket,ses_message_id,region,topic_arn,binding_workspace,received_at,expires_at,notification,recipients,owners)
     SELECT b.bucket,b.mid,b.region,b.topic_arn,b.wid,b.at,b.expires_at,b.notification,u.recipients,u.owners FROM bound b JOIN unmatched u USING(bucket,mid)
     ON CONFLICT(bucket,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(h.recipients||excluded.recipients) v(a)),
-      notification=CASE WHEN excluded.notification ? 'stagingEtag' THEN h.notification ELSE excluded.notification END,owners=excluded.owners||h.owners,status='held'
+      -- A held forwarded hold keeps the copy it was accepted with. A settled one's may be deleted, so it takes the new request's.
+      notification=CASE WHEN excluded.notification ? 'stagingEtag' OR (h.bucket='local:' AND h.status='held') THEN h.notification ELSE excluded.notification END,owners=excluded.owners||h.owners,status='held'
     WHERE h.binding_workspace IS NOT DISTINCT FROM excluded.binding_workspace AND h.topic_arn=excluded.topic_arn AND h.expires_at>now() AND NOT h.recipients @> excluded.recipients RETURNING 1`})
   ${replay?sql``:sql`, ignored AS (INSERT INTO mail_ignored_staging(bucket,ses_message_id) SELECT b.bucket,b.mid FROM bound b WHERE NOT EXISTS(SELECT FROM groups) AND NOT EXISTS(SELECT FROM unmatched) ON CONFLICT DO NOTHING)`}
   SELECT EXISTS(SELECT FROM bound) AS trusted,(SELECT count(*)::int FROM queued) AS n,(SELECT count(*)::int FROM held) AS held,(SELECT count(*)::int FROM source) AS seen`);

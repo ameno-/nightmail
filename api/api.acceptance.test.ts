@@ -25893,6 +25893,136 @@ test('self-hosted forwarded mail reaches a mailbox without SES: attachment, repe
   });
 });
 
+// A hold is a recipient waiting for its host to route again: here one domain's parent is switched off, as the routing SQL
+// reads it. The hold and any receipt read the same staged copy until a later request stages another.
+async function forwardedHoldFixture(t: TestContext, scenario: (held: {
+  open: { address: string; id: string }; second: { address: string; id: string }; waiting: { address: string; id: string }; also: { address: string; id: string };
+  wid: string; db: pg.Client; post: (id: string, raw: string, to: string) => Promise<Reply>; message: (subject: string) => string;
+  staged: () => string[]; ingest: () => Promise<void>; replay: (change?: 'route' | 'expire') => Promise<void>;
+  hold: () => Promise<Json>; received: (inbox: { id: string }) => Promise<number>; deletions: () => Promise<Json[]>; objects: Map<string, { body: Uint8Array; contentType: string }>;
+}) => Promise<void>) {
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs, fetch }) => {
+    const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+    runtime.storage = {
+      async put(key, body, contentType) { objects.set(key, { body: new Uint8Array(body), contentType }); },
+      async get(key) { return objects.get(key) ?? null; },
+      async stream(key) { const found = objects.get(key); return found ? { body: new Blob([found.body as BlobPart]).stream(), contentType: found.contentType } : null; },
+      async delete(key) { objects.delete(key); },
+    };
+    runtime.config.mailForwarderSecret = secret;
+    const wid = runtime.config.workspaceId;
+    const domain = async (label: string) => {
+      const name = `${unique(label)}.example.com`.replaceAll('_', '-');
+      const created = ok(await local('POST', '/v1/domains', { name, region: REGION }), 201);
+      ok(await local('POST', `/v1/inbound/domains/${created.id}/enable`, {}), 202);
+      return { name, row: (await db.query('SELECT id FROM mailbox_domains WHERE workspace_id=$1 AND name=$2', [wid, name])).rows[0].id as string };
+    };
+    const routed = await domain('hold-open'), child = await domain('hold-child'), parent = await domain('hold-parent');
+    await db.query('UPDATE mailbox_domains SET parent_id=$2 WHERE id=$1', [child.row, parent.row]);
+    const setParent = (status: string) => db.query('UPDATE mailbox_domains SET status=$2 WHERE id=$1', [parent.row, status]);
+    await setParent('disabled');
+    const inbox = async (host: string, localPart: string) => ok(await local('POST', '/v1/inboxes', { type: 'persistent', domain: host, localPart }), 201) as { address: string; id: string };
+    const open = await inbox(routed.name, 'me'), second = await inbox(routed.name, 'second'), waiting = await inbox(child.name, 'me'), also = await inbox(child.name, 'also');
+    const drain = async (type: string) => { if ((await jobs(type)).some(job => job.status === 'pending')) await run(type); };
+    await scenario({
+      open, second, waiting, also, wid, db, objects,
+      message: subject => ['From: Ada <ada@sender.example.org>', `To: ${open.address}`, 'Bcc: hidden@elsewhere.example.net', `Subject: ${subject}`, `Message-ID: <${randomUUID()}@sender.example.org>`, '', 'body', ''].join('\r\n'),
+      post: async (id, raw, to) => {
+        const response = await fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/forwarded-mail`, { method: 'POST', body: raw, headers: { authorization: `Bearer ${secret}`, 'content-type': 'message/rfc822',
+          'x-nightmail-message-id': id, 'x-nightmail-envelope-from': 'ada@sender.example.org', 'x-nightmail-envelope-to': to } }));
+        return { status: response.status, body: await response.json(), headers: response.headers };
+      },
+      // What is left of the staged copies once every queued deletion has run.
+      staged: () => [...objects.keys()].filter(key => key.includes('/in-fwd-')),
+      ingest: async () => { await drain('mailbox.ingest'); await drain('mail.deleteObjects'); },
+      replay: async change => {
+        if (change === 'route') await setParent('active');
+        await db.query(`UPDATE mail_receipt_holds SET next_check=now()-interval '1 minute'${change === 'expire' ? `,expires_at=now()-interval '1 minute'` : ''} WHERE bucket='local:' AND status='held' AND binding_workspace=$1`, [wid]);
+        const { recoverHeldReceipts } = await import('./src/mailbox-receipts.js');
+        await recoverHeldReceipts(runtime);
+        await drain('mail.deleteObjects');
+      },
+      hold: async () => (await db.query(`SELECT status, recipients, notification->>'stagingKey' AS key, notification->>'sha256' AS sha256 FROM mail_receipt_holds WHERE bucket='local:' AND binding_workspace=$1`, [wid])).rows[0],
+      received: async box => (ok(await local('GET', `/v1/inboxes/${box.id}/messages`)).data as Json[]).length,
+      deletions: async () => (await jobs('mail.deleteObjects')).map(job => job.payload),
+    });
+  });
+}
+
+test('self-hosted forwarded mail keeps the staged copy a held recipient still needs after its sibling is stored', async t => {
+  await forwardedHoldFixture(t, async ({ open, waiting, wid, db, post, message, staged, ingest, replay, hold, received }) => {
+    ok(await post('mixed', message('mixed'), `${open.address},${waiting.address}`), 202);
+    await ingest();
+    assert.deepEqual([await received(open), (await hold()).status, staged().length], [1, 'held', 1]);
+    await replay('route');
+    await ingest();
+    const receipt = (await db.query(`SELECT status, error FROM mail_receipts WHERE bucket='local:' AND workspace_id=$1`, [wid])).rows;
+    assert.deepEqual([receipt, await received(waiting), (await hold()).status, staged()], [[{ status: 'processed', error: null }], 1, 'released', []]);
+  });
+});
+
+test('self-hosted forwarded mail deletes a held staged copy when its hold ends and the receipt reads another', async t => {
+  // The later request adds a recipient to the stored receipt, which then reads that request's copy, not the hold's.
+  for (const end of ['expire', 'release', 'release-after-ingest', 'expire-without-receipt'] as const) await t.test(end, async t => {
+    await forwardedHoldFixture(t, async ({ open, second, waiting, also, post, message, staged, ingest, replay, hold, received, objects }) => {
+      const raw = message(end);
+      if (end === 'expire-without-receipt') {
+        ok(await post(end, raw, waiting.address), 202);
+        assert.equal(staged().length, 1);
+        await replay('expire');
+        assert.deepEqual([(await hold()).status, staged()], ['failed', []]);
+        return;
+      }
+      ok(await post(end, raw, `${open.address},${waiting.address}`), 202);
+      await ingest();
+      const heldKey = (await hold()).key as string;
+      // A later request for another recipient stages its own copy.
+      ok(await post(end, raw, second.address), 202);
+      assert.equal(staged().length, 2);
+      if (end === 'release-after-ingest') await ingest();
+      await replay(end === 'expire' ? 'expire' : 'route');
+      assert.equal((await hold()).status, end === 'expire' ? 'failed' : 'released');
+      // Replaying onto a stored receipt reopens it on the hold's copy, which then has to stay until ingest.
+      assert.equal(objects.has(heldKey), end === 'release-after-ingest');
+      assert.equal(staged().length, 1);
+      await ingest();
+      assert.deepEqual([await received(open), await received(second), await received(waiting), await received(also), staged()], [1, 1, end === 'expire' ? 0 : 1, 0, []]);
+    });
+  });
+});
+
+test('self-hosted forwarded mail refuses other bytes under an ID that is only held, and the hold keeps its own', async t => {
+  await forwardedHoldFixture(t, async ({ open, waiting, also, wid, db, post, message, staged, ingest, replay, hold, received }) => {
+    const raw = message('accepted');
+    ok(await post('only-held', raw, waiting.address), 202);
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM mail_receipts WHERE bucket='local:' AND workspace_id=$1`, [wid])).rows[0].n, 0);
+    const accepted = await hold();
+    for (const to of [waiting.address, `${waiting.address},${also.address}`, open.address])
+      error(await post('only-held', message('swapped'), to), 409, 'FORWARD_MESSAGE_CHANGED');
+    await ingest();
+    assert.deepEqual([await hold(), staged()], [accepted, [accepted.key]]);
+    ok(await post('only-held', raw, also.address), 202);
+    await ingest();
+    assert.deepEqual([await hold(), staged()], [{ ...accepted, recipients: [also.address, waiting.address].sort() }, [accepted.key]]);
+    await replay('route');
+    await ingest();
+    assert.deepEqual([await received(waiting), await received(also), staged()], [1, 1, []]);
+  });
+});
+
+test('self-hosted forwarded mail queues no deletion for a receipt or hold without a staged key', async t => {
+  await forwardedHoldFixture(t, async ({ open, waiting, wid, db, post, message, replay, hold, deletions }) => {
+    ok(await post('keyless', message('keyless'), `${open.address},${waiting.address}`), 202);
+    for (const [table, owner] of [['mail_receipts', 'workspace_id'], ['mail_receipt_holds', 'binding_workspace']]) await db.query(`UPDATE ${table} SET notification=notification-'stagingKey' WHERE bucket='local:' AND ${owner}=$1`, [wid]);
+    await db.query(`UPDATE mail_receipts SET status='processed' WHERE bucket='local:' AND workspace_id=$1`, [wid]);
+    assert.deepEqual(await deletions(), []);
+    await replay('expire');
+    assert.equal((await hold()).status, 'failed');
+    assert.deepEqual(await deletions(), []);
+  });
+});
+
 // Review of #52 (P1): the tear host accepted any URL whose authority was loopback, though
 // node-postgres lets query parameters redirect it, and never established that the database was
 // disposable. tear/disposable.ts is the rule every tear host imports.
