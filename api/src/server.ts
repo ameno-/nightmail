@@ -12,7 +12,7 @@ import { dispatchWakeKey } from './dispatcher.js';
 import { clientIpHeader, clientNetworkHeader, legacyClientIpHeaders } from './brand.js';
 import { oldDashboardReference } from './dashboard-reference.js';
 import { isMissingComparePage, isMissingDocsPage, isMissingLegalPage, isPublicPage, movedPage, SITE_INDEX, withSiteIndex } from './site-index.js';
-import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext, snsIngress } from './core.js';
+import { admissionDenied, admissionPeer, ApiError, digest, id, log, logError, guardPublicRequest, secureResponse, setLogContext, snsIngress } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 
@@ -58,6 +58,23 @@ async function encode(request: Request, path: string, response: Response, header
   const bytes = await body;
   headers.set('content-encoding', encoding); headers.set('content-length', String(bytes.length));
   return new Response(request.method === 'HEAD' ? null : new Uint8Array(bytes), { status: 200, headers });
+}
+
+// The adapter resolves dot segments before routing, so behind an access proxy that lets one path through unchecked
+// (the forwarded-mail route), "/v1/events/forwarded-mail/../../../" would reach the dashboard. So the request is judged as
+// it arrived, before anything parses it. No route, file or object key needs a "." or ".." segment (spelled with %2e too),
+// "//" or a backslash (%5c too: the router decodes it into one). The query string is not part of the path.
+function ambiguousTarget(target: string, host = '') {
+  // A proxy-style target names a scheme and host before its path.
+  const path = target.replace(/^https?:\/\/[^/?#]+/i, '').split('?', 1)[0]!;
+  return /\/\/|\\|%5c|(?:^|\/)(?:\.|%2e){1,2}(?=\/|#|$)/i.test(path)
+    // The adapter pastes the Host header in front of the path: one with a delimiter (and a non-ASCII byte) moves the path.
+    || /[/\\?#@]/.test(host);
+}
+function ambiguousTargetDenied(): Response {
+  const requestId = id('req');
+  log('warn', { requestId, code: 'INVALID_REQUEST_PATH', operation: 'admission' });
+  return secureResponse(Response.json({ error: { code: 'INVALID_REQUEST_PATH', message: 'Send the path without "." or ".." segments, "//" or backslashes, and a Host header with only a host and port.', requestId, retryable: false } }, { status: 400, headers: { 'x-request-id': requestId, 'cache-control': 'no-store' } }));
 }
 
 setLogContext({ service: 'api', deploy: process.env.DEPLOY_SHA });
@@ -116,6 +133,7 @@ try {
       const count = (buckets.get(bucket) ?? 0) + 1; buckets.set(bucket, count);
       if (count > 6000) return admissionDenied();
     }
+    if (ambiguousTarget(connection.incoming.url ?? '', connection.incoming.headers.host)) return ambiguousTargetDenied();
     const headers = new Headers(request.headers);
     for (const name of legacyClientIpHeaders) headers.delete(name);
     headers.set(clientIpHeader, address);

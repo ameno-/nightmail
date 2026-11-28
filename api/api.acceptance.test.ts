@@ -26009,6 +26009,114 @@ async function forwardedHoldFixture(t: TestContext, scenario: (held: {
   });
 }
 
+// src/server.ts itself, with the forwarder secret set. node:http sends a path exactly as written; fetch and new Request
+// would resolve it first, and app.fetch alone never reaches the server's check.
+test('Node server: a path it would not route as sent gets 400, under the forwarded-mail bypass too; forwarded mail still takes 202, and 413 past 40 MiB', async t => {
+  const { spawn } = await import('node:child_process'), { once } = await import('node:events'), { createInterface } = await import('node:readline');
+  const { request: send } = await import('node:http'), { fileURLToPath } = await import('node:url');
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  const env: Record<string, string | undefined> = { ...process.env };
+  Object.assign(env, { DATABASE_URL: FIXTURE_DATABASE_URL, HOST: '127.0.0.1', PORT: '0', PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', MULTI_TENANT: 'false', MAIL_FORWARDER_SECRET: secret });
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), env: env as NodeJS.ProcessEnv, stdio: ['ignore', 'pipe', 'inherit'] });
+  cleanup(t, async () => { if (child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; } });
+  const port = await new Promise<number>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('src/server.ts did not start in 30 seconds.')), 30_000);
+    createInterface({ input: child.stdout! }).on('line', line => { if (line.includes('"API_READY"')) { clearTimeout(timer); resolve(JSON.parse(line).port); } });
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`src/server.ts exited with ${code}.`)); });
+  });
+  type Raw = { status: number; text: string; code?: string; requestId?: string };
+  const raw = (method: string, path: string, headers: Record<string, string> = {}, body?: Uint8Array | 'declared-only') => new Promise<Raw>((resolve, reject) => {
+    let answered = false;
+    const outgoing = send({ host: '127.0.0.1', port, method, path, headers, agent: false, timeout: 20_000 }, incoming => {
+      answered = true;
+      const chunks: Buffer[] = [];
+      incoming.on('data', chunk => chunks.push(chunk)).on('error', reject).on('end', () => {
+        const text = Buffer.concat(chunks).toString();
+        let code: string | undefined; try { code = JSON.parse(text).error?.code; } catch { /* a page, a file, or the adapter's empty 400 */ }
+        resolve({ status: incoming.statusCode!, text, code, requestId: incoming.headers['x-request-id'] as string | undefined });
+        outgoing.destroy();
+      });
+    });
+    outgoing.on('timeout', () => outgoing.destroy(new Error(`${method} ${path} got no answer.`)));
+    // An early refusal may close the connection while the upload is still being written.
+    outgoing.on('error', cause => { if (!answered) reject(cause); });
+    if (body === 'declared-only') outgoing.flushHeaders(); else outgoing.end(body);
+  });
+
+  const F = '/v1/events/forwarded-mail', authorization = `Bearer ${secret}`;
+  const refused = [
+    // "." and ".." segments, literal and percent-encoded in either case and mixed.
+    `${F}/../../../`, `${F}/./x`, `${F}/..`, `${F}/.`, `${F}/%2e%2e/%2e%2e/%2e%2e/`, `${F}/%2E%2E/health`, `${F}/%2e%2E/%2E./.%2e/health`, `${F}/.%2E`, `${F}/%2e/x`, `${F}/%2E`,
+    '/..', '/assets/../health', '/i/%2e%2e/health',
+    // A fragment ends a segment, and does not hide what follows it.
+    `${F}/..#x`, `${F}#/../..`,
+    // Backslashes percent-encoded: the router decodes %5c into one.
+    `${F}/..%5c..%5chealth`, `${F}/%5C`, '/%5c%5cexample.com',
+    // Empty segments.
+    `${F}//`, `${F}//x`, `//${F.slice(1)}`, '//health', '//v1/me', '/domains//',
+    // A proxy-style target is judged by the path after its host.
+    `http://example.com${F}/../../../health`, `http://example.com${F}//x`, 'http:////health',
+    // With no host there, the parser takes the next segment as one: this would route to /v1/me.
+    'http:///health/v1/me',
+  ];
+  for (const path of refused) for (const method of ['GET', 'POST']) for (const headers of [{}, { authorization }] as Record<string, string>[]) {
+    const reply = await raw(method, path, headers);
+    assert.deepEqual([reply.status, reply.code], [400, 'INVALID_REQUEST_PATH'], `${method} ${path} ${headers.authorization ? 'with' : 'without'} the secret: ${reply.text.slice(0, 200)}`);
+    assert.ok(reply.requestId);
+  }
+  // A raw backslash: the adapter already refuses it, with an empty body.
+  for (const path of [`${F}\\..\\..\\health`, `${F}/..\\..`, '/\\example.com', `http://example.com${F}\\..`]) assert.equal((await raw('GET', path)).status, 400, path);
+  // A Host header that would move a clean path elsewhere ("é#aaaaa" made this one "/").
+  for (const host of ['é/x?aaa', 'é#aaaaa']) for (const headers of [{ host }, { host, authorization }] as Record<string, string>[]) {
+    const reply = await raw('GET', F, headers);
+    assert.deepEqual([reply.status, reply.code], [400, 'INVALID_REQUEST_PATH'], `Host ${host}: ${reply.text.slice(0, 200)}`);
+  }
+
+  // What is served answers as before. A segment that only starts with or contains dots is a name, and the query is not the path.
+  const answers = async (path: string, status: number[], code?: string, headers: Record<string, string> = {}) => {
+    const reply = await raw('GET', path, headers);
+    assert.ok(status.includes(reply.status), `${path}: ${reply.status} ${reply.text.slice(0, 200)}`);
+    assert.equal(reply.code, code, path);
+    return reply;
+  };
+  assert.equal(JSON.parse((await answers('/health', [200])).text).service, 'nightmail');
+  await answers('/health?next=/../..%2e%2E//a\\b%5c', [200]);
+  await answers('http://example.com/health?next=..', [200]);
+  await answers('/health', [200], undefined, { host: `[::1]:${port}` });
+  assert.ok(JSON.parse((await answers('/.well-known/oauth-protected-resource', [200])).text).resource);
+  assert.ok(JSON.parse((await answers('/openapi.json', [200])).text).openapi);
+  await answers('/v1/me', [401], 'AUTH_REQUIRED');
+  await answers('/v1/me?path=../..', [401], 'AUTH_REQUIRED');
+  await answers('/i/nope.png', [404], 'NOT_FOUND');
+  await answers(`${F}/%252e%252e`, [401], 'AUTH_REQUIRED');
+  await answers(`${F}/..%2f..`, [401], 'AUTH_REQUIRED');
+  // Pages and files are the dashboard build's, which this fixture may not have: only that the path is let through.
+  for (const path of ['/', '/domains', '/domains/', '/assets/index-abc123.js', '/.hidden', '/..name/x', '/a..b/c.', '/...']) {
+    const reply = await raw('GET', path);
+    assert.ok(reply.status !== 400 && reply.code !== 'INVALID_REQUEST_PATH', `${path}: ${reply.status} ${reply.text.slice(0, 200)}`);
+  }
+
+  // The bypassed path itself still takes mail.
+  const manage = (method: string, path: string, body?: unknown) => http(method, path, MANAGER, body, {}, 10_000, `http://127.0.0.1:${port}`);
+  const domain = `${unique('raw-path')}.example.com`.replaceAll('_', '-');
+  const created = ok(await manage('POST', '/v1/domains', { name: domain, region: REGION }), 201);
+  cleanup(t, async () => { await authDb!.query('DELETE FROM mailbox_domains WHERE name=$1', [domain]); });
+  ok(await manage('POST', `/v1/inbound/domains/${created.id}/enable`, {}), 202);
+  const envelope = { authorization, 'content-type': 'message/rfc822', 'x-nightmail-envelope-from': 'ada@sender.example.org', 'x-nightmail-envelope-to': `me@${domain}` };
+  const message = Buffer.from(`From: ada@sender.example.org\r\nTo: me@${domain}\r\nSubject: Raw path\r\n\r\nStill delivered.\r\n`);
+  const accepted = await raw('POST', `${F}?note=../..`, { ...envelope, 'x-nightmail-message-id': unique('raw-path'), 'content-length': String(message.length) }, message);
+  assert.equal(accepted.status, 202, accepted.text);
+  const unsigned = await raw('POST', F, { 'content-type': 'message/rfc822', 'content-length': String(message.length) }, message);
+  assert.deepEqual([unsigned.status, unsigned.code], [401, 'FORWARD_UNAUTHORIZED']);
+
+  // Past 40 MiB: refused from a declared length alone, and by counting a body that declares none.
+  const limit = 40 * 1024 * 1024;
+  const declared = await raw('POST', F, { ...envelope, 'x-nightmail-message-id': unique('declared'), 'content-length': String(limit + 1) }, 'declared-only');
+  assert.deepEqual([declared.status, declared.code], [413, 'REQUEST_TOO_LARGE'], declared.text);
+  const chunked = await raw('POST', F, { ...envelope, 'x-nightmail-message-id': unique('chunked'), 'transfer-encoding': 'chunked' }, Buffer.alloc(limit + 1, 'x'));
+  assert.deepEqual([chunked.status, chunked.code], [413, 'REQUEST_TOO_LARGE'], chunked.text);
+});
+
 test('self-hosted forwarded mail keeps the staged copy a held recipient still needs after its sibling is stored', async t => {
   await forwardedHoldFixture(t, async ({ open, waiting, wid, db, post, message, staged, ingest, replay, hold, received }) => {
     ok(await post('mixed', message('mixed'), `${open.address},${waiting.address}`), 202);
