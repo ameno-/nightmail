@@ -87,6 +87,8 @@ export interface Config {
   workspaceId: string;
   authSecret: string;
   mailGatewayToken?:string;
+  /** Self-hosted without SES: the secret a mail forwarder posts raw messages with (inbound-forward.ts). */
+  mailForwarderSecret?: string;
   /** The mail gateway's IMAP and SMTP hosts for mail clients (MAILGW_PUBLIC_DOMAIN); set only while the gateway is. */
   mailServers?: { imap: string; smtp: string };
   previousAuthSecret?: string;
@@ -97,7 +99,8 @@ export interface Config {
   previousOrigins?: string[];
   /** The stack and role name prefix a new BYO connection gets (BYO_STACK_PREFIX). */
   byoStackPrefix?: 'Bane' | 'Nightmail';
-  accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256' };
+  /** The dashboard's OIDC client, which proves itself with a private key (private_key_jwt) or a client secret. */
+  accountClient?: { id: string; algorithm: 'RS256' | 'ES256' } & ({ privateKey: string; secret?: never } | { secret: string; privateKey?: never });
   /** The `acr` values accepted on ID tokens and on every MCP access token, one of which each must carry. Hosted
    * installations accept only the account service's sign-in methods (GitHub, Google and email). */
   accountRequiredAcr?: string[];
@@ -978,6 +981,7 @@ export function hasSessionCookie(headers: Headers): boolean {
   return Boolean(cookie && /(?:^|;\s*)(?:__Host-)?(?:nightmail|bane)\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
 }
 /** The routes Amazon SNS posts signed notifications to: SES feedback and connected accounts' stack requests. */
+export const FORWARDED_MAIL_PATH = '/v1/events/forwarded-mail';
 export const snsIngress = (path: string) => path === '/v1/events/ses' || path === '/v1/events/cloudformation';
 export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
   // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.

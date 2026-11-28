@@ -1034,6 +1034,180 @@ test('optional Worker secrets disable only their feature on a partial rollout; c
     assert.throws(()=>loadConfig({...base,...bad,NIGHTMAIL_POSTMASTER_CREDENTIALS:'bad'}),{code:'CONFIG_INVALID'});
 });
 
+/** Collects what the server logs, and each answer handed to `answered`; `check` refuses any of it that carries the client
+ * secret, plain, form-encoded or in its Basic header. Use a hyphenated secret: log() redacts long unbroken runs, which
+ * would hide a leak from this. */
+async function watchForSecret(t: TestContext, clientId: string, secret: string) {
+  const {format} = await import('node:util');
+  const said: string[] = [], encoded = secret.replaceAll('-','%2D');
+  for (const level of ['log','debug','info','warn','error'] as const) t.mock.method(console,level,(...args: unknown[]) => { said.push(format(...args)); });
+  return {
+    async answered(response: Response) { said.push(JSON.stringify([...response.headers]), await response.clone().text()); return response; },
+    check() {
+      assert.ok(said.some(line => line.includes('SIGN_IN_DENIED')), 'the refusals were logged here');
+      for (const form of [secret, encoded, Buffer.from(`${clientId}:${encoded}`).toString('base64')])
+        assert.deepEqual(said.filter(line => line.includes(form)), [], 'the client secret is never logged or answered');
+    },
+  };
+}
+
+test('a self-hosted dashboard signs in with a client secret at an issuer with RS256 ID tokens and no DPoP or PAR', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  // The shape Cloudflare Access documents for a SaaS OIDC application: the issuer has a path naming the client.
+  const origin = 'https://self.example.org', clientId = randomUUID().replaceAll('-', ''), secret = randomUUID();
+  const issuer = `https://team.cloudflareaccess.example/cdn-cgi/access/sso/oidc/${clientId}`;
+  const keys = generateKeyPairSync('rsa',{modulusLength:2048}), allowed = randomUUID(), refused = randomUUID();
+  const base = {PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:clientId, NIGHTMAIL_ROOT_SECRET:Buffer.from(randomBytes(32)).toString('hex'),
+    ACCOUNT_REQUIRED_ACR:'', ACCOUNT_ID_TOKEN_ALG:'RS256', AUTH_ALLOWED_SUBJECTS:allowed};
+  // Exactly one client credential, and only with a client ID.
+  for (const bad of [{}, {ACCOUNT_CLIENT_SECRET:secret, ACCOUNT_CLIENT_PRIVATE_KEY:'{}'}, {ACCOUNT_CLIENT_ID:'', ACCOUNT_CLIENT_SECRET:secret}])
+    assert.throws(() => loadConfig({...base, ...bad}), {code:'CONFIG_INVALID'}, JSON.stringify(Object.keys(bad)));
+  const runtimeFor = (extra:Record<string,string>): import('./src/core.js').Runtime => ({ config:loadConfig({...base, ...extra}), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
+    storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} });
+  let runtime = runtimeFor({ACCOUNT_CLIENT_SECRET:secret});
+  cleanup(t,async()=>{
+    await db.query('DELETE FROM nightmail_users WHERE id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$1)',[issuer]);
+    await db.query('DELETE FROM nightmail_signin_attempts WHERE issuer=$1',[issuer]);
+  });
+  const watch = await watchForSecret(t, clientId, secret);
+  let subject = allowed, nonce = '', challenge = '', claimedNonce: string | undefined;
+  const exchanges: string[] = [];
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    const target = new URL(url);
+    assert.ok(target.href.startsWith(issuer + '/'), target.href);
+    const headers = new Headers(init?.headers);
+    switch(target.href.slice(issuer.length)) {
+      // No pushed_authorization_request_endpoint, no dpop_signing_alg_values_supported, no listed token endpoint methods.
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorization',token_endpoint:issuer+'/token',jwks_uri:issuer+'/jwks',userinfo_endpoint:issuer+'/userinfo',
+        response_types_supported:['code'],id_token_signing_alg_values_supported:['RS256'],code_challenge_methods_supported:['S256']});
+      case '/jwks': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'access',alg:'RS256',use:'sig'}]});
+      case '/userinfo':
+        assert.equal(headers.get('authorization'),'Bearer fixture'); assert.equal(headers.get('dpop'),null);
+        return Response.json({sub:subject,email:'person@example.org',email_verified:true});
+      case '/token': {
+        const form = new URLSearchParams(String(init?.body)), basic = /^Basic (.+)$/.exec(headers.get('authorization') ?? '')?.[1];
+        assert.equal(headers.get('dpop'),null); assert.equal(form.get('client_assertion'),null); assert.equal(form.get('client_secret'),null);
+        assert.equal(createHash('sha256').update(form.get('code_verifier')!).digest('base64url'),challenge,'PKCE S256');
+        assert.ok(basic, 'client_secret_basic');
+        const [id, sent] = Buffer.from(basic,'base64').toString().split(':').map(decodeURIComponent);
+        exchanges.push(sent === secret ? 'right secret' : 'wrong secret');
+        if (id !== clientId || sent !== secret) return Response.json({error:'invalid_client'},{status:401});
+        const now = Math.floor(Date.now()/1000), body = [{alg:'RS256',kid:'access'},{iss:issuer,aud:clientId,iat:now,exp:now+300,sub:subject,nonce:claimedNonce ?? nonce}].map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+        return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('RSA-SHA256',Buffer.from(body),keys.privateKey)).toString('base64url')});
+      }
+      default: throw Error('unexpected issuer endpoint');
+    }
+  });
+  let peer = 0;
+  const request = async (path:string, method:string, cookie='', body?:object, headers:Record<string,string>={origin}) => watch.answered(await app.fetch(new Request(origin+path,{method,headers:{...headers,cookie,'content-type':'application/json','x-nightmail-client-ip':`198.51.100.${peer}`},body:body?JSON.stringify(body):undefined}),runtime));
+  async function login(state?: string) {
+    peer++;
+    const start = await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
+    assert.equal(start.status,200);
+    const authorize = new URL((await start.json() as {url:string}).url), params = authorize.searchParams;
+    assert.equal(authorize.origin+authorize.pathname,issuer+'/authorization');
+    assert.equal(params.get('client_id'),clientId); assert.equal(params.get('code_challenge_method'),'S256'); assert.equal(params.get('client_secret'),null);
+    nonce = params.get('nonce')!; challenge = params.get('code_challenge')!;
+    const cookie = start.headers.getSetCookie()[0]!.split(';')[0]!;
+    return request('/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state:state ?? params.get('state')!}),'GET',cookie,undefined,{});
+  }
+  const sessionCookie = (response:Response) => response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0];
+  const refusal = (response: Response) => { assert.equal(response.headers.get('location'),origin+'/?auth=error'); assert.equal(sessionCookie(response),undefined); };
+
+  const accepted = await login(), session = sessionCookie(accepted);
+  assert.ok(session, accepted.headers.get('location') ?? '');
+  const me = await request('/v1/me','GET',session);
+  assert.equal(me.status,200);
+  assert.equal((await me.json() as {workspaceId:string}).workspaceId,'default');
+  assert.deepEqual(exchanges.splice(0),['right secret']);
+  // State and nonce are still checked: a wrong state never reaches the token endpoint.
+  refusal(await login('not-the-state'));
+  assert.deepEqual(exchanges.splice(0),[]);
+  claimedNonce = 'not-the-nonce';
+  refusal(await login());
+  claimedNonce = undefined;
+  assert.deepEqual(exchanges.splice(0),['right secret']);
+  // A subject the issuer vouches for but AUTH_ALLOWED_SUBJECTS does not list gets no session or user.
+  subject = refused;
+  refusal(await login());
+  assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,refused])).rowCount,0);
+  assert.equal((await db.query('SELECT outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,refused])).rows[0].outcome,'not_approved');
+  subject = allowed; exchanges.splice(0);
+  // A wrong secret: the issuer refuses the exchange.
+  runtime = runtimeFor({ACCOUNT_CLIENT_SECRET:'wrong-'+secret});
+  refusal(await login());
+  assert.deepEqual(exchanges.splice(0),['wrong secret']);
+  // An ID token signed with an algorithm other than the configured one is refused.
+  runtime = runtimeFor({ACCOUNT_CLIENT_SECRET:secret, ACCOUNT_ID_TOKEN_ALG:'ES256'});
+  refusal(await login());
+  assert.deepEqual(exchanges.splice(0),['right secret']);
+  watch.check();
+});
+
+test('a client secret is sent only by a method the issuer lists, and only to the issuer\'s origin', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const db = await fixtureDatabase(t), app = createApp(), origin = 'https://self.example.org', secret = randomUUID();
+  const watch = await watchForSecret(t, 'dashboard', secret);
+  type Endpoints = (issuer: string) => { token_endpoint?: string; pushed_authorization_request_endpoint?: string };
+  let methods: string[] = [], endpoints: Endpoints = () => ({}), issuer = '', pushedState = '', peer = 0;
+  const sent: {url:string; authorization:string|null; secret:string|null; clientId:string|null}[] = [];
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    if (String(url) === issuer+'/.well-known/openid-configuration') return Response.json({issuer,authorization_endpoint:issuer+'/authorization',token_endpoint:issuer+'/token',jwks_uri:issuer+'/jwks',token_endpoint_auth_methods_supported:methods,...endpoints(issuer)});
+    const form = new URLSearchParams(String(init?.body));
+    sent.push({url:String(url), authorization:new Headers(init?.headers).get('authorization'), secret:form.get('client_secret'), clientId:form.get('client_id')});
+    if (String(url) === issuer+'/par') {
+      pushedState = form.get('state')!;
+      return Response.json({request_uri:'urn:ietf:params:oauth:request_uri:fixture',expires_in:60},{status:201});
+    }
+    return Response.json({error:'invalid_grant'},{status:400});
+  });
+  async function exchange(listed: string[], named: Endpoints = () => ({})) {
+    methods = listed; endpoints = named; sent.length = 0; issuer = `https://${randomUUID()}.example.org`; peer++;
+    const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard', ACCOUNT_CLIENT_SECRET:secret, ACCOUNT_REQUIRED_ACR:'', NIGHTMAIL_ROOT_SECRET:Buffer.from(randomBytes(32)).toString('hex')}),
+      db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+    const send = async (path:string, init:RequestInit) => watch.answered(await app.fetch(new Request(origin+path,{...init,headers:{...init.headers as Record<string,string>,'x-nightmail-client-ip':`203.0.113.${peer}`}}),runtime));
+    const start = await send('/api/auth/sign-in/account',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({callbackURL:origin+'/'})});
+    const body = await start.json() as {url?:string; error?:{code:string}};
+    if (start.status !== 200) return {status:start.status, code:body.error!.code};
+    // After a pushed request the browser carries only its reference, so the state is read from what was pushed.
+    const authorize = new URL(body.url!).searchParams;
+    const state = authorize.get('state') ?? pushedState;
+    await send('/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state}),{headers:{cookie:start.headers.getSetCookie()[0]!.split(';')[0]!}});
+    return {status:200, authorize:[...authorize.keys()]};
+  }
+  const posted = (path: string) => ({url:issuer+path,authorization:null,secret,clientId:'dashboard'});
+  const basic = (path: string) => ({url:issuer+path,authorization:'Basic '+Buffer.from('dashboard:'+secret.replaceAll('-','%2D')).toString('base64'),secret:null,clientId:null});
+  await exchange(['client_secret_post']);
+  assert.deepEqual(sent,[posted('/token')]);
+  await exchange(['client_secret_post','client_secret_basic']);
+  assert.deepEqual(sent,[basic('/token')]);
+  // A pushed request carries the secret the same way, and the browser then gets only its reference.
+  const pushed: Endpoints = own => ({pushed_authorization_request_endpoint:own+'/par'});
+  assert.deepEqual(await exchange(['client_secret_basic'],pushed),{status:200,authorize:['client_id','request_uri']});
+  // The pushed body is the authorization request, which names the client whatever the authentication.
+  assert.deepEqual(sent,[{...basic('/par'),clientId:'dashboard'},basic('/token')]);
+  await exchange(['client_secret_post'],pushed);
+  assert.deepEqual(sent,[posted('/par'),posted('/token')]);
+  // An issuer that takes no secret is never sent one.
+  assert.deepEqual(await exchange(['private_key_jwt','none']),{status:503,code:'AUTH_NOT_CONFIGURED'});
+  assert.deepEqual(sent,[]);
+  // Nor is a token or pushed request endpoint on another origin: another host, or the issuer's host on another port.
+  for (const named of [
+    () => ({token_endpoint:'https://elsewhere.example.net/token'}),
+    (own: string) => ({token_endpoint:own+':8443/token'}),
+    () => ({pushed_authorization_request_endpoint:'https://elsewhere.example.net/par'}),
+  ] satisfies Endpoints[]) {
+    assert.deepEqual(await exchange(['client_secret_basic'],named),{status:503,code:'AUTH_NOT_CONFIGURED'});
+    assert.deepEqual(sent,[]);
+  }
+  watch.check();
+});
+
 test('OIDC dashboard callback verifies the token, consumes bound state once and creates a revocable session', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
@@ -25484,6 +25658,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
     import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/sending.js'),
     import('./src/operations.js'), import('./src/ses-region-state.js'), import('./src/dispatcher.js'), import('./src/jobs.js'), import('./src/newsletters.js'),
   ]);
+  const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
     ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
@@ -25495,7 +25670,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime.snsCertificateState = new SnsCertificateState();
   assert.deepEqual(runtime.config.simulatedSes, { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, 'Test dispatch must default to the 100 ms provider simulator.');
   runtime.config.simulatedSes.latencyMs = 0;
-  const app = createApp(), handlers = { ...jobHandlers, ...operationJobs, ...newsletterJobs };
+  const app = createApp(), handlers = { ...jobHandlers, ...operationJobs, ...newsletterJobs, ...mailboxIngestJobs };
   const rollback = new Error('Rollback isolated simulated SES fixtures');
   const fetchIssuer=globalThis.fetch; let unexpectedNetwork=0;
   t.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
@@ -25548,6 +25723,472 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
     });
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
+
+test('self-hosted forwarded mail answers every other method with 405 and leaves subpaths behind authentication', async t => {
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  await simulatedSesFixture(t, async ({ runtime, db, fetch }) => {
+    let stored = 0;
+    runtime.storage = { async put() { stored++; }, async get() { return null; }, async stream() { return null; }, async delete() {} };
+    const url = `${PUBLIC_ORIGIN}/v1/events/forwarded-mail`;
+    const send = async (method: string, target: string, authorization?: string, body?: string) => {
+      const response = await fetch(new Request(target, { method, ...(['GET', 'HEAD'].includes(method) ? {} : { body: body ?? 'Subject: x\r\n\r\nx\r\n' }), headers: { 'content-type': 'message/rfc822', ...(authorization && { authorization }),
+        'x-nightmail-message-id': 'method', 'x-nightmail-envelope-from': '', 'x-nightmail-envelope-to': 'me@example.com' } }));
+      const text = await response.text();
+      return { status: response.status, body: (text ? JSON.parse(text) : null) as Json, headers: response.headers };
+    };
+    // Off until the secret is configured: the path is like any other under /v1.
+    error(await send('GET', url), 401, 'AUTH_REQUIRED');
+    runtime.config.mailForwarderSecret = secret;
+    const count = async () => (await db.query('SELECT (SELECT count(*) FROM mail_receipts WHERE workspace_id=$1)::int AS receipts, (SELECT count(*) FROM jobs WHERE workspace_id=$1)::int AS jobs', [runtime.config.workspaceId])).rows[0];
+    const before = await count();
+    for (const authorization of [undefined, `Bearer ${secret}`, 'Bearer wrong']) for (const method of ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const refused = await send(method, url, authorization);
+      assert.deepEqual([refused.status, refused.headers.get('allow'), refused.body?.error.code], [405, 'POST', method === 'HEAD' ? undefined : 'METHOD_NOT_ALLOWED'], `${method} ${authorization ? 'with' : 'without'} Authorization`);
+    }
+    // Past the 64 KiB an anonymous body may be buffered to: the method is refused, the body never measured.
+    error(await send('PUT', url, undefined, 'x'.repeat(100_000)), 405, 'METHOD_NOT_ALLOWED');
+    for (const path of ['/', '/x']) for (const method of ['GET', 'POST', 'PUT', 'OPTIONS']) {
+      error(await send(method, url + path), 401, 'AUTH_REQUIRED');
+      error(await send(method, url + path, `Bearer ${secret}`), 401, 'AUTH_INVALID');
+    }
+    assert.deepEqual([await count(), stored], [before, 0]);
+  });
+});
+
+test('self-hosted forwarded mail refuses a missing or wrong secret before reading the body', async t => {
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  await simulatedSesFixture(t, async ({ runtime, local, fetch }) => {
+    runtime.storage = { async put() {}, async get() { return null; }, async stream() { return null; }, async delete() {} };
+    runtime.config.mailForwarderSecret = secret;
+    const domain = `${unique('unread')}.example.com`.replaceAll('_', '-');
+    const created = ok(await local('POST', '/v1/domains', { name: domain, region: REGION }), 201);
+    ok(await local('POST', `/v1/inbound/domains/${created.id}/enable`, {}), 202);
+    const post = async (authorization: string | undefined, length: number | undefined) => {
+      let read = false;
+      // No read-ahead (highWaterMark 0): pull runs only when something reads the body.
+      const body = new ReadableStream<Uint8Array>({ pull(controller) { read = true; controller.enqueue(new Uint8Array(1)); controller.close(); } }, { highWaterMark: 0 });
+      const response = await fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/forwarded-mail`, { method: 'POST', body, duplex: 'half', headers: { 'content-type': 'message/rfc822', ...(authorization !== undefined && { authorization }), ...(length && { 'content-length': String(length) }),
+        'x-nightmail-message-id': 'unread', 'x-nightmail-envelope-from': '', 'x-nightmail-envelope-to': `me@${domain}` } } as RequestInit));
+      return { read, reply: { status: response.status, body: await response.json() as Json, headers: response.headers } };
+    };
+    // Declared large (within and past the 40 MiB limit), and with no declared length, as a chunked upload arrives.
+    for (const length of [39 * 1024 * 1024, 100 * 1024 * 1024, undefined]) for (const authorization of [undefined, `Bearer ${'0'.repeat(secret.length)}`, `Bearer ${secret}x`, 'Bearer x']) {
+      const { read, reply } = await post(authorization, length);
+      error(reply, 401, 'FORWARD_UNAUTHORIZED');
+      assert.equal(read, false, `${authorization?.length ?? 'no'} Authorization characters, length ${length}`);
+    }
+    // The same request with the secret is read, so the probe above would have seen a read.
+    const accepted = await post(`Bearer ${secret}`, undefined);
+    assert.deepEqual([accepted.reply.status, accepted.read], [202, true], JSON.stringify(accepted.reply.body));
+  });
+});
+
+test('self-hosted forwarded mail reaches a mailbox without SES: attachment, repeat ID, wrong secret, unknown recipient', async t => {
+  const { loadConfig } = await import('./src/config.js');
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  const base = { PUBLIC_URL: PUBLIC_ORIGIN, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_SECRET: secret, AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT, DEFAULT_SES_REGION: REGION };
+  assert.equal(loadConfig({ ...base, MAIL_FORWARDER_SECRET: secret }).mailForwarderSecret, secret);
+  assert.equal(loadConfig(base).mailForwarderSecret, undefined);
+  for (const refused of [{ MAIL_FORWARDER_SECRET: 'too-short' }, { MAIL_FORWARDER_SECRET: secret, ENABLE_LIVE_SES: 'true' }, { MAIL_FORWARDER_SECRET: secret, MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google' }])
+    assert.throws(() => loadConfig({ ...base, ...refused }), /MAIL_FORWARDER_SECRET/);
+  await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs, fetch }) => {
+    const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+    runtime.storage = {
+      async put(key, body, contentType) { objects.set(key, { body: new Uint8Array(body), contentType }); },
+      async get(key) { return objects.get(key) ?? null; },
+      async stream(key) { const found = objects.get(key); return found ? { body: new Blob([found.body as BlobPart]).stream(), contentType: found.contentType } : null; },
+      async delete(key) { objects.delete(key); },
+    };
+    const wid = runtime.config.workspaceId, domain = `${unique('forwarded')}.example.com`.replaceAll('_', '-');
+    const file = 'quarterly numbers\n';
+    const mime = (messageId: string, extra: string[] = []) => ['From: Ada <ada@sender.example.org>', `To: me@${domain}`, 'Subject: Numbers', `Message-ID: <${messageId}@sender.example.org>`, ...extra,
+      'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="part"', '', '--part', 'Content-Type: text/plain; charset=utf-8', '', 'The numbers are attached.',
+      '--part', 'Content-Type: text/plain; name="numbers.txt"', 'Content-Disposition: attachment; filename="numbers.txt"', 'Content-Transfer-Encoding: base64', '', Buffer.from(file).toString('base64'), '--part--', ''].join('\r\n');
+    const first = mime('one');
+    const post = async (id: string, raw: string, to: string, authorization = `Bearer ${secret}`): Promise<Reply> => {
+      const response = await fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/forwarded-mail`, { method: 'POST', body: raw, headers: { authorization, 'content-type': 'message/rfc822',
+        'x-nightmail-message-id': id, 'x-nightmail-envelope-from': 'ada@sender.example.org', 'x-nightmail-envelope-to': to } }));
+      return { status: response.status, body: await response.json(), headers: response.headers };
+    };
+    const receipts = async () => (await db.query('SELECT count(*)::int AS n FROM mail_receipts WHERE workspace_id=$1', [wid])).rows[0].n as number;
+
+    error(await post('early', first, `me@${domain}`), 404, 'NOT_FOUND'); // Off until the secret is configured.
+    runtime.config.mailForwarderSecret = secret;
+    error(await post('early', first, `me@${domain}`), 422, 'FORWARD_RECIPIENT_UNKNOWN'); // The domain is not set up yet.
+
+    const created = ok(await local('POST', '/v1/domains', { name: domain, region: REGION }), 201);
+    const enabled = ok(await local('POST', `/v1/inbound/domains/${created.id}/enable`, {}), 202);
+    assert.deepEqual([enabled.status, enabled.dns], ['active', []]);
+    const inbox = ok(await local('POST', '/v1/inboxes', { type: 'persistent', domain, localPart: 'me' }), 201);
+    assert.equal(inbox.address, `me@${domain}`);
+
+    for (const authorization of ['', 'Bearer wrong', `Bearer ${secret}x`, secret])
+      error(await post('delivery-1', first, inbox.address, authorization), 401, 'FORWARD_UNAUTHORIZED');
+    error(await post('stranger', first, 'me@elsewhere.example.net'), 422, 'FORWARD_RECIPIENT_UNKNOWN');
+    assert.deepEqual([objects.size, await receipts()], [0, 0], 'A refused request stores nothing.');
+
+    const accepted = await post('delivery-1', first, `${inbox.address.toUpperCase()}, me@elsewhere.example.net`);
+    assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
+    assert.deepEqual(accepted.body, { accepted: true, duplicate: false, recipients: [inbox.address] });
+    // A repeat before and after ingest, even with other bytes, adds nothing.
+    assert.equal(ok(await post('delivery-1', mime('replaced'), inbox.address), 202).duplicate, true);
+    await run('mailbox.ingest');
+    assert.equal(ok(await post('delivery-1', first, inbox.address), 202).duplicate, true);
+    assert.deepEqual([await receipts(), (await jobs('mailbox.ingest')).filter(job => job.status === 'pending').length], [1, 0]);
+
+    const list = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages`)).data as Json[];
+    assert.equal(list.length, 1, JSON.stringify(list));
+    const message = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages/${list[0]!.id}`));
+    assert.match(message.text, /The numbers are attached\./);
+    assert.deepEqual(message.attachments.map((a: Json) => a.filename), ['numbers.txt']);
+    const download = async (url: string) => { const response = await fetch(new Request(url)); const text = await response.text(); assert.equal(response.status, 200, text); return text; };
+    assert.equal(await download(message.attachments[0].url), file);
+    const read = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages/${list[0]!.id}/attachments/${message.attachments[0].id}`));
+    assert.equal(read.text, file);
+    const detail = ok(await local('GET', `/v1/inbound/messages/${list[0]!.id}?includeDelivery=true`));
+    assert.equal(await download(detail.rawUrl), first, 'The raw message is kept as the first request sent it.');
+    assert.equal(await download(ok(await local('GET', `/v1/inbound/messages/${list[0]!.id}/attachments/${message.attachments[0].id}`)).url), file);
+
+    // The runner claims two or more waiting receipts together: the batched ingest reads the same store.
+    for (const id of ['two', 'three']) ok(await post(`delivery-${id}`, mime(id, ['In-Reply-To: <one@sender.example.org>', 'References: <one@sender.example.org>']), inbox.address), 202);
+    const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+    const waiting = (await db.query(`UPDATE jobs SET status='running',attempts=attempts+1 WHERE workspace_id=$1 AND type='mailbox.ingest' AND status='pending' RETURNING id,attempts,payload`, [wid])).rows;
+    const outcomes = await mailboxIngestJobs['mailbox.ingest']!.batch!(runtime, waiting.map(job => ({ job: { id: job.id, attempts: job.attempts, workspaceId: wid }, payload: job.payload })));
+    assert.equal(outcomes.length, 2, JSON.stringify(outcomes));
+    const threads = (await db.query('SELECT count(*)::int AS n, count(DISTINCT thread_id)::int AS threads FROM mail_messages WHERE workspace_id=$1', [wid])).rows[0];
+    assert.deepEqual(threads, { n: 3, threads: 1 }, JSON.stringify(outcomes));
+    const batched = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages`)).data as Json[];
+    for (const row of batched) assert.match(await download(ok(await local('GET', `/v1/inbound/messages/${row.id}?includeDelivery=true`)).rawUrl), /The numbers are attached|Content-Disposition/);
+
+    // The staged copy goes once its receipt settles. The runtime's storage has no lifecycle rule to expire it.
+    const staged = () => [...objects.keys()].filter(key => key.includes('/in-fwd-'));
+    await run('mail.deleteObjects');
+    assert.deepEqual(staged(), [], 'Single and batched ingest both leave no staged copy.');
+
+    // Too many lines or too many bytes to parse: the subject and sender name still come from the header block.
+    const blind = `hidden-${randomUUID()}@elsewhere.example.net`;
+    const unparsed = (id: string, body: string) => ['From: =?UTF-8?Q?Ren=C3=A9e?=\r\n =?UTF-8?Q?_Dupont?= <renee@sender.example.org>', `To: ${inbox.address}`, `Bcc: ${blind}`,
+      `Subject: =?UTF-8?Q?${id}_r=C3=A9sum=C3=A9_?=\r\n =?UTF-8?B?${Buffer.from('für Zoë').toString('base64')}?=\r\n and the rest`, `Message-ID:\r\n <${id}@sender.example.org>`, 'Content-Type: text/plain', '', body].join('\r\n');
+    const tall = 'x\r\n'.repeat(30_100), big = `${'y'.repeat(998)}\r\n`.repeat(6_500);
+    assert.ok(Buffer.byteLength(big) > 6 * 1024 * 1024);
+    const expectUnparsed = async (...ids: string[]) => {
+      const rows = ok(await local('GET', `/v1/inboxes/${inbox.id}/messages`)).data as Json[];
+      for (const id of ids) {
+        const row = rows.find(item => item.subject === `${id} résumé für Zoë and the rest`);
+        assert.ok(row, `${id}: ${JSON.stringify(rows.map(item => [item.subject, item.from]))}`);
+        const stored = (await db.query('SELECT from_name, from_address, message_id FROM mail_messages WHERE workspace_id=$1 AND id=$2', [wid, row.id])).rows[0];
+        assert.deepEqual([stored.from_name, stored.from_address], ['Renée Dupont', 'renee@sender.example.org']);
+        assert.equal(stored.message_id, `${id}@sender.example.org`);
+        const read = ok(await local('GET', `/v1/inbound/messages/${row.id}?includeDelivery=true`));
+        assert.equal(read.status, 'unparsed');
+        assert.doesNotMatch(await download(read.rawUrl), new RegExp(blind));
+      }
+    };
+    ok(await post('delivery-tall', unparsed('tall', tall), inbox.address), 202);
+    assert.equal(staged().length, 1);
+    await run('mailbox.ingest');
+    await run('mail.deleteObjects');
+    await expectUnparsed('tall');
+    for (const id of ['tall-batched', 'tall-paired']) ok(await post(`delivery-${id}`, unparsed(id, tall), inbox.address), 202);
+    const pair = (await db.query(`UPDATE jobs SET status='running',attempts=attempts+1 WHERE workspace_id=$1 AND type='mailbox.ingest' AND status='pending' RETURNING id,attempts,payload`, [wid])).rows;
+    const paired = await mailboxIngestJobs['mailbox.ingest']!.batch!(runtime, pair.map(job => ({ job: { id: job.id, attempts: job.attempts, workspaceId: wid }, payload: job.payload })));
+    assert.deepEqual(paired.map(outcome => outcome.error), [undefined, undefined]);
+    await db.query(`UPDATE jobs SET status='completed' WHERE workspace_id=$1 AND type='mailbox.ingest' AND status='running'`, [wid]);
+    await run('mail.deleteObjects');
+    await expectUnparsed('tall-batched', 'tall-paired');
+    ok(await post('delivery-big', unparsed('big', big), inbox.address), 202);
+    await run('mailbox.ingest');
+    await run('mail.deleteObjects');
+    await expectUnparsed('big');
+    assert.deepEqual(staged(), []);
+
+    // The same ID reaching more recipients one request at a time, before and after ingest.
+    const second = ok(await local('POST', '/v1/inboxes', { type: 'persistent', domain, localPart: 'second' }), 201);
+    const third = ok(await local('POST', '/v1/inboxes', { type: 'persistent', domain, localPart: 'third' }), 201);
+    const shared = mime('shared', [`Bcc: ${blind}`]);
+    ok(await post('delivery-shared', shared, inbox.address), 202);
+    ok(await post('delivery-shared', shared, second.address), 202);
+    error(await post('delivery-shared', mime('swapped'), third.address), 409, 'FORWARD_MESSAGE_CHANGED');
+    await run('mail.deleteObjects');
+    assert.equal(staged().length, 1, 'Only the copy the pending receipt reads is left.');
+    await run('mailbox.ingest');
+    await run('mail.deleteObjects');
+    assert.deepEqual(staged(), []);
+    assert.equal(ok(await post('delivery-shared', shared, inbox.address), 202).duplicate, true);
+    assert.deepEqual(staged(), [], 'A duplicate stages nothing.');
+    ok(await post('delivery-shared', shared, third.address), 202);
+    assert.equal(staged().length, 1);
+    await run('mailbox.ingest');
+    await run('mail.deleteObjects');
+    assert.deepEqual(staged(), []);
+    for (const box of [second, third]) assert.equal((ok(await local('GET', `/v1/inboxes/${box.id}/messages`)).data as Json[]).length, 1);
+
+    // An ingest that fails for good drops its copy too.
+    ok(await post('delivery-doomed', mime('doomed', [`Bcc: ${blind}`]), inbox.address), 202);
+    const put = runtime.storage.put;
+    runtime.storage.put = async () => { throw new Error('Planted storage outage'); };
+    await db.query(`UPDATE mail_receipts SET created_at=now()-interval '3 days' WHERE workspace_id=$1 AND status='pending'`, [wid]);
+    await db.query(`UPDATE jobs SET attempts=50 WHERE workspace_id=$1 AND type='mailbox.ingest' AND status='pending'`, [wid]);
+    await run('mailbox.ingest');
+    runtime.storage.put = put;
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM mail_receipts WHERE workspace_id=$1 AND status='failed'`, [wid])).rows[0].n, 1);
+    await run('mail.deleteObjects');
+    assert.deepEqual(staged(), []);
+
+    // Reopening a receipt for a late recipient uploads its attachment again, and no row keeps that second upload. The
+    // hourly upkeep's sweeper removes it, as it does for any unowned upload.
+    await db.query('UPDATE mail_candidate_uploads SET check_at=now() WHERE workspace_id=$1', [wid]);
+    for (let swept = 0; swept < 50 && (await db.query('SELECT FROM mail_candidate_uploads WHERE workspace_id=$1 AND check_at<=now()', [wid])).rowCount; swept++)
+      await mailboxIngestJobs['mailbox.cleanUploads']!(runtime, {}, { id: 'mailbox.cleanUploads', attempts: 1, workspaceId: wid }).catch(cause => { if (cause.name !== 'JobDeferred' && cause.message !== 'Job deferred.') throw cause; });
+
+    // Deleting the mail removes every stored copy of it.
+    assert.ok(objects.size > 0);
+    for (const box of [inbox, second, third]) for (const row of ok(await local('GET', `/v1/inboxes/${box.id}/messages`)).data as Json[])
+      ok(await local('DELETE', `/v1/inboxes/${box.id}/messages/${row.id}?permanent=true`));
+    await db.query('SELECT mail_gc_batch(1000)');
+    await run('mail.deleteObjects');
+    assert.deepEqual([...objects].filter(([, object]) => Buffer.from(object.body).includes(blind)).map(([key]) => key), [], 'No object still holds the Bcc line.');
+    assert.deepEqual([...objects.keys()], []);
+  });
+});
+
+// A hold is a recipient waiting for its host to route again: here one domain's parent is switched off, as the routing SQL
+// reads it. The hold and any receipt read the same staged copy until a later request stages another.
+async function forwardedHoldFixture(t: TestContext, scenario: (held: {
+  open: { address: string; id: string }; second: { address: string; id: string }; waiting: { address: string; id: string }; also: { address: string; id: string };
+  wid: string; db: pg.Client; post: (id: string, raw: string, to: string) => Promise<Reply>; message: (subject: string) => string;
+  staged: () => string[]; ingest: () => Promise<void>; replay: (change?: 'route' | 'expire') => Promise<void>;
+  hold: () => Promise<Json>; received: (inbox: { id: string }) => Promise<number>; deletions: () => Promise<Json[]>; objects: Map<string, { body: Uint8Array; contentType: string }>;
+}) => Promise<void>) {
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs, fetch }) => {
+    const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+    runtime.storage = {
+      async put(key, body, contentType) { objects.set(key, { body: new Uint8Array(body), contentType }); },
+      async get(key) { return objects.get(key) ?? null; },
+      async stream(key) { const found = objects.get(key); return found ? { body: new Blob([found.body as BlobPart]).stream(), contentType: found.contentType } : null; },
+      async delete(key) { objects.delete(key); },
+    };
+    runtime.config.mailForwarderSecret = secret;
+    const wid = runtime.config.workspaceId;
+    const domain = async (label: string) => {
+      const name = `${unique(label)}.example.com`.replaceAll('_', '-');
+      const created = ok(await local('POST', '/v1/domains', { name, region: REGION }), 201);
+      ok(await local('POST', `/v1/inbound/domains/${created.id}/enable`, {}), 202);
+      return { name, row: (await db.query('SELECT id FROM mailbox_domains WHERE workspace_id=$1 AND name=$2', [wid, name])).rows[0].id as string };
+    };
+    const routed = await domain('hold-open'), child = await domain('hold-child'), parent = await domain('hold-parent');
+    await db.query('UPDATE mailbox_domains SET parent_id=$2 WHERE id=$1', [child.row, parent.row]);
+    const setParent = (status: string) => db.query('UPDATE mailbox_domains SET status=$2 WHERE id=$1', [parent.row, status]);
+    await setParent('disabled');
+    const inbox = async (host: string, localPart: string) => ok(await local('POST', '/v1/inboxes', { type: 'persistent', domain: host, localPart }), 201) as { address: string; id: string };
+    const open = await inbox(routed.name, 'me'), second = await inbox(routed.name, 'second'), waiting = await inbox(child.name, 'me'), also = await inbox(child.name, 'also');
+    const drain = async (type: string) => { if ((await jobs(type)).some(job => job.status === 'pending')) await run(type); };
+    await scenario({
+      open, second, waiting, also, wid, db, objects,
+      message: subject => ['From: Ada <ada@sender.example.org>', `To: ${open.address}`, 'Bcc: hidden@elsewhere.example.net', `Subject: ${subject}`, `Message-ID: <${randomUUID()}@sender.example.org>`, '', 'body', ''].join('\r\n'),
+      post: async (id, raw, to) => {
+        const response = await fetch(new Request(`${PUBLIC_ORIGIN}/v1/events/forwarded-mail`, { method: 'POST', body: raw, headers: { authorization: `Bearer ${secret}`, 'content-type': 'message/rfc822',
+          'x-nightmail-message-id': id, 'x-nightmail-envelope-from': 'ada@sender.example.org', 'x-nightmail-envelope-to': to } }));
+        return { status: response.status, body: await response.json(), headers: response.headers };
+      },
+      // What is left of the staged copies once every queued deletion has run.
+      staged: () => [...objects.keys()].filter(key => key.includes('/in-fwd-')),
+      ingest: async () => { await drain('mailbox.ingest'); await drain('mail.deleteObjects'); },
+      replay: async change => {
+        if (change === 'route') await setParent('active');
+        await db.query(`UPDATE mail_receipt_holds SET next_check=now()-interval '1 minute'${change === 'expire' ? `,expires_at=now()-interval '1 minute'` : ''} WHERE bucket='local:' AND status='held' AND binding_workspace=$1`, [wid]);
+        const { recoverHeldReceipts } = await import('./src/mailbox-receipts.js');
+        await recoverHeldReceipts(runtime);
+        await drain('mail.deleteObjects');
+      },
+      hold: async () => (await db.query(`SELECT status, recipients, notification->>'stagingKey' AS key, notification->>'sha256' AS sha256 FROM mail_receipt_holds WHERE bucket='local:' AND binding_workspace=$1`, [wid])).rows[0],
+      received: async box => (ok(await local('GET', `/v1/inboxes/${box.id}/messages`)).data as Json[]).length,
+      deletions: async () => (await jobs('mail.deleteObjects')).map(job => job.payload),
+    });
+  });
+}
+
+// src/server.ts itself, with the forwarder secret set. node:http sends a path exactly as written; fetch and new Request
+// would resolve it first, and app.fetch alone never reaches the server's check.
+test('Node server: a path it would not route as sent gets 400, under the forwarded-mail bypass too; forwarded mail still takes 202, and 413 past 40 MiB', async t => {
+  const { spawn } = await import('node:child_process'), { once } = await import('node:events'), { createInterface } = await import('node:readline');
+  const { request: send } = await import('node:http'), { fileURLToPath } = await import('node:url');
+  const secret = Buffer.from(randomBytes(32)).toString('hex');
+  const env: Record<string, string | undefined> = { ...process.env };
+  Object.assign(env, { DATABASE_URL: FIXTURE_DATABASE_URL, HOST: '127.0.0.1', PORT: '0', PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', MULTI_TENANT: 'false', MAIL_FORWARDER_SECRET: secret });
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), env: env as NodeJS.ProcessEnv, stdio: ['ignore', 'pipe', 'inherit'] });
+  cleanup(t, async () => { if (child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; } });
+  const port = await new Promise<number>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('src/server.ts did not start in 30 seconds.')), 30_000);
+    createInterface({ input: child.stdout! }).on('line', line => { if (line.includes('"API_READY"')) { clearTimeout(timer); resolve(JSON.parse(line).port); } });
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`src/server.ts exited with ${code}.`)); });
+  });
+  type Raw = { status: number; text: string; code?: string; requestId?: string };
+  const raw = (method: string, path: string, headers: Record<string, string> = {}, body?: Uint8Array | 'declared-only') => new Promise<Raw>((resolve, reject) => {
+    let answered = false;
+    const outgoing = send({ host: '127.0.0.1', port, method, path, headers, agent: false, timeout: 20_000 }, incoming => {
+      answered = true;
+      const chunks: Buffer[] = [];
+      incoming.on('data', chunk => chunks.push(chunk)).on('error', reject).on('end', () => {
+        const text = Buffer.concat(chunks).toString();
+        let code: string | undefined; try { code = JSON.parse(text).error?.code; } catch { /* a page, a file, or the adapter's empty 400 */ }
+        resolve({ status: incoming.statusCode!, text, code, requestId: incoming.headers['x-request-id'] as string | undefined });
+        outgoing.destroy();
+      });
+    });
+    outgoing.on('timeout', () => outgoing.destroy(new Error(`${method} ${path} got no answer.`)));
+    // An early refusal may close the connection while the upload is still being written.
+    outgoing.on('error', cause => { if (!answered) reject(cause); });
+    if (body === 'declared-only') outgoing.flushHeaders(); else outgoing.end(body);
+  });
+
+  const F = '/v1/events/forwarded-mail', authorization = `Bearer ${secret}`;
+  const refused = [
+    // "." and ".." segments, literal and percent-encoded in either case and mixed.
+    `${F}/../../../`, `${F}/./x`, `${F}/..`, `${F}/.`, `${F}/%2e%2e/%2e%2e/%2e%2e/`, `${F}/%2E%2E/health`, `${F}/%2e%2E/%2E./.%2e/health`, `${F}/.%2E`, `${F}/%2e/x`, `${F}/%2E`,
+    '/..', '/assets/../health', '/i/%2e%2e/health',
+    // A fragment ends a segment, and does not hide what follows it.
+    `${F}/..#x`, `${F}#/../..`,
+    // Backslashes percent-encoded: the router decodes %5c into one.
+    `${F}/..%5c..%5chealth`, `${F}/%5C`, '/%5c%5cexample.com',
+    // Empty segments.
+    `${F}//`, `${F}//x`, `//${F.slice(1)}`, '//health', '//v1/me', '/domains//',
+    // A proxy-style target is judged by the path after its host.
+    `http://example.com${F}/../../../health`, `http://example.com${F}//x`, 'http:////health',
+    // With no host there, the parser takes the next segment as one: this would route to /v1/me.
+    'http:///health/v1/me',
+  ];
+  for (const path of refused) for (const method of ['GET', 'POST']) for (const headers of [{}, { authorization }] as Record<string, string>[]) {
+    const reply = await raw(method, path, headers);
+    assert.deepEqual([reply.status, reply.code], [400, 'INVALID_REQUEST_PATH'], `${method} ${path} ${headers.authorization ? 'with' : 'without'} the secret: ${reply.text.slice(0, 200)}`);
+    assert.ok(reply.requestId);
+  }
+  // A raw backslash: the adapter already refuses it, with an empty body.
+  for (const path of [`${F}\\..\\..\\health`, `${F}/..\\..`, '/\\example.com', `http://example.com${F}\\..`]) assert.equal((await raw('GET', path)).status, 400, path);
+  // A Host header that would move a clean path elsewhere ("é#aaaaa" made this one "/").
+  for (const host of ['é/x?aaa', 'é#aaaaa']) for (const headers of [{ host }, { host, authorization }] as Record<string, string>[]) {
+    const reply = await raw('GET', F, headers);
+    assert.deepEqual([reply.status, reply.code], [400, 'INVALID_REQUEST_PATH'], `Host ${host}: ${reply.text.slice(0, 200)}`);
+  }
+
+  // What is served answers as before. A segment that only starts with or contains dots is a name, and the query is not the path.
+  const answers = async (path: string, status: number[], code?: string, headers: Record<string, string> = {}) => {
+    const reply = await raw('GET', path, headers);
+    assert.ok(status.includes(reply.status), `${path}: ${reply.status} ${reply.text.slice(0, 200)}`);
+    assert.equal(reply.code, code, path);
+    return reply;
+  };
+  assert.equal(JSON.parse((await answers('/health', [200])).text).service, 'nightmail');
+  await answers('/health?next=/../..%2e%2E//a\\b%5c', [200]);
+  await answers('http://example.com/health?next=..', [200]);
+  await answers('/health', [200], undefined, { host: `[::1]:${port}` });
+  assert.ok(JSON.parse((await answers('/.well-known/oauth-protected-resource', [200])).text).resource);
+  assert.ok(JSON.parse((await answers('/openapi.json', [200])).text).openapi);
+  await answers('/v1/me', [401], 'AUTH_REQUIRED');
+  await answers('/v1/me?path=../..', [401], 'AUTH_REQUIRED');
+  await answers('/i/nope.png', [404], 'NOT_FOUND');
+  await answers(`${F}/%252e%252e`, [401], 'AUTH_REQUIRED');
+  await answers(`${F}/..%2f..`, [401], 'AUTH_REQUIRED');
+  // Pages and files are the dashboard build's, which this fixture may not have: only that the path is let through.
+  for (const path of ['/', '/domains', '/domains/', '/assets/index-abc123.js', '/.hidden', '/..name/x', '/a..b/c.', '/...']) {
+    const reply = await raw('GET', path);
+    assert.ok(reply.status !== 400 && reply.code !== 'INVALID_REQUEST_PATH', `${path}: ${reply.status} ${reply.text.slice(0, 200)}`);
+  }
+
+  // The bypassed path itself still takes mail.
+  const manage = (method: string, path: string, body?: unknown) => http(method, path, MANAGER, body, {}, 10_000, `http://127.0.0.1:${port}`);
+  const domain = `${unique('raw-path')}.example.com`.replaceAll('_', '-');
+  const created = ok(await manage('POST', '/v1/domains', { name: domain, region: REGION }), 201);
+  cleanup(t, async () => { await authDb!.query('DELETE FROM mailbox_domains WHERE name=$1', [domain]); });
+  ok(await manage('POST', `/v1/inbound/domains/${created.id}/enable`, {}), 202);
+  const envelope = { authorization, 'content-type': 'message/rfc822', 'x-nightmail-envelope-from': 'ada@sender.example.org', 'x-nightmail-envelope-to': `me@${domain}` };
+  const message = Buffer.from(`From: ada@sender.example.org\r\nTo: me@${domain}\r\nSubject: Raw path\r\n\r\nStill delivered.\r\n`);
+  const accepted = await raw('POST', `${F}?note=../..`, { ...envelope, 'x-nightmail-message-id': unique('raw-path'), 'content-length': String(message.length) }, message);
+  assert.equal(accepted.status, 202, accepted.text);
+  const unsigned = await raw('POST', F, { 'content-type': 'message/rfc822', 'content-length': String(message.length) }, message);
+  assert.deepEqual([unsigned.status, unsigned.code], [401, 'FORWARD_UNAUTHORIZED']);
+
+  // Past 40 MiB: refused from a declared length alone, and by counting a body that declares none.
+  const limit = 40 * 1024 * 1024;
+  const declared = await raw('POST', F, { ...envelope, 'x-nightmail-message-id': unique('declared'), 'content-length': String(limit + 1) }, 'declared-only');
+  assert.deepEqual([declared.status, declared.code], [413, 'REQUEST_TOO_LARGE'], declared.text);
+  const chunked = await raw('POST', F, { ...envelope, 'x-nightmail-message-id': unique('chunked'), 'transfer-encoding': 'chunked' }, Buffer.alloc(limit + 1, 'x'));
+  assert.deepEqual([chunked.status, chunked.code], [413, 'REQUEST_TOO_LARGE'], chunked.text);
+});
+
+test('self-hosted forwarded mail keeps the staged copy a held recipient still needs after its sibling is stored', async t => {
+  await forwardedHoldFixture(t, async ({ open, waiting, wid, db, post, message, staged, ingest, replay, hold, received }) => {
+    ok(await post('mixed', message('mixed'), `${open.address},${waiting.address}`), 202);
+    await ingest();
+    assert.deepEqual([await received(open), (await hold()).status, staged().length], [1, 'held', 1]);
+    await replay('route');
+    await ingest();
+    const receipt = (await db.query(`SELECT status, error FROM mail_receipts WHERE bucket='local:' AND workspace_id=$1`, [wid])).rows;
+    assert.deepEqual([receipt, await received(waiting), (await hold()).status, staged()], [[{ status: 'processed', error: null }], 1, 'released', []]);
+  });
+});
+
+test('self-hosted forwarded mail deletes a held staged copy when its hold ends and the receipt reads another', async t => {
+  // The later request adds a recipient to the stored receipt, which then reads that request's copy, not the hold's.
+  for (const end of ['expire', 'release', 'release-after-ingest', 'expire-without-receipt'] as const) await t.test(end, async t => {
+    await forwardedHoldFixture(t, async ({ open, second, waiting, also, post, message, staged, ingest, replay, hold, received, objects }) => {
+      const raw = message(end);
+      if (end === 'expire-without-receipt') {
+        ok(await post(end, raw, waiting.address), 202);
+        assert.equal(staged().length, 1);
+        await replay('expire');
+        assert.deepEqual([(await hold()).status, staged()], ['failed', []]);
+        return;
+      }
+      ok(await post(end, raw, `${open.address},${waiting.address}`), 202);
+      await ingest();
+      const heldKey = (await hold()).key as string;
+      // A later request for another recipient stages its own copy.
+      ok(await post(end, raw, second.address), 202);
+      assert.equal(staged().length, 2);
+      if (end === 'release-after-ingest') await ingest();
+      await replay(end === 'expire' ? 'expire' : 'route');
+      assert.equal((await hold()).status, end === 'expire' ? 'failed' : 'released');
+      // Replaying onto a stored receipt reopens it on the hold's copy, which then has to stay until ingest.
+      assert.equal(objects.has(heldKey), end === 'release-after-ingest');
+      assert.equal(staged().length, 1);
+      await ingest();
+      assert.deepEqual([await received(open), await received(second), await received(waiting), await received(also), staged()], [1, 1, end === 'expire' ? 0 : 1, 0, []]);
+    });
+  });
+});
+
+test('self-hosted forwarded mail refuses other bytes under an ID that is only held, and the hold keeps its own', async t => {
+  await forwardedHoldFixture(t, async ({ open, waiting, also, wid, db, post, message, staged, ingest, replay, hold, received }) => {
+    const raw = message('accepted');
+    ok(await post('only-held', raw, waiting.address), 202);
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM mail_receipts WHERE bucket='local:' AND workspace_id=$1`, [wid])).rows[0].n, 0);
+    const accepted = await hold();
+    for (const to of [waiting.address, `${waiting.address},${also.address}`, open.address])
+      error(await post('only-held', message('swapped'), to), 409, 'FORWARD_MESSAGE_CHANGED');
+    await ingest();
+    assert.deepEqual([await hold(), staged()], [accepted, [accepted.key]]);
+    ok(await post('only-held', raw, also.address), 202);
+    await ingest();
+    assert.deepEqual([await hold(), staged()], [{ ...accepted, recipients: [also.address, waiting.address].sort() }, [accepted.key]]);
+    await replay('route');
+    await ingest();
+    assert.deepEqual([await received(waiting), await received(also), staged()], [1, 1, []]);
+  });
+});
+
+test('self-hosted forwarded mail queues no deletion for a receipt or hold without a staged key', async t => {
+  await forwardedHoldFixture(t, async ({ open, waiting, wid, db, post, message, replay, hold, deletions }) => {
+    ok(await post('keyless', message('keyless'), `${open.address},${waiting.address}`), 202);
+    for (const [table, owner] of [['mail_receipts', 'workspace_id'], ['mail_receipt_holds', 'binding_workspace']]) await db.query(`UPDATE ${table} SET notification=notification-'stagingKey' WHERE bucket='local:' AND ${owner}=$1`, [wid]);
+    await db.query(`UPDATE mail_receipts SET status='processed' WHERE bucket='local:' AND workspace_id=$1`, [wid]);
+    assert.deepEqual(await deletions(), []);
+    await replay('expire');
+    assert.equal((await hold()).status, 'failed');
+    assert.deepEqual(await deletions(), []);
+  });
+});
 
 // Review of #52 (P1): the tear host accepted any URL whose authority was loopback, though
 // node-postgres lets query parameters redirect it, and never established that the database was

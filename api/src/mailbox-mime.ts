@@ -75,8 +75,16 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
 
 export type RawObjectHead = { size: number; etag: string };
 
+/** A forwarded message's staged bytes (inbound-forward.ts), in the runtime's own object storage: no S3 object to head or range. */
+async function readForwardedRaw(objects: MailObjects, source: string) {
+  const body = await objects.get(source);
+  if (!body) throw new ApiError(404, 'RAW_MESSAGE_MISSING', 'The staging object is missing.');
+  return Buffer.from(await new Response(body).arrayBuffer());
+}
+
 /** Inspect staging object size and ETag before reserving byte budget or reading bytes. */
-export async function headWorkspaceRaw(client: S3Client, bucket: string, source: string, etag?: string): Promise<RawObjectHead> {
+export async function headWorkspaceRaw(client: S3Client, bucket: string, source: string, etag?: string, objects?: MailObjects): Promise<RawObjectHead> {
+  if (bucket === 'local:' && objects) return { size: (await readForwardedRaw(objects, source)).length, etag: '' };
   const { HeadObjectCommand } = await loadS3Commands();
   const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: source }));
   if (head.ContentLength === undefined || !head.ETag) throw new Error('Raw message metadata unavailable');
@@ -87,6 +95,11 @@ export async function headWorkspaceRaw(client: S3Client, bucket: string, source:
 
 /** Read, scrub blind headers, and store an already-inspected and byte-reserved staging object. */
 export async function transferWorkspaceRaw(client: S3Client, region: string, bucket: string, source: string, key: string, recipients: string[], kind: 'raw' | 'legacy-raw' | 'kept', head: RawObjectHead, objects?: MailObjects) {
+  if (bucket === 'local:' && objects) {
+    const original = await readForwardedRaw(objects, source), bytes = workspaceMime(original, region, recipients), large = original.length > PARSE_LIMIT;
+    await objects.put(key, bytes, 'message/rfc822');
+    return { bytes: large ? bytes.subarray(0, PREFIX) : bytes, sizeBytes: bytes.length, large };
+  }
   const { GetObjectCommand, PutObjectCommand, CopyObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, UploadPartCopyCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = await loadS3Commands();
   const location = { Bucket: bucket, Key: source };
   const size = head.size;
@@ -137,7 +150,7 @@ export async function transferWorkspaceRaw(client: S3Client, region: string, buc
 
 /** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
 export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw'|'kept',etag?:string,reserve?:(bytes:number)=>Promise<void>,objects?:MailObjects) {
-  const head = await headWorkspaceRaw(client, bucket, source, etag);
+  const head = await headWorkspaceRaw(client, bucket, source, etag, objects);
   await reserve?.(head.size); // Before GET, copy, MIME or attachment work. Idempotent by receipt.
   return transferWorkspaceRaw(client, region, bucket, source, key, recipients, kind, head, objects);
 }

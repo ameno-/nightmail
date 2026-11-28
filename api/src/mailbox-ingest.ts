@@ -17,7 +17,7 @@ import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type 
 import { mailboxS3, STAGING_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
 import { ADDRESS, messageIdListCounted, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import { INBOUND_ADDRESS_ADDR_LIMIT, INBOUND_ADDRESS_NAME_LIMIT, INBOUND_ADDRESS_STORE_LIMIT } from './inbound-bounds.js';
-import type { ReceivedNotification } from './mailbox-receipts.js';
+import { FORWARD_BUCKET, type ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
 import { billed } from './billing/gate.js';
 import type { BillingPosition } from './billing/types.js';
@@ -209,7 +209,7 @@ function parseStructuredField(raw: string): { value: string; params: Map<string,
   }
   return { value, params };
 }
-function rawAutomatedHeaders(raw: Uint8Array): Map<string, string> | null {
+function rawHeaders(raw: Uint8Array, wanted: ReadonlySet<string>): Map<string, string> | null {
   const out = new Map<string, string>();
   const head = raw.subarray(0, Math.min(raw.byteLength, RAW_HEADER_SCAN_LIMIT));
   let pos = 0, ended = false, capped = false;
@@ -238,7 +238,7 @@ function rawAutomatedHeaders(raw: Uint8Array): Map<string, string> | null {
       key += String.fromCharCode(b >= 65 && b <= 90 ? b + 32 : b);
       k++;
     }
-    if (!AUTOMATED_HEADERS.has(key) || out.has(key)) continue;
+    if (!wanted.has(key) || out.has(key)) continue;
     while (k < pos) {
       if (head[k] === 32 || head[k] === 9 || head[k] === 10) { k++; continue; }
       if (head[k] === 13) {
@@ -268,7 +268,7 @@ function rawAutomatedHeaders(raw: Uint8Array): Map<string, string> | null {
 function automated(email: Email | null, raw: Uint8Array, from: string) {
   let fallback: Map<string, string> | null = null;
   if (!email) {
-    fallback = rawAutomatedHeaders(raw);
+    fallback = rawHeaders(raw, AUTOMATED_HEADERS);
     if (!fallback) {
       log('warn', { code: 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE', count: ++incompleteAutomatedHeaderScans });
       return false;
@@ -294,6 +294,13 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
   if ((auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto[-_]reply)$/.test(precedence) || !!xAutoreply || !!xAutorespond || daemonSender || report) return true;
   if (parsedCapped) log('warn', { code: 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE', count: ++incompleteAutomatedHeaderScans });
   return false;
+}
+const ENVELOPE_HEADERS = new Set(['from', 'subject', 'message-id']);
+/** SES sends these three fields with its notification (commonHeaders), which is all an unparsed message has of its headers.
+ * A forwarder sends none, so they are read from the header block, however large the body, and decoded as the parser would. */
+function forwardedCommonHeaders(raw: Uint8Array) {
+  const found = rawHeaders(raw, ENVELOPE_HEADERS), from = found?.get('from'), subject = found?.get('subject');
+  return { from: from ? [from] : undefined, subject: subject && decodeWords(subject), messageId: found?.get('message-id') };
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 const HEADER_LINES = 256, MIME_DEPTH = 12, MIME_PARSE_MS = 1000;
@@ -493,7 +500,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   if(receipt.delivery?.drop)return settleRetiredReceipt(runtime,job,sesMessageId,receipt.recipients);
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,receipt.binding);
-  const sourceKey=(receipt.objectKey.startsWith(HELD_PREFIX)?HELD_PREFIX:!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
+  const sourceKey=receipt.bucket===FORWARD_BUCKET?notification.stagingKey!:(receipt.objectKey.startsWith(HELD_PREFIX)?HELD_PREFIX:!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam=verdicts.spam!=='PASS';
@@ -580,10 +587,12 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const rawMs=performance.now()-readStarted,{bytes:raw,sizeBytes}=copied;
   const email = copied.large ? null : await parseInboundMime(raw);
   const status = email ? 'received' : 'unparsed';
-  const common = notification.mail?.commonHeaders ?? {};
+  const forwarded = !email && receipt.bucket === FORWARD_BUCKET;
+  const common = (forwarded ? forwardedCommonHeaders(raw) : notification.mail?.commonHeaders) ?? {};
 
   const commonFrom = common.from?.[0] && withinFieldLimit(common.from[0]) ? flatten(addressParser(common.from[0]))[0] : undefined;
-  const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
+  // SES's From gives only the address here; a forwarded message's keeps its display name too.
+  const from = flatten(email?.from)[0] ?? (forwarded ? commonFrom : undefined) ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
   const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
   const inReplyTo = normalizeMessageId(email?.inReplyTo);
   const refs = messageIdListCounted(email?.references);
@@ -828,7 +837,7 @@ async function ingestBatch(runtime: Runtime, items: JobBatchItem[]): Promise<Job
           continue;
         }
         const notification = receipt.notification as ReceivedNotification;
-        const sourceKey = (receipt.objectKey.startsWith(HELD_PREFIX) ? HELD_PREFIX : !runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/')) ? 'raw/' : STAGING_PREFIX) + st.sesMessageId;
+        const sourceKey = receipt.bucket === FORWARD_BUCKET ? notification.stagingKey! : (receipt.objectKey.startsWith(HELD_PREFIX) ? HELD_PREFIX : !runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/')) ? 'raw/' : STAGING_PREFIX) + st.sesMessageId;
         const messageRowId = `msg_${(await digest(`${workspaceId}:${st.sesMessageId}`)).slice(0, 32)}`;
         const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
         const spam = verdicts.spam !== 'PASS';
@@ -892,7 +901,7 @@ async function ingestBatch(runtime: Runtime, items: JobBatchItem[]): Promise<Job
       const t0 = performance.now();
       try {
         const s3 = await getS3(st.receipt!);
-        const head = await headWorkspaceRaw(s3, st.receipt!.bucket, st.sourceKey!, st.receipt!.notification.stagingEtag as string | undefined);
+        const head = await headWorkspaceRaw(s3, st.receipt!.bucket, st.sourceKey!, st.receipt!.notification.stagingEtag as string | undefined, st.store!.r2 ? st.store!.objects : undefined);
         const bytes = Math.min(PARSE_LIMIT, Math.max(128 * 1024, head.size));
         if (mimeBytes + bytes > PARSE_LIMIT) throw new JobDeferred(new Date(Date.now() + 2000).toISOString());
         mimeBytes += bytes;
@@ -970,9 +979,10 @@ async function ingestBatch(runtime: Runtime, items: JobBatchItem[]): Promise<Job
         const { bytes: raw, sizeBytes } = copied;
         const email = copied.large ? null : await parseInboundMime(raw);
         const status = email ? 'received' : 'unparsed';
-        const notification = st.notification!, common = notification.mail?.commonHeaders ?? {};
+        const notification = st.notification!, forwarded = !email && receipt.bucket === FORWARD_BUCKET;
+        const common = (forwarded ? forwardedCommonHeaders(raw) : notification.mail?.commonHeaders) ?? {};
         const commonFrom = common.from?.[0] && withinFieldLimit(common.from[0]) ? flatten(addressParser(common.from[0]))[0] : undefined;
-        const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
+        const from = flatten(email?.from)[0] ?? (forwarded ? commonFrom : undefined) ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
         const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
         const inReplyTo = normalizeMessageId(email?.inReplyTo);
         const refs = messageIdListCounted(email?.references);

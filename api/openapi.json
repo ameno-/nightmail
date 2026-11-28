@@ -12283,6 +12283,33 @@
         ],
         "additionalProperties": false
       },
+      "ForwardedMailAccepted": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "This ID was already accepted for these recipients: nothing new was stored."
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The envelope recipients on a receiving domain. Others are ignored."
+          }
+        },
+        "required": [
+          "accepted",
+          "duplicate",
+          "recipients"
+        ]
+      },
       "RoutingConfig": {
         "type": "object",
         "properties": {
@@ -45430,6 +45457,156 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request PUT \\\n  --url 'https://nightmail.dev/v1/regions/us-east-1/auto-validation' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"stream\": \"transactional\",\n  \"mode\": \"off\",\n  \"confirm\": true\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/events/forwarded-mail": {
+      "post": {
+        "operationId": "receiveForwardedMail",
+        "tags": [
+          "Events"
+        ],
+        "security": [],
+        "summary": "Receive forwarded mail",
+        "description": "Self-hosted only, with MAIL_FORWARDER_SECRET set: a trusted mail forwarder posts one raw RFC 5322 message (at most 40 MiB) with its envelope, authenticated by Authorization: Bearer <MAIL_FORWARDER_SECRET>. Headers: X-Nightmail-Message-Id, the forwarder's own ID for this delivery (1 to 512 characters; repeating it stores nothing new, and it adds recipients only with the same bytes, or fails with FORWARD_MESSAGE_CHANGED); X-Nightmail-Envelope-From, the envelope sender (empty for a bounce); X-Nightmail-Envelope-To, 1 to 200 comma-separated envelope recipients. Recipients that are not on a receiving domain are ignored; if none is, the request fails with FORWARD_RECIPIENT_UNKNOWN and nothing is stored. No SPF, DKIM, DMARC, spam or virus check runs: the forwarder is trusted to screen mail.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "message/rfc822": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForwardedMailAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "access": "public",
+          "text": "Needs no credential."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { receiveForwardedMail } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await receiveForwardedMail({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/events/forwarded-mail' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
           }
         ]
       }

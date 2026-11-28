@@ -58,6 +58,7 @@ const SKIP: Partial<Record<Op,string>> = destructive ? {
   receiveSesSnsEvent: 'AWS-signed ingress only. Verified indirectly by real deliveries and feedback; never forge SNS.',
   receiveCloudFormationSnsEvent: 'AWS-signed ingress from connected accounts\' stacks only; never forge SNS.',
 } : safeModeSkips;
+SKIP.receiveForwardedMail='Self-hosted only, behind a mail forwarder secret this deployment does not set; covered by isolated acceptance.';
 SKIP.updateInboundScanPolicy='Changes a shared workspace-wide quarantine policy; covered by isolated acceptance.';
 // The audit trail's customer view and contacting support: a Google dashboard session. The isolated acceptance suite
 // covers them, including the 403 every customer credential gets.

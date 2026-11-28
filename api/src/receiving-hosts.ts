@@ -42,14 +42,16 @@ export function hostName(name: string, domain: string) {
 
 type ClaimFacts = Pick<HostedDomain, 'receiving_state' | 'receiving_host' | 'receiving_lost_since' | 'identity'> & Partial<Pick<HostedDomain, 'receiving_setup'>>;
 /** One host as the API shows it. Hosted, `claim` keeps the domain's own row's issue and the primary host's MX grace, as every Worker writes them. */
-export function hostView(row: Row, addressCount: number, claim?: ClaimFacts | null) {
+export function hostView(row: Row, addressCount: number, claim?: ClaimFacts | null, forwarded?: boolean) {
   const host = row.receivingHost ?? row.name, own = row.parentId === null;
   const issue: ReceivingIssue | null = removed(row.status) ? null : own && claim ? (claim.identity?.issue?.host === host ? claim.identity.issue : null) : row.issue;
   const lost = row.status === 'active' && !!(claim ? hostGraceStart(claim, { host, lost_since: row.lostSince }) : row.lostSince);
   // Hosted, the domain's own host is pending while the setup enableInboundDomain asked for runs, and failed if it gave up.
   const failed = row.status === 'failed' || (own && row.status === 'waiting_for_mx' && claim?.receiving_setup?.status === 'failed');
   const status: HostStatusView = removed(row.status) ? 'removed' : failed ? 'failed' : row.status !== 'active' ? 'pending' : lost ? 'lost' : row.mx?.state === 'mixed' ? 'mixed' : 'active';
-  return { id: row.id, domainId: row.domainId, name: host, status, catchAll: row.catchAll, dns: [expectedMx(host, row.region)], mx: row.mx ?? null, issue, addressCount, metadata: row.metadata,
+  // A forwarded host's MX is the forwarder's to set (inbound-forward.ts), so none is listed.
+  return { id: row.id, domainId: row.domainId, name: host, status, catchAll: row.catchAll,
+    dns: forwarded ? [] : [expectedMx(host, row.region)], mx: row.mx ?? null, issue, addressCount, metadata: row.metadata,
     createdAt: new Date(row.createdAt).toISOString(), updatedAt: new Date(row.updatedAt).toISOString() };
 }
 export type HostView = ReturnType<typeof hostView>;
@@ -66,13 +68,13 @@ export async function hostRows(db: DbExecutor, workspaceId: string, domainId: st
   const query = db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), sql`(${mailboxDomains.domainId}=${domainId} OR ${mailboxDomains.parentId} IN (SELECT o.id FROM mailbox_domains o WHERE o.workspace_id=${workspaceId} AND o.domain_id=${domainId} AND o.parent_id IS NULL))`)).orderBy(sql`${mailboxDomains.parentId} IS NOT NULL`, asc(mailboxDomains.createdAt), asc(mailboxDomains.id));
   return lock ? query.for('update') : query;
 }
-async function views(db: DbExecutor, rows: Row[], claim?: ClaimFacts | null) {
+async function views(db: DbExecutor, rows: Row[], claim?: ClaimFacts | null, forwarded?: boolean) {
   const counts = rows.length ? await db.select({ domainId: mailboxes.domainId, count: sql<number>`count(*)::int` }).from(mailboxes).where(inArray(mailboxes.domainId, rows.map(row => row.id))).groupBy(mailboxes.domainId) : [];
-  return rows.map(row => hostView(row, counts.find(item => item.domainId === row.id)?.count ?? 0, claim));
+  return rows.map(row => hostView(row, counts.find(item => item.domainId === row.id)?.count ?? 0, claim, forwarded));
 }
 export async function listHosts(c: Ctx, domain: Pick<Domain, 'id' | 'workspaceId'>, only?: string) {
   const claim = c.env.config.multiTenant ? await hostedDomain(c.env.db, domain.workspaceId, domain.id) : null;
-  return views(c.env.db, (await hostRows(c.env.db, domain.workspaceId, domain.id)).filter(row => !only || row.id === only), claim);
+  return views(c.env.db, (await hostRows(c.env.db, domain.workspaceId, domain.id)).filter(row => !only || row.id === only), claim, !!c.env.config.mailForwarderSecret);
 }
 
 const saveProjection = (db: DbExecutor, claim: HostedDomain, wid: string, rows: Row[]) => {
@@ -208,15 +210,15 @@ async function addSelfHosted(c: Ctx, wid: string, domain: Domain, input: AddInpu
   const host = hostName(input.name, domain.name);
   const [own] = (await hostRows(c.env.db, wid, domain.id)).filter(r => r.parentId === null);
   if (!own || !['provisioning', 'waiting_for_mx', 'active'].includes(own.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Enable receiving for ${domain.name} before adding hosts.`);
-  if (host === domain.name) return { view: (await views(c.env.db, [own]))[0]!, created: false };
-  const mx = await checkMx(host, own.region);
+  if (host === domain.name) return { view: (await views(c.env.db, [own], null, !!c.env.config.mailForwarderSecret))[0]!, created: false };
+  const mx = c.env.config.mailForwarderSecret ? null : await checkMx(host, own.region);
   const result = await c.env.db.transaction(async tx => {
     // One lock per domain row keeps accept_subdomains consistent with its active hosts.
     const [fresh] = await tx.select({ acceptSubdomains: mailboxDomains.acceptSubdomains }).from(mailboxDomains).where(eq(mailboxDomains.id, own.id)).for('no key update');
     const [existing] = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, wid), eq(mailboxDomains.name, host)));
     if (existing && existing.parentId === own.id && existing.status === 'active') return { row: existing, created: false };
     if (existing && (existing.parentId !== own.id || existing.status === 'active')) throw new ApiError(409, 'SUBDOMAIN_EXISTS', `${host} already receives mail.`, 'name');
-    const now = new Date().toISOString(), values = { status: 'active' as const, catchAll: input.catchAll ?? 'store', metadata: input.metadata ?? {}, mx, checkedAt: mx.checkedAt, lastError: null, enabledAt: now, updatedAt: now };
+    const now = new Date().toISOString(), values = { status: 'active' as const, catchAll: input.catchAll ?? 'store', metadata: input.metadata ?? {}, mx, checkedAt: mx?.checkedAt, lastError: null, enabledAt: now, updatedAt: now };
     const [saved] = existing
       ? await tx.update(mailboxDomains).set({ ...values, catchAll: input.catchAll ?? existing.catchAll, metadata: input.metadata ?? existing.metadata }).where(eq(mailboxDomains.id, existing.id)).returning()
       : await tx.insert(mailboxDomains).values({ id: id('mdom'), workspaceId: wid, domainId: own.domainId, parentId: own.id, name: host, region: own.region, ...values, createdAt: addedAt }).returning();
@@ -227,7 +229,7 @@ async function addSelfHosted(c: Ctx, wid: string, domain: Domain, input: AddInpu
     await recordAudit(tx, c, { action: 'inbound_host.create', workspaceId: wid, target: { type: 'inbound_host', id: saved!.id }, after: { domainId: domain.id, name: host, catchAll: saved!.catchAll, restored: !!existing } });
     return { row: saved!, created: true };
   });
-  return { view: (await views(c.env.db, [result.row]))[0]!, created: result.created };
+  return { view: (await views(c.env.db, [result.row], null, !!c.env.config.mailForwarderSecret))[0]!, created: result.created };
 }
 
 export async function addHost(c: Ctx, domain: Domain, input: AddInput) {
@@ -299,7 +301,7 @@ export async function removeHost(c: Ctx, domain: Domain, hostId: string) {
     await recordAudit(db, c, { action: 'inbound_host.delete', workspaceId: wid, target: { type: 'inbound_host', id: row.id }, before: { domainId: domain.id, name: row.receivingHost ?? row.name, status: row.status } });
     return saved;
   });
-  return (await views(c.env.db, [result], c.env.config.multiTenant ? await hostedDomain(c.env.db, wid, domain.id) : null))[0]!;
+  return (await views(c.env.db, [result], c.env.config.multiTenant ? await hostedDomain(c.env.db, wid, domain.id) : null, !!c.env.config.mailForwarderSecret))[0]!;
 }
 
 export async function updateHost(c: Ctx, domain: Domain, hostId: string, input: { catchAll?: CatchAll; metadata?: Record<string, unknown> }) {
@@ -311,5 +313,5 @@ export async function updateHost(c: Ctx, domain: Domain, hostId: string, input: 
     await recordAudit(db, c, { action: 'inbound_host.update', workspaceId: wid, target: { type: 'inbound_host', id: row.id }, details: { fields: Object.keys(input) }, before: { catchAll: row.catchAll }, after: { name: row.receivingHost ?? row.name, catchAll: input.catchAll } });
     return updated!;
   });
-  return (await views(c.env.db, [saved], c.env.config.multiTenant ? await hostedDomain(c.env.db, wid, domain.id) : null))[0]!;
+  return (await views(c.env.db, [saved], c.env.config.multiTenant ? await hostedDomain(c.env.db, wid, domain.id) : null, !!c.env.config.mailForwarderSecret))[0]!;
 }

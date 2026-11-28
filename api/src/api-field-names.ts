@@ -255,6 +255,7 @@ export const API_FIELD_NAMES: readonly string[] = [
   "domains",
   "draft",
   "dropped",
+  "duplicate",
   "durationMs",
   "eligible",
   "email",

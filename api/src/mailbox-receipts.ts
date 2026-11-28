@@ -7,6 +7,8 @@ import { builtinApex } from './builtin-limits.js';
 import {TAG_PREFIX} from './resource-tags.js';
 
 export type ReceivedNotification = {
+  /** Forwarded mail only (inbound-forward.ts): where its raw bytes wait for ingest. */
+  stagingKey?: string;
   notificationType?: string;
   mail?: { messageId?: string; timestamp?: string; source?: string; destination?: string[]; commonHeaders?: { from?: string[]; to?: string[]; subject?: string; messageId?: string; date?: string } };
   receipt?: { timestamp?: string; recipients?: string[]; spamVerdict?: { status?: string }; virusVerdict?: { status?: string }; spfVerdict?: { status?: string }; dkimVerdict?: { status?: string }; dmarcVerdict?: { status?: string };
@@ -59,7 +61,10 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
     SELECT g.workspace_id,s.mid,s.region,s.bucket,'workspaces/'||g.workspace_id||'/raw/'||s.mid||'.eml',g.recipients,s.notification FROM groups g JOIN source s USING(bucket,mid) ORDER BY g.workspace_id,s.mid
     ON CONFLICT(workspace_id,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a)),status=CASE WHEN r.status='held' THEN 'held' ELSE 'pending' END,processed_at=NULL,
       -- A processed receipt reopened for new recipients is not in recovery: its job gets a full retry sequence (205).
-      last_recovered_at=CASE WHEN r.status='processed' THEN NULL ELSE r.last_recovered_at END
+      last_recovered_at=CASE WHEN r.status='processed' THEN NULL ELSE r.last_recovered_at END,
+      -- A processed forwarded receipt's staged bytes are gone (591), so the reopen reads the new request's copy. An
+      -- unsettled one keeps reading the copy it has.
+      notification=CASE WHEN r.bucket='local:' AND r.status='processed' THEN jsonb_set(r.notification,'{stagingKey}',excluded.notification->'stagingKey') ELSE r.notification END
     WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients
       AND (SELECT count(DISTINCT a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a))<=200 RETURNING workspace_id,ses_message_id,status
   ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM receipts WHERE status='pending' ORDER BY workspace_id,ses_message_id RETURNING 1),
@@ -75,7 +80,8 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
     WHERE h.bucket=s.bucket AND h.ses_message_id=s.mid RETURNING 1` : sql`INSERT INTO mail_receipt_holds AS h(bucket,ses_message_id,region,topic_arn,binding_workspace,received_at,expires_at,notification,recipients,owners)
     SELECT b.bucket,b.mid,b.region,b.topic_arn,b.wid,b.at,b.expires_at,b.notification,u.recipients,u.owners FROM bound b JOIN unmatched u USING(bucket,mid)
     ON CONFLICT(bucket,ses_message_id) DO UPDATE SET recipients=(SELECT jsonb_agg(DISTINCT a ORDER BY a) FROM jsonb_array_elements_text(h.recipients||excluded.recipients) v(a)),
-      notification=CASE WHEN excluded.notification ? 'stagingEtag' THEN h.notification ELSE excluded.notification END,owners=excluded.owners||h.owners,status='held'
+      -- A held forwarded hold keeps the copy it was accepted with. A settled one's may be deleted, so it takes the new request's.
+      notification=CASE WHEN excluded.notification ? 'stagingEtag' OR (h.bucket='local:' AND h.status='held') THEN h.notification ELSE excluded.notification END,owners=excluded.owners||h.owners,status='held'
     WHERE h.binding_workspace IS NOT DISTINCT FROM excluded.binding_workspace AND h.topic_arn=excluded.topic_arn AND h.expires_at>now() AND NOT h.recipients @> excluded.recipients RETURNING 1`})
   ${replay?sql``:sql`, ignored AS (INSERT INTO mail_ignored_staging(bucket,ses_message_id) SELECT b.bucket,b.mid FROM bound b WHERE NOT EXISTS(SELECT FROM groups) AND NOT EXISTS(SELECT FROM unmatched) ON CONFLICT DO NOTHING)`}
   SELECT EXISTS(SELECT FROM bound) AS trusted,(SELECT count(*)::int FROM queued) AS n,(SELECT count(*)::int FROM held) AS held,(SELECT count(*)::int FROM source) AS seen`);
@@ -103,6 +109,21 @@ export async function acceptInboundNotification(runtime:Runtime,input:{topicArn:
     least(now(),${at}::timestamptz)+interval '48 hours' AS expires_at,${mailJson(metadata)}::jsonb AS notification,${mailJson(recipients)}::jsonb AS recipients,${!!orphan}::boolean AS fenced,${orphan?.bindingWorkspace??null}::text AS binding_workspace`,false);
   if(!r.trusted) throw new ApiError(403,'MAILBOX_NOTIFICATION_UNTRUSTED','Unknown receiving account, topic or bucket.');
   if(r.held) log('warn',{code:'MAILBOX_NOTIFICATION_UNROUTED_HOST',region:input.region});
+  return r.n;
+}
+
+/** Self-hosted receiving without SES: a `mailbox_regions` row with bucket `local:` marks it, and its raw mail lives in the
+ * runtime's object storage. */
+export const FORWARD_BUCKET='local:', FORWARD_TOPIC='local:forwarder';
+/** A trusted forwarder's message (inbound-forward.ts), already staged in object storage. No SPF, DKIM or DMARC result comes
+ * with it, so none is recorded. No spam or virus scan runs here either: both are recorded as PASS because the operator's
+ * forwarder is trusted to screen mail, and anything else would quarantine every message. */
+export async function acceptForwardedReceipt(runtime:Runtime,input:{mid:string;sender:string;recipients:string[];stagingKey:string;sha256:string}) {
+  const at=new Date().toISOString();
+  const notification={mail:{source:input.sender,timestamp:at},receipt:{timestamp:at,spamVerdict:{status:'PASS'},virusVerdict:{status:'PASS'}},stagingKey:input.stagingKey,sha256:input.sha256};
+  const r=await route(runtime,sql`SELECT ${FORWARD_BUCKET}::text AS bucket,${input.mid}::text AS mid,${runtime.config.regions[0]}::text AS region,${FORWARD_TOPIC}::text AS topic_arn,${at}::timestamptz AS at,
+    ${at}::timestamptz+interval '48 hours' AS expires_at,${mailJson(notification)}::jsonb AS notification,${mailJson(input.recipients)}::jsonb AS recipients,false AS fenced,NULL::text AS binding_workspace`,false);
+  if(!r.trusted) throw new ApiError(409,'FORWARD_RECEIVING_OFF','Turn receiving on for a domain first: POST /v1/inbound/domains/{id}/enable.');
   return r.n;
 }
 

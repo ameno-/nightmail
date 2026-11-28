@@ -157,6 +157,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `discoverRegion` | `regions` · `discover` · admin |
 | `provisionRegion` | `regions` · `provision` · admin |
 | `configureRegionAutoValidation` | `regions` · `autoValidation` · admin |
+| `receiveForwardedMail` | Authenticated by the mail forwarder's own secret; never an agent call. |
 | `getRouting` | `routing` · `get` · routing |
 | `applyRouting` | `routing` · `apply` · routing |
 | `listRoutes` | `routes` · `list` · routing |

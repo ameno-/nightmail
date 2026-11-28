@@ -5,6 +5,10 @@ WORKDIR /dashboard
 COPY app/package.json app/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY app/ ./
+COPY api/package.json api/bun.lock /api/
+RUN cd /api && bun install --frozen-lockfile
+COPY api/src /api/src
+COPY api/openapi.json /api/openapi.json
 RUN bun run build
 
 FROM bun AS build
